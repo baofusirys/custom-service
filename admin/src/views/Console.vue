@@ -192,7 +192,17 @@ async function refreshStats() {
   } catch {}
 }
 
-let refreshTimer, convsTimer
+// 防抖：WSS 收到非当前会话的新消息会触发 refreshConvs；多条短时间内只触发一次。
+let convsDebounce = null
+function scheduleConvsRefresh() {
+  if (convsDebounce) return
+  convsDebounce = setTimeout(() => {
+    convsDebounce = null
+    refreshConvs()
+  }, 3000)
+}
+
+let convsTimer
 onMounted(async () => {
   await refreshConvs()
   await refreshStats()
@@ -217,22 +227,23 @@ onMounted(async () => {
           })
           nextTick(scrollToBottom)
         } else {
-          refreshConvs()
+          scheduleConvsRefresh()
         }
       } else if (env.type === 'sys') {
-        refreshConvs()
+        scheduleConvsRefresh()
       }
     }
   })
   ws.start()
-  refreshTimer = setInterval(refreshStats, 15000)
-  convsTimer = setInterval(refreshConvs, 20000)
+  // health 不再定时轮询（数据变化主要由 WSS 推送驱动；统计冷数据每 5 分钟刷一次就够）
+  // conv 列表低频兜底，主要靠 WSS 触发刷新
+  convsTimer = setInterval(() => { refreshConvs(); refreshStats() }, 5 * 60 * 1000)
 })
 
 onUnmounted(() => {
   ws?.stop()
-  clearInterval(refreshTimer)
   clearInterval(convsTimer)
+  if (convsDebounce) clearTimeout(convsDebounce)
 })
 </script>
 
