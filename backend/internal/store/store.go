@@ -20,56 +20,59 @@ func New(db *sql.DB) *Store { return &Store{db: db} }
 
 // ============ 数据结构（仅服务端用，外部不需要导出） ============
 
+// 注意：所有结构体字段都带 JSON tag —— Go 默认导出大写字段名，
+// 但前端用小写 snake_case 读，必须显式指定，否则消息内容、发送者等都读不到。
+
 type Visitor struct {
-	ID         string
-	SiteID     string
-	IPCipher   string // 加密的 IP
-	UA         string
-	Country    string
-	City       string
-	Referer    string
-	LastPage   string
-	FirstSeen  time.Time
-	LastSeen   time.Time
-	Identifier string // 客户自填的姓名/邮箱（可空）
+	ID         string    `json:"id"`
+	SiteID     string    `json:"site_id"`
+	IPCipher   string    `json:"-"` // 永不外泄
+	UA         string    `json:"ua"`
+	Country    string    `json:"country"`
+	City       string    `json:"city"`
+	Referer    string    `json:"referer"`
+	LastPage   string    `json:"last_page"`
+	FirstSeen  time.Time `json:"first_seen"`
+	LastSeen   time.Time `json:"last_seen"`
+	Identifier string    `json:"identifier"`
 }
 
 type Conversation struct {
-	ID         string
-	SiteID     string
-	VisitorID  string
-	AgentID    sql.NullInt64
-	Status     string // open / closed
-	UnreadV    int
-	UnreadA    int
-	StartedAt  time.Time
-	UpdatedAt  time.Time
-	ClosedAt   sql.NullTime
+	ID        string        `json:"id"`
+	SiteID    string        `json:"site_id"`
+	VisitorID string        `json:"visitor_id"`
+	AgentID   sql.NullInt64 `json:"agent_id"`
+	Status    string        `json:"status"`
+	UnreadV   int           `json:"unread_visitor"`
+	UnreadA   int           `json:"unread_agent"`
+	StartedAt time.Time     `json:"started_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
+	ClosedAt  sql.NullTime  `json:"closed_at"`
 }
 
 type Message struct {
-	ID         string
-	ConvID     string
-	Sender     string // visitor | agent | sys
-	SenderRef  string // visitorID 或 agentID
-	Content    string
-	MediaURL   sql.NullString
-	MediaKind  sql.NullString
-	MediaName  sql.NullString
-	MediaSize  sql.NullInt64
-	CreatedAt  time.Time
-	DeliveredWS bool // true=已通过 WSS 实时投递；false=未投递（离线落库等待）
+	ID          string         `json:"id"`
+	ConvID      string         `json:"conv_id"`
+	Sender      string         `json:"sender"` // visitor | agent | sys
+	SenderRef   string         `json:"sender_ref"`
+	Content     string         `json:"content"`
+	MediaURL    sql.NullString `json:"media_url,omitempty"`
+	MediaKind   sql.NullString `json:"media_kind,omitempty"`
+	MediaName   sql.NullString `json:"media_name,omitempty"`
+	MediaSize   sql.NullInt64  `json:"media_size,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	DeliveredWS bool           `json:"delivered_ws"`
 }
 
 type Agent struct {
-	ID         int64
-	Username   string
-	PassHash   string
-	Role       string // admin | agent
-	Nickname   string
-	Active     bool
-	CreatedAt  time.Time
-	LastLogin  sql.NullTime
+	ID        int64        `json:"id"`
+	Username  string       `json:"username"`
+	PassHash  string       `json:"-"` // 永不外泄
+	Role      string       `json:"role"`
+	Nickname  string       `json:"nickname"`
+	Active    bool         `json:"active"`
+	CreatedAt time.Time    `json:"created_at"`
+	LastLogin sql.NullTime `json:"last_login"`
 }
 
 // ============ Visitor ============
@@ -326,15 +329,15 @@ func (s *Store) ResetAgentPassword(ctx context.Context, id int64, passHash strin
 // ============ File ============
 
 type FileRecord struct {
-	ID        string
-	ConvID    string
-	UploadBy  string // visitor | agent
-	UploaderRef string
-	Filename  string
-	StoreKey  string
-	Size      int64
-	MIME      string
-	CreatedAt time.Time
+	ID          string    `json:"id"`
+	ConvID      string    `json:"conv_id"`
+	UploadBy    string    `json:"upload_by"`
+	UploaderRef string    `json:"uploader_ref"`
+	Filename    string    `json:"filename"`
+	StoreKey    string    `json:"store_key"`
+	Size        int64     `json:"size"`
+	MIME        string    `json:"mime"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 func (s *Store) InsertFile(ctx context.Context, f *FileRecord) error {
