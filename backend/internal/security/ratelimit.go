@@ -95,7 +95,11 @@ func (r *RateLimiter) AllowWSHandshake(ctx context.Context, ip string, pm int) (
 }
 
 // AllowVisitorMessage 检查单访客消息频率。
+// 约定：pm <= 0 表示「不限制」（用户可在 .env 把 SECURITY_VISITOR_MSG_PM 设为 0 关闭此限流）。
 func (r *RateLimiter) AllowVisitorMessage(ctx context.Context, visitorID string, pm int) (bool, error) {
+	if pm <= 0 {
+		return true, nil
+	}
 	return r.allow(ctx, "rl:vmsg:"+visitorID, pm, time.Minute)
 }
 

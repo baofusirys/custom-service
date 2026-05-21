@@ -268,13 +268,36 @@ func (h *Hub) FanoutToConv(ctx context.Context, e *Envelope) {
 	}
 }
 
+// fanoutLocal 给本节点对应连接投递消息。
+//
+// 两路投递（爷爷需求：客服后台必须能实时看到所有访客的消息，未读 +1 / 会话上浮）：
+//
+//	1. 给 byConv[ConvID] 内的所有连接发（同会话的访客 + 已接管的客服）
+//	2. 给所有在线 agent 发（让没接管该会话的客服也能在左侧列表实时刷未读 / 上浮 / 提醒）
+//
+// 用 ConnID 去重，保证同一连接只收到一份。
+//
+// typing / read 这类轻量消息不广播给非会话内的 agent，节省带宽。
 func (h *Hub) fanoutLocal(e *Envelope) {
 	if e.ConvID == "" {
 		return
 	}
+	sent := make(map[string]struct{}, 8)
 	if m, ok := h.byConv.Load(e.ConvID); ok {
 		m.(*sync.Map).Range(func(_, v any) bool {
-			v.(*Client).Send(e)
+			c := v.(*Client)
+			c.Send(e)
+			sent[c.ConnID] = struct{}{}
+			return true
+		})
+	}
+	// 仅 chat 类消息额外广播给所有在线 agent；typing/read 不外溢
+	if e.Type == "chat" {
+		h.agents.Range(func(_, v any) bool {
+			c := v.(*Client)
+			if _, dup := sent[c.ConnID]; !dup {
+				c.Send(e)
+			}
 			return true
 		})
 	}
