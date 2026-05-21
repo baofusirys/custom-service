@@ -62,14 +62,22 @@ type incoming struct {
 	Env    *Envelope
 }
 
-// MessageSink 由 service 层实现：异步持久化 + 离线分发。
+// MessageSink 由 service 层实现。
+//
+// 设计原则（爷爷需求：消息处理顺序 WSS 优先）：
+//   - Preprocess 阶段「同步」：必须先做的限流 + 内容清洗 + 注入检测。
+//     返回 false 表示消息被拒（如限流），Hub 不再广播。
+//   - Persist 阶段「异步」：入库（潜在慢操作）；Hub 先 Fanout 再触发 Persist。
+//     这样实时通道永远不会被 DB 写入拖累，万人秒达的保证。
 type MessageSink interface {
-	OnVisitorMessage(ctx context.Context, e *Envelope, c *Client) error
-	OnAgentMessage(ctx context.Context, e *Envelope, c *Client) error
 	OnVisitorConnect(ctx context.Context, c *Client) error
 	OnVisitorDisconnect(ctx context.Context, c *Client) error
 	OnAgentConnect(ctx context.Context, c *Client) error
 	OnAgentDisconnect(ctx context.Context, c *Client) error
+
+	PreprocessVisitorMessage(ctx context.Context, e *Envelope, c *Client) bool
+	PreprocessAgentMessage(ctx context.Context, e *Envelope, c *Client) bool
+	PersistMessageAsync(e *Envelope, c *Client, sender string)
 }
 
 const broadcastChannel = "cs:bcast"
@@ -214,19 +222,31 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 		c.Send(&Envelope{Type: "pong", ID: e.ID, TS: e.TS, Priority: 0})
 		return
 	case "chat":
+		// ============================================================
+		// 顺序（WSS 优先，爷爷需求）：
+		//   1) Preprocess 同步：限流 + 清洗（必须先做，挡住违规消息）
+		//   2) Fanout 立即广播：实时通道不被 DB 写入拖累
+		//   3) Persist 异步：后台 goroutine 入库
+		// ============================================================
+		var sender string
 		if c.Kind == KindVisitor {
 			e.From = "visitor:" + c.ID
 			e.ConvID = c.ConvID
-			if err := h.sink.OnVisitorMessage(ctx, e, c); err != nil {
-				h.bizLog.Error("sink visitor msg err", zap.Error(err))
+			sender = "visitor"
+			if !h.sink.PreprocessVisitorMessage(ctx, e, c) {
+				return // 被限流或拒绝，不广播也不入库
 			}
 		} else {
 			e.From = "agent:" + c.ID
-			if err := h.sink.OnAgentMessage(ctx, e, c); err != nil {
-				h.bizLog.Error("sink agent msg err", zap.Error(err))
+			sender = "agent"
+			if !h.sink.PreprocessAgentMessage(ctx, e, c) {
+				return
 			}
 		}
+		// 立即广播（实时 WSS 优先）
 		h.FanoutToConv(ctx, e)
+		// 异步入库（不阻塞实时通道）
+		h.sink.PersistMessageAsync(e, c, sender)
 	case "typing", "read":
 		// 仅转发，不落库
 		h.FanoutToConv(ctx, e)
@@ -236,8 +256,12 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 }
 
 // FanoutToConv 给会话内所有成员投递；同时通过 Redis 广播到其他节点。
+//
+// 单节点部署时 Redis 订阅了自己 publish 的频道（环回），
+// 所以必须给消息盖节点 ID，订阅端遇到自己节点的回环要跳过 —— 否则消息会在本节点被广播 2 次。
 func (h *Hub) FanoutToConv(ctx context.Context, e *Envelope) {
 	e.Priority = 0 // 所有实时聊天都走高优队列
+	e.Node = h.cfg.NodeID
 	h.fanoutLocal(e)
 	if h.rdb != nil {
 		_ = h.rdb.Publish(ctx, h.pub, mustJSON(e)).Err()
@@ -269,6 +293,10 @@ func (h *Hub) fanoutFromRedis(ctx context.Context) {
 			var e Envelope
 			if err := fromJSON([]byte(m.Payload), &e); err != nil {
 				h.bizLog.Warn("bad redis bcast", zap.Error(err))
+				continue
+			}
+			// 跳过本节点自己的回环（已经在 FanoutToConv 里 fanoutLocal 过了）
+			if e.Node == h.cfg.NodeID {
 				continue
 			}
 			h.fanoutLocal(&e)

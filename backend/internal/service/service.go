@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"time"
 
 	"go.uber.org/zap"
@@ -61,39 +60,65 @@ func (s *Service) OnAgentDisconnect(ctx context.Context, c *ws.Client) error {
 	return nil
 }
 
-func (s *Service) OnVisitorMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) error {
-	// 1) 频率限流（防访客刷消息）
+// PreprocessVisitorMessage 同步阶段：限流 + 内容清洗 + 注入检测。
+// 返回 false 表示消息被拒（如限流），Hub 不再广播。
+func (s *Service) PreprocessVisitorMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) bool {
 	if ok, _ := s.limiter.AllowVisitorMessage(ctx, c.ID, s.visMsgPM); !ok {
 		s.limiter.RecordViolation(ctx, "visitor:"+c.ID, "visitor_msg_flood", c.ConvID)
 		c.Send(&ws.Envelope{Type: "error", Content: "发送过于频繁，请稍后再试", TS: ws.NowMS()})
-		return errors.New("rate limited")
+		return false
 	}
-	// 2) XSS / SQL 注入嫌疑（防御性上报）
 	if e.Content != "" {
 		if suspicious, pat := security.DetectSQLInjection(e.Content); suspicious {
 			s.limiter.RecordViolation(ctx, "visitor:"+c.ID, "sqli_suspect", pat)
 		}
 		e.Content = security.SanitizeText(e.Content)
 	}
-	// 3) 持久化
-	if e.ConvID == "" {
-		conv, err := s.store.OpenOrGetConversation(ctx, c.SiteID, c.ID)
-		if err != nil {
-			return err
-		}
-		c.ConvID = conv.ID
-		e.ConvID = conv.ID
-	}
-	m := buildMsg(e, "visitor", c.ID)
-	return s.store.InsertMessage(ctx, m)
+	return true
 }
 
-func (s *Service) OnAgentMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) error {
+// PreprocessAgentMessage 同步阶段：内容清洗。
+func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) bool {
 	if e.Content != "" {
 		e.Content = security.SanitizeText(e.Content)
 	}
-	m := buildMsg(e, "agent", c.ID)
-	return s.store.InsertMessage(ctx, m)
+	return true
+}
+
+// PersistMessageAsync 异步阶段：后台 goroutine 入库 + 兜底 conv。
+// 失败只记日志（原始报文已落 raw_ws.log，可重放）。
+func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender string) {
+	// 拷贝出当前 envelope 的快照，避免外部修改影响异步写入
+	snap := *e
+	convID := c.ConvID
+	siteID := c.SiteID
+	clientID := c.ID
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.bizLog.Error("persist_message panic", zap.Any("err", r), zap.String("id", snap.ID))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// 兜底：visitor 首次发消息但 client.ConvID 还没填
+		if convID == "" && sender == "visitor" {
+			conv, err := s.store.OpenOrGetConversation(ctx, siteID, clientID)
+			if err != nil {
+				s.bizLog.Error("persist open conv err", zap.Error(err), zap.String("vid", clientID))
+				return
+			}
+			convID = conv.ID
+			c.ConvID = conv.ID
+			snap.ConvID = conv.ID
+		}
+		snap.ConvID = convID
+		m := buildMsg(&snap, sender, clientID)
+		if err := s.store.InsertMessage(ctx, m); err != nil {
+			s.bizLog.Error("persist insert msg err",
+				zap.Error(err), zap.String("id", snap.ID), zap.String("conv", convID))
+		}
+	}()
 }
 
 // ============ HTTP 业务方法（暴露给 handler） ============

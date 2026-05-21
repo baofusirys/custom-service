@@ -29,6 +29,9 @@ type Envelope struct {
 	MediaSize int64       `json:"msize,omitempty"`      // 字节
 	TS        int64       `json:"ts,omitempty"`         // 毫秒时间戳（北京时间转 UTC ms）
 	Priority  int         `json:"prio,omitempty"`       // 0 最高 / 1 次之
+	// Node 标记消息来源节点 ID。FanoutToConv 时盖上本节点 ID；
+	// fanoutFromRedis 收到自己节点的回环消息时跳过，避免单节点部署的"广播两次"。
+	Node      string      `json:"node,omitempty"`
 	Extra     interface{} `json:"extra,omitempty"`
 }
 

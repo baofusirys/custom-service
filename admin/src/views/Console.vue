@@ -212,12 +212,16 @@ onMounted(async () => {
     token: session.token,
     onMessage: (env) => {
       if (env.type === 'chat') {
-        if (activeConv.value && env.conv === activeConv.value.id) {
-          // 回声去重：服务端会把客服自己发的消息也回推
-          if (env.from && env.from.startsWith('agent:') && String(env.from.split(':')[1]) === String(session.agent?.id)) return
+        // 自己发的回声：服务端会把客服自己发的消息也回推；本地已乐观渲染，跳过避免重复
+        const fromAgent = env.from && env.from.startsWith('agent:')
+        const isMyOwn = fromAgent && String(env.from.split(':')[1]) === String(session.agent?.id)
+        if (isMyOwn) return
+
+        const inCurrent = activeConv.value && env.conv === activeConv.value.id
+        if (inCurrent) {
           messages.value.push({
             id: env.id,
-            sender: env.from?.startsWith('agent:') ? 'agent' : 'visitor',
+            sender: fromAgent ? 'agent' : 'visitor',
             sender_ref: env.from?.split(':')[1] || '',
             content: env.content || '',
             media_url: env.media ? { String: env.media, Valid: true } : null,
@@ -226,8 +230,24 @@ onMounted(async () => {
             created_at: new Date(env.ts || Date.now()).toISOString()
           })
           nextTick(scrollToBottom)
+          // 当前会话有新消息：静默把未读清零（服务端持久化）
+          http.post(`/agent/conversations/${env.conv}/read`).catch(() => {})
         } else {
-          scheduleConvsRefresh()
+          // 非当前会话的新消息：WSS 实时本地更新未读，0 延迟，不走 HTTP 轮询
+          const conv = convs.value.find(x => x.id === env.conv)
+          if (conv) {
+            conv.unread = (conv.unread || 0) + 1
+            conv.updated_at = new Date(env.ts || Date.now()).toISOString()
+            // 自动上浮到列表顶部（最新活动）
+            const idx = convs.value.indexOf(conv)
+            if (idx > 0) {
+              convs.value.splice(idx, 1)
+              convs.value.unshift(conv)
+            }
+          } else {
+            // 全新访客（不在当前列表）：触发一次防抖刷新
+            scheduleConvsRefresh()
+          }
         }
       } else if (env.type === 'sys') {
         scheduleConvsRefresh()
