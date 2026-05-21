@@ -1,0 +1,22 @@
+# HTTP 入口（80 端口）
+# 如果有 SSL 证书，则把所有 HTTP 重定向到 HTTPS；
+# 如果没有，则直接服务（开发 / 自签场景）。
+
+upstream cs_backend { server backend:8080; keepalive 64; }
+upstream cs_admin   { server admin:80;     keepalive 32; }
+upstream cs_widget  { server widget:80;    keepalive 32; }
+
+server {
+    listen 80;
+    server_name ${DOMAIN};
+
+    # ACME / Let's Encrypt 验证目录（可选；用户可挂 webroot）
+    location /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+
+    # 当有证书时，重定向到 HTTPS（由 ssl.conf 启用 443）；
+    # 没有证书时直接服务（取决于实际部署）。
+    # 这里默认无证书也能用。
+    include /etc/nginx/conf.d/_upstream.inc;
+}

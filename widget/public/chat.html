@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>在线客服</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #fff;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: #303133; }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  header { background: #409EFF; color: #fff; padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; }
+  header .title { font-size: 15px; }
+  header .close { cursor: pointer; opacity: .85; user-select: none; padding: 4px 8px; }
+  header .close:hover { opacity: 1; }
+  #list { flex: 1; overflow-y: auto; padding: 12px; background: #f7f8fa; }
+  .msg { display: flex; margin: 8px 0; }
+  .msg.mine { justify-content: flex-end; }
+  .bubble { max-width: 76%; padding: 8px 12px; border-radius: 8px;
+    word-break: break-word; white-space: pre-wrap; }
+  .msg.mine .bubble { background: #409EFF; color: #fff; }
+  .msg.theirs .bubble { background: #fff; color: #303133; border: 1px solid #e6e6e6; }
+  .meta { font-size: 11px; color: #909399; margin-top: 4px; text-align: right; }
+  .sys { text-align: center; font-size: 12px; color: #909399; margin: 8px 0; }
+  footer { border-top: 1px solid #e6e6e6; padding: 8px; background: #fff; }
+  footer textarea { width: 100%; resize: none; border: 1px solid #dcdfe6; border-radius: 4px;
+    padding: 6px 8px; font: inherit; outline: none; height: 60px; }
+  footer textarea:focus { border-color: #409EFF; }
+  .actions { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+  .btn { background: #409EFF; color: #fff; border: 0; padding: 6px 16px; border-radius: 4px; cursor: pointer; font: inherit; }
+  .btn:hover { background: #66b1ff; }
+  .btn.plain { background: #fff; color: #606266; border: 1px solid #dcdfe6; }
+  .btn.plain:hover { background: #ecf5ff; color: #409EFF; border-color: #c6e2ff; }
+  .img-msg { max-width: 200px; max-height: 200px; border-radius: 4px; cursor: pointer; display: block; }
+  .file-link { color: #409EFF; text-decoration: underline; word-break: break-all; }
+  .msg.mine .file-link { color: #fff; }
+  #status { font-size: 12px; color: #fff; opacity: .85; margin-left: 8px; }
+  .disconnected { color: #fef0f0 !important; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div><span class="title">在线客服</span><span id="status">连接中…</span></div>
+      <span class="close" id="closeBtn">关闭</span>
+    </header>
+    <div id="list"></div>
+    <footer>
+      <textarea id="input" placeholder="请输入您的问题，回车发送，Shift+回车换行"></textarea>
+      <div class="actions">
+        <div>
+          <button class="btn plain" id="fileBtn">附件 / 图片</button>
+          <input type="file" id="fileInput" style="display:none">
+        </div>
+        <button class="btn" id="sendBtn">发送</button>
+      </div>
+    </footer>
+  </div>
+<script>
+(function () {
+  // ====== 解析配置 ======
+  var qs = new URLSearchParams(location.search);
+  var endpoint = qs.get('endpoint') || location.origin;
+  var siteID = qs.get('site') || 'default';
+  var httpBase = endpoint.replace(/^wss?:\/\//, function (m) {
+    return m === 'wss://' ? 'https://' : 'http://';
+  });
+
+  // ====== 本地存储（持续 visitor_id） ======
+  var STORE_KEY = 'cs_visitor_' + siteID;
+  var stored = (function () {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); }
+    catch { return null; }
+  })();
+
+  var visitorID = stored?.visitor_id || '';
+  var convID = '';
+  var token = '';
+  var ws = null;
+  var alive = false;
+  var retry = 0;
+  var unread = 0;
+  var pingTimer = null;
+
+  // ====== DOM ======
+  var listEl = document.getElementById('list');
+  var inputEl = document.getElementById('input');
+  var sendBtn = document.getElementById('sendBtn');
+  var fileBtn = document.getElementById('fileBtn');
+  var fileInput = document.getElementById('fileInput');
+  var statusEl = document.getElementById('status');
+  var closeBtn = document.getElementById('closeBtn');
+
+  closeBtn.onclick = function () {
+    parent.postMessage({ __cs: 1, type: 'close' }, '*');
+  };
+
+  fileBtn.onclick = function () { fileInput.click(); };
+  fileInput.onchange = onPickFile;
+
+  inputEl.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendText();
+    }
+  });
+  sendBtn.onclick = sendText;
+
+  function setStatus(text, ok) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('disconnected', !ok);
+  }
+
+  function fmtTime(ts) {
+    var d = new Date(ts);
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  function escape(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function render(m) {
+    var isMine = m.sender === 'visitor';
+    var d = document.createElement('div');
+    d.className = 'msg ' + (isMine ? 'mine' : 'theirs');
+    var b = document.createElement('div');
+    b.className = 'bubble';
+
+    var mediaURL = m.media_url?.String || m.media_url || m.media || '';
+    var mediaKind = m.media_kind?.String || m.media_kind || m.mkind || '';
+    var mediaName = m.media_name?.String || m.media_name || m.mname || '';
+
+    var html = '';
+    if (mediaURL) {
+      if (mediaKind === 'image') {
+        html += '<img class="img-msg" src="' + httpBase + escape(mediaURL) + '" />';
+      } else {
+        html += '<a class="file-link" target="_blank" href="' + httpBase + escape(mediaURL) + '">' +
+          '附件：' + escape(mediaName || '下载') + '</a>';
+      }
+    }
+    if (m.content) {
+      html += '<div>' + escape(m.content) + '</div>';
+    }
+    html += '<div class="meta">' + fmtTime(m.created_at || m.ts || Date.now()) + '</div>';
+    b.innerHTML = html;
+    d.appendChild(b);
+    listEl.appendChild(d);
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+
+  function renderSys(text) {
+    var d = document.createElement('div');
+    d.className = 'sys';
+    d.textContent = text;
+    listEl.appendChild(d);
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+
+  // ====== 启动：先建立会话拿 token ======
+  async function bootstrap() {
+    try {
+      var resp = await fetch(httpBase + '/api/visitor/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          visitor_id: visitorID,
+          site_id: siteID,
+          referer: document.referrer || '',
+          last_page: parent.location ? parent.location.href : '',
+          ua: navigator.userAgent
+        })
+      });
+      var data = await resp.json();
+      if (data.code !== 0) throw new Error(data.msg || '会话创建失败');
+      visitorID = data.visitor_id;
+      convID = data.conversation;
+      token = data.visitor_token;
+      localStorage.setItem(STORE_KEY, JSON.stringify({ visitor_id: visitorID }));
+      // 拉历史
+      await loadHistory();
+      // 起 WSS
+      connectWS();
+    } catch (e) {
+      setStatus('连接失败，正在重试…', false);
+      setTimeout(bootstrap, 5000);
+    }
+  }
+
+  async function loadHistory() {
+    // 访客视角下没有专属历史接口；我们用 conv 的 messages 接口需要 agent token。
+    // 这里改为：服务端在 hello 后推送最近若干条（v0.1.0 简化做法 —— 由 widget 自己 fetch；
+    // 后续可以加 /api/visitor/conversations/:id/messages 公开接口）。
+    // 当前版本：从 localStorage 取上次离线消息（兜底），重连后继续。
+    try {
+      var cache = JSON.parse(localStorage.getItem(STORE_KEY + '_msgs') || '[]');
+      cache.slice(-30).forEach(render);
+    } catch {}
+  }
+
+  function persistMsg(m) {
+    try {
+      var cache = JSON.parse(localStorage.getItem(STORE_KEY + '_msgs') || '[]');
+      cache.push(m);
+      if (cache.length > 200) cache = cache.slice(-200);
+      localStorage.setItem(STORE_KEY + '_msgs', JSON.stringify(cache));
+    } catch {}
+  }
+
+  function connectWS() {
+    var url = endpoint.replace(/^https?:\/\//, function (m) {
+      return m === 'https://' ? 'wss://' : 'ws://';
+    }) + '/ws/visitor?token=' + encodeURIComponent(token);
+    ws = new WebSocket(url);
+    ws.onopen = function () {
+      alive = true; retry = 0;
+      setStatus('已连接', true);
+      pingTimer = setInterval(function () {
+        if (alive) try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
+      }, 30000);
+    };
+    ws.onmessage = function (ev) {
+      var env;
+      try { env = JSON.parse(ev.data); } catch { return; }
+      if (env.type === 'pong') return;
+      if (env.type === 'hello') {
+        renderSys('您已接入客服，请描述您的问题');
+        return;
+      }
+      if (env.type === 'error') {
+        renderSys('错误：' + (env.content || ''));
+        return;
+      }
+      if (env.type === 'chat') {
+        // 服务端回声会包含自己发的消息，避免重复
+        if (env.from && env.from.indexOf('visitor:') === 0) return;
+        var m = {
+          sender: 'agent',
+          content: env.content || '',
+          media_url: env.media || '',
+          media_kind: env.mkind || '',
+          media_name: env.mname || '',
+          created_at: new Date(env.ts || Date.now()).toISOString()
+        };
+        render(m);
+        persistMsg(m);
+        if (document.visibilityState !== 'visible' || parent !== window) {
+          unread++;
+          parent.postMessage({ __cs: 1, type: 'unread', count: unread }, '*');
+        }
+      }
+    };
+    ws.onclose = function () {
+      alive = false;
+      clearInterval(pingTimer);
+      setStatus('连接已断开，正在重连…', false);
+      var backoff = Math.min(30000, 1000 * Math.pow(1.6, retry++));
+      setTimeout(connectWS, backoff);
+    };
+    ws.onerror = function () { try { ws.close(); } catch {} };
+  }
+
+  function sendText() {
+    var text = inputEl.value.trim();
+    if (!text) return;
+    if (!alive) { setStatus('未连接，请稍候…', false); return; }
+    var env = {
+      type: 'chat', conv: convID, content: text,
+      ts: Date.now(), prio: 0
+    };
+    ws.send(JSON.stringify(env));
+    var m = {
+      sender: 'visitor', content: text,
+      created_at: new Date().toISOString()
+    };
+    render(m); persistMsg(m);
+    inputEl.value = '';
+  }
+
+  async function onPickFile(e) {
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    var fd = new FormData();
+    fd.append('file', file);
+    fd.append('uploader', 'visitor');
+    try {
+      var r = await fetch(httpBase + '/api/upload', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + token },
+        body: fd
+      });
+      var data = await r.json();
+      if (data.code !== 0) throw new Error(data.msg);
+      var env = {
+        type: 'chat', conv: convID, content: '',
+        media: data.url, mkind: data.kind, mname: data.name, msize: data.size,
+        ts: Date.now(), prio: 0
+      };
+      ws.send(JSON.stringify(env));
+      var m = {
+        sender: 'visitor', content: '',
+        media_url: data.url, media_kind: data.kind, media_name: data.name,
+        created_at: new Date().toISOString()
+      };
+      render(m); persistMsg(m);
+    } catch (err) {
+      renderSys('文件发送失败：' + err.message);
+    }
+    e.target.value = '';
+  }
+
+  // 当 iframe 可见，未读清零
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') {
+      unread = 0;
+      parent.postMessage({ __cs: 1, type: 'unread', count: 0 }, '*');
+    }
+  });
+
+  bootstrap();
+})();
+</script>
+</body>
+</html>

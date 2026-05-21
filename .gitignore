@@ -1,0 +1,33 @@
+# 环境与密钥（永远不进库）
+.env
+.env.*
+!.env.example
+
+# 构建产物
+backend/bin/
+backend/tmp/
+admin/dist/
+admin/node_modules/
+widget/dist/
+widget/node_modules/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.iml
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时
+tmp_output.txt
+*.log.local
+*.local
+
+# 数据/上传（这些都应该在仓库外，bind 到 /srv/cs-data/；但保险起见再排除一次）
+data/
+uploads/
+logs/
