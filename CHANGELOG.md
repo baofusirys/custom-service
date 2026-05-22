@@ -4,6 +4,36 @@
 
 ---
 
+## [007] 2026-05-21 17:58 — 测试服超管密码改为 ***REDACTED***
+
+**起因 / 需求**
+爷爷要求把客服工作台的默认密码改成 `***REDACTED***`，方便测试时记忆和输入。
+
+**改了什么 / 加了什么 / 删了什么**（修改 2 个 / 新增 0 个 / 删除 0 个 + 1 次数据库手工操作）
+- 修改：[.env](.env) — `ADMIN_BOOTSTRAP_PASSWORD CsAdmins9cu2Qo5dkVY → ***REDACTED***`。
+- 修改：[LATEST.md](LATEST.md) — 同步更新文档里记录的测试服超管密码。
+- 数据库一次性操作（在测试服 38.76.193.68 执行）：
+  1. `DELETE FROM custom_service.agents WHERE username='admin'` 删掉旧的 admin 行
+  2. `docker compose restart cs-backend` 重启 backend
+  3. backend 启动时 `EnsureBootstrapAdmin` 发现 admin 不存在，按新 .env 的 ***REDACTED*** 创建（bcrypt cost=12）
+
+**为什么不能直接 UPDATE 数据库改密码？**
+密码是 bcrypt 哈希存的，需要 bcrypt 工具生成新哈希。最稳妥的做法是「删行 + 重启 backend 触发自动重建」，复用已有的 EnsureBootstrapAdmin 逻辑，避免临时引入外部 bcrypt 工具。
+
+**为什么 EnsureBootstrapAdmin 这个时候才生效？**
+原代码只在 admin 不存在时创建（避免覆盖现有账号），所以光改 .env 是无效的；必须先把数据库里 admin 行删掉，才能触发"按新密码重建"。
+
+**业务流程对比**
+- 改动前：`admin` / `CsAdmins9cu2Qo5dkVY` 登录。
+- 改动后：`admin` / `***REDACTED***` 登录。
+
+**触发场景与边界 + 验证方式**
+- 验证：curl 用 ***REDACTED*** 登录得到 200 + JWT；用旧密码得到 40105。
+- 边界：***REDACTED*** 是 8 个字符，正好达到 backend 强制的「至少 8 字符」校验线；不再短就过不了 fail-fast。
+- 安全：测试服专用密码，生产环境绝不能用这种弱密码。
+
+---
+
 ## [006] 2026-05-21 17:50 — 修复客服未接管的会话也要看到未读 +1 + 取消访客消息频率限制
 
 **起因 / 需求**

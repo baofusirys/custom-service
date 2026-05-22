@@ -12,7 +12,7 @@
   - 管理后台 http://38.76.193.68/admin/
   - Widget 演示 http://38.76.193.68/widget/demo.html
   - 健康检查 http://38.76.193.68/api/health
-- 超管账号：`admin` / `CsAdmins9cu2Qo5dkVY`（仅测试服，本地 .env 内）
+- 超管账号：`admin` / `***REDACTED***`（仅测试服，本地 .env 内）
 - 状态：6 容器 Up，3 个 healthy，业务通、安全通、日志通
 
 ---
