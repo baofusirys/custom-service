@@ -48,9 +48,43 @@ async function pickConv(c) {
   activeConv.value = c
   await loadMessages(c.id)
   await http.post(`/agent/conversations/${c.id}/assign`)
-  await http.post(`/agent/conversations/${c.id}/read`)
   c.unread = 0
+  // assign 后 agent 已加入 byConv[c.id]，立即发 WSS read：
+  // 触发后端 UpdateLastRead + FanoutToConv 通知访客「客服已读」
+  sendReadAck(c.id)
+  // 本地把所有访客消息直接标 read（自己看到了）
+  for (const m of messages.value) {
+    if (m.sender === 'visitor') m.read = true
+  }
 }
+
+function sendReadAck(convID) {
+  if (ws?.alive && convID) {
+    ws.send({ type: 'read', conv: convID, ts: Date.now() })
+  }
+}
+
+// 标记「自己发过的、created_at <= upToTs 的消息」为已读（被对端读了）
+function markMineReadUpTo(upToTs) {
+  const myID = String(session.agent?.id)
+  for (const m of messages.value) {
+    if (m.read) continue
+    if (m.sender === 'agent' && String(m.sender_ref) === myID) {
+      const mTs = new Date(m.created_at).getTime()
+      if (mTs <= upToTs) m.read = true
+    }
+  }
+}
+
+// 自己发的最新一条消息（用于在它下方显示「已读」角标，不在每组都显示）
+const lastMineMsg = computed(() => {
+  const myID = String(session.agent?.id)
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const m = messages.value[i]
+    if (m.sender === 'agent' && String(m.sender_ref) === myID) return m
+  }
+  return null
+})
 
 function sendText() {
   const text = (draft.value || '').trim()
@@ -223,6 +257,15 @@ onMounted(async () => {
     url: `${proto}://${location.host}/ws/agent`,
     token: session.token,
     onMessage: (env) => {
+      // 已读事件：对端（访客）已读了我（客服）发的消息
+      if (env.type === 'read') {
+        if (!activeConv.value || env.conv !== activeConv.value.id) return
+        // 只处理「访客读了客服消息」这种方向
+        if (env.from && env.from.startsWith('visitor:')) {
+          markMineReadUpTo(env.ts || Date.now())
+        }
+        return
+      }
       if (env.type === 'sys') {
         // 系统通知：访客进入提醒（弹 toast + 播声 + 刷会话列表）
         if (env.extra?.kind === 'visitor_enter') {
@@ -260,9 +303,9 @@ onMounted(async () => {
           created_at: new Date(env.ts || Date.now()).toISOString()
         })
         nextTick(scrollToBottom)
-        // 访客发到当前会话：静默把未读清零（服务端持久化）+ 播声
+        // 访客发到当前会话：发 WSS read 通知访客「客服已读」+ 播声
         if (fromVisitor) {
-          http.post(`/agent/conversations/${env.conv}/read`).catch(() => {})
+          sendReadAck(env.conv)
           playSound(agentSound.value)
         }
         return
@@ -397,6 +440,12 @@ onUnmounted(() => {
                   </template>
                   <span v-if="m.content" class="bubble-text">{{ m.content }}</span>
                 </div>
+                <!-- 已读角标：仅在「自己最新那条消息已被对方读了」时显示 -->
+                <div
+                  v-if="isMineGroup(g) && lastMineMsg && lastMineMsg.read && g.items[g.items.length-1].id === lastMineMsg.id"
+                  class="read-indicator">
+                  已读
+                </div>
               </div>
             </div>
           </div>
@@ -489,5 +538,11 @@ onUnmounted(() => {
 }
 .chat-footer-actions {
   display: flex; justify-content: space-between; align-items: center; margin-top: 8px;
+}
+
+/* 已读 / 未读 角标：在 msg-stack 内最后一个 bubble 下面右对齐 */
+.read-indicator {
+  font-size: 11px; color: #909399; margin-top: 4px; padding: 0 4px;
+  align-self: flex-end;
 }
 </style>

@@ -4,6 +4,71 @@
 
 ---
 
+## [013] 2026-05-21 20:40 — 双向「已读」状态：WSS 实时 + DB 持久化
+
+**起因 / 需求**
+爷爷要求加已读状态功能：两边都要、实时 WSS、明白吗。
+
+**协议设计**
+之前 `Envelope.Type` 已经声明 `read`（[001] 起就有），但只转发不落库。这次给它接上完整业务：
+
+```
+client → server  { type:"read", conv:"<id>", ts:<ms> }
+含义：截至这一刻，我已读了当前会话内对端的所有消息
+
+server 端处理：
+  1. 盖 from = visitor:<id> 或 agent:<id>
+  2. 异步 store.UpdateLastRead(convID, role, time.Now())
+  3. FanoutToConv 广播给会话内的对端 + 接管该会话的客服
+
+server → 对端  { type:"read", from:"agent:1"|"visitor:xxx", conv, ts }
+对端收到后：把自己发过的、created_at <= ts 的消息标记为「已读」
+```
+
+**落库设计**
+`conversations` 表新增 `last_read_agent_at` / `last_read_visitor_at` 两个时间戳。某条消息是否已读 = `created_at <= 对方的 last_read_*_at`（O(1) 查询，不需要每条消息单独存状态）。
+
+**改了什么 / 加了什么 / 删了什么**（新增 1 个 / 修改 6 个 / 删除 0 个）
+- 新建：[backend/migrations/003_read_status.sql](backend/migrations/003_read_status.sql) — 给 conversations 表 ALTER ADD COLUMN 两个 DATETIME NULL 列
+- 修改：[backend/internal/store/store.go](backend/internal/store/store.go) — `Message` 加 `Read bool \`json:"read"\`` 字段；新增 `UpdateLastRead(convID, role, at)`、`GetLastReadTimes(convID)`；`ListMessages` 末尾根据 last_read 时间戳为每条消息计算 read 字段
+- 修改：[backend/internal/ws/hub.go](backend/internal/ws/hub.go) — `MessageSink` 接口加 `PersistReadAsync`；`handleIncoming` 把 `type=read` 从「只 fanout」改为「盖发送者 + PersistReadAsync + Fanout」
+- 修改：[backend/internal/service/service.go](backend/internal/service/service.go) — 实现 `PersistReadAsync`：goroutine + 5s timeout + panic recover + UpdateLastRead 失败仅记日志
+- 修改：[backend/internal/handler/http.go](backend/internal/handler/http.go) — `MarkRead` 从「只清 unread_agent」升级为「UpdateLastRead + FanoutToConv 广播 read」（HTTP 兜底也能触发对端 UI 更新）
+- 修改：[admin/src/views/Console.vue](admin/src/views/Console.vue) — `pickConv` 加 `sendReadAck`；当前会话收到访客消息也 `sendReadAck`；新增 `markMineReadUpTo` + `lastMineMsg` computed；模板在自己最后一条消息下方显示「已读」（仅 read=true 时显示）
+- 修改：[widget/public/chat.html](widget/public/chat.html) — widget_state 打开时 / 收到客服消息时（widget 已打开）发 `sendReadAck`；收到客服 read 事件时 `setReadIndicator(true)` 在最后一组访客消息 stack 内挂「已读」；sendText / 文件上传后 `setReadIndicator(false)` 清掉旧角标
+
+**业务流程**
+
+访客视角：
+```
+访客发"hi" → 气泡显示 → 「已读」角标无
+客服切到这个会话 → 后端 UpdateLastRead(agent) + 广播 read
+访客 WSS 收到 read{from:"agent:..."} → 在"hi"下方显示「已读」
+访客再发"hello" → 旧「已读」消失（这条还没被读）
+客服看到 → 后端处理 read → 访客收到 read → "hello"下方显示「已读」
+```
+
+客服视角：
+```
+客服发"在的请讲" → 消息下方默认无角标
+访客 widget 打开 / 当前打开下收到这条消息 → 访客发 read
+客服 Console 收到 read{from:"visitor:..."} → markMineReadUpTo → m.read=true → 显示「已读」
+```
+
+**触发场景与边界 + 验证方式**
+- 验证 1：客服 A 不切到访客 B 的会话 → 访客 B 发的消息 read=false，客服切过去后 read=true，访客那侧也立即看到「已读」
+- 验证 2：访客 widget 收起时收到客服消息 → 不发 read（不算"看到"）；点开 widget → 立即发 read，客服那侧消息显示「已读」
+- 验证 3：刷新页面后 GET /messages 返回的每条消息都带 read 字段（从数据库的 last_read_*_at 计算）
+- 验证 4：HTTP /agent/conversations/:id/read 兜底接口也能触发对端 read 广播
+- 边界：read 事件只在 byConv 内广播（不外溢给所有 agent），避免无关客服收到无意义事件；conv 之外的消息不会被错误标记
+
+**安全 / 健壮性**
+- PersistReadAsync 用 goroutine + 5s timeout + panic recover，失败仅记 business.log
+- read 服务端盖 from 字段（不信任客户端声明，避免伪造别人的已读）
+- UpdateLastRead 用 role 参数白名单（agent/visitor），不允许任意列写入
+
+---
+
 ## [012] 2026-05-21 20:10 — 修复 /admin/settings 返回 nginx 默认页（致命）+ 访客浮动按钮未读角标
 
 **起因 / 需求**

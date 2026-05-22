@@ -261,15 +261,22 @@ func (h *HTTP) AssignSelf(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }
 
-// MarkRead 标记已读
+// MarkRead 标记已读（HTTP 兜底；正常实时走 WSS type=read）。
+// 同步更新 last_read_agent_at + 清零 unread_agent。
 func (h *HTTP) MarkRead(c *gin.Context) {
 	convID := c.Param("id")
-	role, _ := c.Get("agent_role")
-	_ = role
-	if err := h.svc.Store().MarkRead(c.Request.Context(), convID, "agent"); err != nil {
+	if err := h.svc.Store().UpdateLastRead(c.Request.Context(), convID, "agent", time.Now()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50009, "msg": "失败"})
 		return
 	}
+	// 通过 WSS 把已读事件推给对端访客（让 UI 实时更新「已读」角标）
+	agentID, _ := c.Get("agent_id")
+	h.hub.FanoutToConv(c.Request.Context(), &ws.Envelope{
+		Type:   "read",
+		From:   fmt.Sprintf("agent:%v", agentID),
+		ConvID: convID,
+		TS:     ws.NowMS(),
+	})
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }
 

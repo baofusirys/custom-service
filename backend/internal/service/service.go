@@ -86,6 +86,31 @@ func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c 
 	return true
 }
 
+// PersistReadAsync 异步落库已读时刻：把对应 role 的 last_read_*_at 推到 time.Now()。
+// 失败仅记日志，不影响 WSS 广播给对端。
+func (s *Service) PersistReadAsync(e *ws.Envelope, c *ws.Client, role string) {
+	convID := e.ConvID
+	if convID == "" {
+		convID = c.ConvID
+	}
+	if convID == "" {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.bizLog.Error("persist_read panic", zap.Any("err", r))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.store.UpdateLastRead(ctx, convID, role, time.Now()); err != nil {
+			s.bizLog.Error("persist read err", zap.Error(err),
+				zap.String("conv", convID), zap.String("role", role))
+		}
+	}()
+}
+
 // PersistMessageAsync 异步阶段：后台 goroutine 入库 + 兜底 conv。
 // 失败只记日志（原始报文已落 raw_ws.log，可重放）。
 func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender string) {

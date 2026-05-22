@@ -148,6 +148,13 @@
     border-radius: 10px; cursor: pointer;
   }
 
+  /* 已读 / 未读 角标 */
+  .read-indicator {
+    font-size: 11px; color: #9ca3af;
+    margin: 3px 2px 0 0;
+    user-select: none;
+  }
+
   /* 文件卡片 */
   .file-card {
     display: inline-flex; align-items: center; gap: 10px;
@@ -413,6 +420,28 @@
   }
 
   // ====== 渲染 ======
+  // ====== 已读角标管理 ======
+  // 设计：访客视角下，只在「自己最后一条消息」的最后一组 stack 内显示『已读』。
+  // 新发消息时清掉旧角标；收到客服 read 事件时挂上新角标。
+  function setReadIndicator(visible) {
+    var olds = listEl.querySelectorAll('.read-indicator');
+    for (var i = 0; i < olds.length; i++) olds[i].remove();
+    if (!visible) return;
+    // 找到最后一组「自己发的」stack：lastGroup 必须 isMine=true（访客发的）
+    if (lastGroup && lastGroup.isMine && lastGroup.bubbles) {
+      var ind = document.createElement('div');
+      ind.className = 'read-indicator';
+      ind.textContent = '已读';
+      lastGroup.bubbles.appendChild(ind);
+    }
+  }
+  function sendReadAck() {
+    if (alive && convID) {
+      try { ws.send(JSON.stringify({ type: 'read', conv: convID, ts: Date.now() })); }
+      catch {}
+    }
+  }
+
   function renderTimeDivider(ts) {
     var d = document.createElement('div');
     d.className = 'time-divider';
@@ -592,6 +621,13 @@
       if (env.type === 'pong') return;
       if (env.type === 'hello') { renderSys('您已接入客服，请描述您的问题'); return; }
       if (env.type === 'error') { renderSys('系统：' + (env.content || '')); return; }
+      if (env.type === 'read') {
+        // 客服读了访客消息：在访客最后一组消息上挂「已读」角标
+        if (env.from && env.from.indexOf('agent:') === 0) {
+          setReadIndicator(true);
+        }
+        return;
+      }
       if (env.type === 'chat') {
         if (env.from && env.from.indexOf('visitor:') === 0) return;
         var m = {
@@ -608,6 +644,9 @@
         if (!isWidgetOpen) {
           unread++;
           parent.postMessage({ __cs: 1, type: 'unread', count: unread }, '*');
+        } else {
+          // widget 当前是打开的，访客看到了客服消息 → 立即发 read 通知客服
+          sendReadAck();
         }
       }
     };
@@ -628,6 +667,8 @@
     ws.send(JSON.stringify({ type: 'chat', conv: convID, content: text, ts: Date.now(), prio: 0 }));
     var m = { sender: 'visitor', content: text, created_at: new Date().toISOString() };
     render(m); persistMsg(m);
+    // 新消息发出：清除旧的「已读」角标（这条消息还没被读）
+    setReadIndicator(false);
     inputEl.value = '';
     inputEl.style.height = 'auto';
   }
@@ -657,6 +698,7 @@
         created_at: new Date().toISOString()
       };
       render(m); persistMsg(m);
+      setReadIndicator(false); // 新消息未被读
     } catch (err) {
       renderSys('文件发送失败：' + (err.message || ''));
     }
@@ -678,6 +720,8 @@
       if (isWidgetOpen) {
         unread = 0;
         parent.postMessage({ __cs: 1, type: 'unread', count: 0 }, '*');
+        // widget 刚打开：访客看到了所有客服消息 → 发 read 通知客服
+        sendReadAck();
       }
     }
   });

@@ -78,6 +78,10 @@ type MessageSink interface {
 	PreprocessVisitorMessage(ctx context.Context, e *Envelope, c *Client) bool
 	PreprocessAgentMessage(ctx context.Context, e *Envelope, c *Client) bool
 	PersistMessageAsync(e *Envelope, c *Client, sender string)
+
+	// PersistReadAsync 异步落库「读到时刻」：把指定 role 的 last_read_*_at 推到现在。
+	// role: "agent" 或 "visitor"。失败仅记日志，不阻塞 WSS 广播。
+	PersistReadAsync(e *Envelope, c *Client, role string)
 }
 
 const broadcastChannel = "cs:bcast"
@@ -247,7 +251,22 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 		h.FanoutToConv(ctx, e)
 		// 异步入库（不阻塞实时通道）
 		h.sink.PersistMessageAsync(e, c, sender)
-	case "typing", "read":
+	case "read":
+		// 已读事件：盖发送者 + 异步落库 last_read_*_at + 广播给会话内对端
+		var role string
+		if c.Kind == KindVisitor {
+			e.From = "visitor:" + c.ID
+			role = "visitor"
+		} else {
+			e.From = "agent:" + c.ID
+			role = "agent"
+		}
+		if c.ConvID != "" {
+			e.ConvID = c.ConvID
+		}
+		h.sink.PersistReadAsync(e, c, role)
+		h.FanoutToConv(ctx, e)
+	case "typing":
 		// 仅转发，不落库
 		h.FanoutToConv(ctx, e)
 	default:

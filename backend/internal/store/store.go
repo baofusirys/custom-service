@@ -62,6 +62,9 @@ type Message struct {
 	MediaSize   sql.NullInt64  `json:"media_size,omitempty"`
 	CreatedAt   time.Time      `json:"created_at"`
 	DeliveredWS bool           `json:"delivered_ws"`
+	// Read 由 ListMessages 计算填充：自己（sender）的消息是否已被对端读过
+	// （比较 created_at vs 对端的 last_read_*_at）
+	Read bool `json:"read"`
 }
 
 type Agent struct {
@@ -246,6 +249,33 @@ func (s *Store) MarkRead(ctx context.Context, convID, by string) error {
 	return err
 }
 
+// UpdateLastRead 把指定 role 的 last_read_*_at 推到 at；同时把对应 unread 清零。
+// role: "agent" 或 "visitor"。
+// 这是「已读」语义的服务端落地：所有 created_at <= at 且 sender 为对端的消息视为已读。
+func (s *Store) UpdateLastRead(ctx context.Context, convID, role string, at time.Time) error {
+	var col, unreadCol string
+	switch role {
+	case "agent":
+		col, unreadCol = "last_read_agent_at", "unread_agent"
+	case "visitor":
+		col, unreadCol = "last_read_visitor_at", "unread_visitor"
+	default:
+		return errors.New("invalid role for UpdateLastRead")
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE conversations SET `+col+`=?, `+unreadCol+`=0, updated_at=? WHERE id=?`,
+		at, time.Now(), convID)
+	return err
+}
+
+// GetLastReadTimes 返回会话的两个已读时间戳，用于 ListMessages 计算 read 字段。
+func (s *Store) GetLastReadTimes(ctx context.Context, convID string) (lastAgent, lastVisitor sql.NullTime, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT last_read_agent_at, last_read_visitor_at FROM conversations WHERE id=?`,
+		convID).Scan(&lastAgent, &lastVisitor)
+	return
+}
+
 func (s *Store) ListMessages(ctx context.Context, convID string, beforeID string, limit int) ([]Message, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -277,7 +307,27 @@ ORDER BY created_at DESC LIMIT ?`, convID, beforeID, limit)
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 拉对端的 last_read_*_at 并为每条消息计算 read 状态
+	lastAgent, lastVisitor, err := s.GetLastReadTimes(ctx, convID)
+	if err == nil {
+		for i := range out {
+			switch out[i].Sender {
+			case "visitor":
+				// 访客发的消息，被「客服」读过 → read=true
+				if lastAgent.Valid && !out[i].CreatedAt.After(lastAgent.Time) {
+					out[i].Read = true
+				}
+			case "agent":
+				if lastVisitor.Valid && !out[i].CreatedAt.After(lastVisitor.Time) {
+					out[i].Read = true
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // ============ Agent ============
