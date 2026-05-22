@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>价格方案 · Custom Service Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #f5f7fa;
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "PingFang SC", "Microsoft YaHei", sans-serif; color: #2c3034; }
+    nav { background: #fff; border-bottom: 1px solid #e5e7eb;
+      padding: 12px 24px; display: flex; align-items: center; gap: 24px;
+      position: sticky; top: 0; z-index: 100; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    nav .brand { font-weight: 700; font-size: 18px; color: #2974ff; }
+    nav a { color: #4b5563; text-decoration: none; font-size: 14px;
+      padding: 6px 10px; border-radius: 6px; transition: background .15s; }
+    nav a:hover { background: #f3f4f6; color: #2974ff; }
+    nav a.active { color: #2974ff; background: #eff6ff; }
+    main { max-width: 960px; margin: 40px auto; padding: 0 24px; }
+    h1 { font-size: 28px; text-align: center; margin-bottom: 8px; }
+    .sub { text-align: center; color: #6b7280; margin-bottom: 32px; }
+    .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+    @media (max-width: 768px) { .plans { grid-template-columns: 1fr; } }
+    .plan { background: #fff; padding: 32px 24px; border-radius: 12px;
+      text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.06); position: relative; }
+    .plan.featured { border: 2px solid #2974ff; transform: scale(1.04); }
+    .plan.featured::before { content: '推荐'; position: absolute; top: -12px; left: 50%;
+      transform: translateX(-50%); background: #2974ff; color: #fff;
+      padding: 2px 12px; border-radius: 10px; font-size: 12px; }
+    .plan h3 { font-size: 18px; margin: 0 0 8px; color: #6b7280; font-weight: 500; }
+    .plan .num { font-size: 36px; font-weight: 700; color: #1f2937; }
+    .plan .unit { color: #9ca3af; font-size: 14px; }
+    .plan ul { list-style: none; padding: 0; margin: 24px 0 0; text-align: left; }
+    .plan li { padding: 8px 0; color: #4b5563; font-size: 14px;
+      border-bottom: 1px solid #f3f4f6; }
+    .plan li::before { content: '✓ '; color: #2974ff; font-weight: 700; }
+    .plan .cta { display: inline-block; margin-top: 20px; padding: 8px 24px;
+      background: #2974ff; color: #fff; text-decoration: none; border-radius: 6px;
+      font-size: 14px; }
+    .plan.featured .cta { background: linear-gradient(135deg, #4a90ff 0%, #2974ff 100%); }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="brand">Custom Service Demo</span>
+    <a href="/widget/demo.html">首页</a>
+    <a href="/widget/demo-products.html">产品</a>
+    <a href="/widget/demo-pricing.html" class="active">价格</a>
+    <a href="/widget/demo-contact.html">联系我们</a>
+  </nav>
+  <main>
+    <h1>透明价格</h1>
+    <p class="sub">按需付费，不满意 30 天全额退款</p>
+    <div class="plans">
+      <div class="plan">
+        <h3>基础版</h3>
+        <div><span class="num">99</span><span class="unit"> / 月</span></div>
+        <ul>
+          <li>1 名客服</li>
+          <li>单站点</li>
+          <li>500 条消息/月</li>
+          <li>邮件支持</li>
+        </ul>
+        <a class="cta" href="/widget/demo-contact.html">咨询</a>
+      </div>
+      <div class="plan featured">
+        <h3>专业版</h3>
+        <div><span class="num">299</span><span class="unit"> / 月</span></div>
+        <ul>
+          <li>5 名客服</li>
+          <li>多站点</li>
+          <li>无限消息</li>
+          <li>访客画像 + 页面跟踪</li>
+          <li>7x24 工单支持</li>
+        </ul>
+        <a class="cta" href="/widget/demo-contact.html">立即开始</a>
+      </div>
+      <div class="plan">
+        <h3>企业版</h3>
+        <div><span class="num">联系</span><span class="unit"></span></div>
+        <ul>
+          <li>无限客服</li>
+          <li>多租户</li>
+          <li>私有部署</li>
+          <li>SLA 99.95%</li>
+          <li>专属架构师</li>
+        </ul>
+        <a class="cta" href="/widget/demo-contact.html">联系销售</a>
+      </div>
+    </div>
+  </main>
+  <script src="/widget/loader.js" data-cs-site="default" defer></script>
+</body>
+</html>

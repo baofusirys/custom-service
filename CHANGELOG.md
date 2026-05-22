@@ -4,6 +4,70 @@
 
 ---
 
+## [015] 2026-05-21 21:30 — 访客页面跟踪 (Crisp 风格横幅) + 4 个可跳转 demo 页面
+
+**起因 / 需求**
+爷爷希望访客每跳转一个页面，客服后台都能看到一条「访客访问了 XXX」的横幅记录（参考 Crisp 截图）。包括首次进入也要显示。同时多做几个可跳转的 demo 页面验证。
+
+**协议设计**
+新增 WSS 消息类型 `type=page`，客户端 → 服务端：
+```
+{ type:"page", conv:"<id>", ts:<ms>, extra:{ url, title } }
+```
+
+服务端处理：
+1. 30 秒去重（同访客 + 同 URL）—— 避免 SPA / 刷新刷屏
+2. 异步落库为 sys 消息（sender=sys, sender_ref="page:<url>", content="访客访问了「{title}」")
+3. BroadcastToAllAgents 广播 type=chat + from=sys + extra={kind:"page_navigation", url, title}
+
+客服端 Console.vue 收到 extra.kind="page_navigation" 时，渲染为**橙色横幅**（不是普通气泡）。从 DB 拉历史也能正确识别（sender_ref 以 "page:" 开头）。
+
+**改了什么 / 加了什么 / 删了什么**（新增 4 个 demo 页 + 修改 6 个）
+- 修改：[backend/internal/ws/hub.go](backend/internal/ws/hub.go) — `MessageSink` 接口加 `OnPageNavigation(visitorID, convID, url, title)`；`handleIncoming` 加 `case "page"` 提取 extra.url / title 调 sink
+- 修改：[backend/internal/service/service.go](backend/internal/service/service.go) — 新增 `pageDedupe` map + `pageDedupeMu` 锁做 30 秒去重；`SetHub` setter 解决循环依赖；`OnPageNavigation` 实现：URL/title XSS 清洗 + 限长 + 入库 + BroadcastToAllAgents
+- 修改：[backend/cmd/server/main.go](backend/cmd/server/main.go) — `svc.SetHub(hub)` 在 Hub 创建后回填
+- 修改：[widget/public/loader.js](widget/public/loader.js) — 新增 `postPageInfo()` 在 iframe.onload 时推送 `{type:"page_info", url, title}` 给 chat.html（跨域时 iframe 内的 parent.location 拿不到，必须父页主动推）
+- 修改：[widget/public/chat.html](widget/public/chat.html) — 监听 page_info；新增 `reportPageView()` 检查 alive+convID+hostURL+去重 → WSS 发 type=page；ws.onopen 后立即调一次 reportPageView
+- 修改：[admin/src/views/Console.vue](admin/src/views/Console.vue) — `isPageGroup` / `pageURL` / `pageTitle` 辅助函数；模板加 `<template v-if="isPageGroup(g)">` 分支渲染橙色 `.page-banner`；pageTitle fallback 从历史 content 解析「xxx」
+- 新建：4 个 demo 页面（共享导航条 互相跳转）：
+  - [widget/public/demo.html](widget/public/demo.html) — 首页（重做，含 hero / 集成代码）
+  - [widget/public/demo-products.html](widget/public/demo-products.html) — 产品系列（4 个产品卡片）
+  - [widget/public/demo-pricing.html](widget/public/demo-pricing.html) — 价格方案（3 个套餐）
+  - [widget/public/demo-contact.html](widget/public/demo-contact.html) — 联系我们（含表单）
+
+**业务流程**
+
+访客流：
+```
+1. 打开 demo.html
+2. loader.js 注入 iframe → chat.html bootstrap → POST /visitor/session
+3. 服务端 EnsureConversation isNew=true → OnVisitorEnter goroutine
+4. WSS 上线 → loader.js postMessage(page_info)
+5. chat.html reportPageView → WSS 发 type=page
+6. 服务端 OnPageNavigation：去重 + 落库 + BroadcastToAllAgents
+7. 客服端 Console.vue 收到 → 渲染橙色横幅「访客访问了「Custom Service · 首页」」
+
+8. 访客点导航跳到 demo-products.html → 整页刷新
+9. 新 loader.js → 新 iframe → chat.html bootstrap → POST /visitor/session 用旧 visitor_id
+10. 服务端 EnsureConversation isNew=false → 不再触发 OnVisitorEnter
+11. WSS 重新上线 → 新 page_info → 上报新 URL → 服务端去重通过 → 新横幅
+```
+
+**触发场景与边界 + 验证方式**
+- 验证 1：访客打开 demo.html → 客服端在「访客 xxx 进入网站」通知之后看到第 1 条横幅「访客访问了「Custom Service · 首页」」
+- 验证 2：点击「产品」跳转 → 客服端立即出现第 2 条横幅「访客访问了「产品介绍 · Custom Service Demo」」
+- 验证 3：刷新当前页 → 30 秒内同 URL 去重，不重复出现横幅
+- 验证 4：跨多个页面跳转回首页 → 30 秒过后，首页再上一次（去重过期）
+- 边界：URL/title 走 SanitizeText 防 XSS + URL 1024 字符限长 + title 256 字符限长；去重 map 超过 5000 条自动清理 1 小时前的 key 防泄漏
+
+**安全 / 健壮性**
+- 服务端只接受 visitor 发的 page 事件（KindVisitor），agent 不能伪造别人的页面访问
+- url 和 title 走 SanitizeText 防 XSS
+- 30 秒去重避免恶意刷屏
+- 异步 goroutine + 5s timeout + panic recover
+
+---
+
 ## [014] 2026-05-21 21:00 — 问候消息走完整 WSS 通道：触发提示音 + 未读 + 已读
 
 **起因 / 需求**

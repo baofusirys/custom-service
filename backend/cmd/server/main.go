@@ -98,6 +98,8 @@ func main() {
 		BizLog: bizLog, RawLog: logs.RawWS, SecLog: secLog,
 		Cipher: cipher, Redis: rdb, Sink: svc, HeartbeatSec: 30,
 	})
+	// 反向注入 hub 引用，让 service 能给客服广播 page_navigation / visitor_enter 等通知
+	svc.SetHub(hub)
 	hubCtx, hubCancel := context.WithCancel(context.Background())
 	defer hubCancel()
 	go hub.Run(hubCtx)

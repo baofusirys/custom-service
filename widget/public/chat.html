@@ -284,6 +284,11 @@
   // widget 是否处于打开状态。loader.js 通过 postMessage('widget_state') 通知。
   // 默认 false（页面刚加载时 iframe 在但 widget 收起）；打开时清零未读。
   var isWidgetOpen = false;
+  // 宿主页 URL / title，loader.js 通过 postMessage('page_info') 推过来。
+  // WSS 上线后会发一条 page 消息让客服后台看到访客访问了哪个页面。
+  var hostURL = '';
+  var hostTitle = '';
+  var pageReported = ''; // 已经上报过的 URL，避免重复发
 
   // ====== DOM ======
   var listEl = document.getElementById('list');
@@ -440,6 +445,24 @@
       try { ws.send(JSON.stringify({ type: 'read', conv: convID, ts: Date.now() })); }
       catch {}
     }
+  }
+
+  // 上报当前页面给服务端（让客服后台看到访客的浏览轨迹）。
+  // 触发时机：(1) WSS 上线 onopen (2) 收到 loader.js 推送的 page_info
+  // 上报需要同时满足：WSS alive + convID 已建立 + 拿到 hostURL + URL 跟上次不同
+  function reportPageView() {
+    if (!alive || !convID) return;
+    if (!hostURL) return;
+    if (pageReported === hostURL) return;
+    pageReported = hostURL;
+    try {
+      ws.send(JSON.stringify({
+        type: 'page',
+        conv: convID,
+        ts: Date.now(),
+        extra: { url: hostURL, title: hostTitle }
+      }));
+    } catch {}
   }
 
   function renderTimeDivider(ts) {
@@ -607,6 +630,8 @@
       pingTimer = setInterval(function () {
         if (alive) try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
       }, 30000);
+      // WSS 上线后立即上报当前页面（如果 page_info 已经就绪）
+      reportPageView();
     };
     ws.onmessage = function (ev) {
       var env;
@@ -705,7 +730,7 @@
     }
   });
 
-  // 接收 loader.js 通知的 widget 开关状态
+  // 接收 loader.js 通知的 widget 开关状态 / 宿主页面信息
   window.addEventListener('message', function (ev) {
     if (!ev.data || ev.data.__cs !== 1) return;
     if (ev.data.type === 'widget_state') {
@@ -716,6 +741,11 @@
         // widget 刚打开：访客看到了所有客服消息 → 发 read 通知客服
         sendReadAck();
       }
+    }
+    if (ev.data.type === 'page_info') {
+      hostURL = ev.data.url || '';
+      hostTitle = ev.data.title || '';
+      reportPageView();
     }
   });
 

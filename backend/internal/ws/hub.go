@@ -82,6 +82,10 @@ type MessageSink interface {
 	// PersistReadAsync 异步落库「读到时刻」：把指定 role 的 last_read_*_at 推到现在。
 	// role: "agent" 或 "visitor"。失败仅记日志，不阻塞 WSS 广播。
 	PersistReadAsync(e *Envelope, c *Client, role string)
+
+	// OnPageNavigation 访客跳转到新页面时触发：异步落库一条 sys 消息 +
+	// 广播 page_navigation 事件给所有在线 agent。
+	OnPageNavigation(visitorID, convID, url, title string)
 }
 
 const broadcastChannel = "cs:bcast"
@@ -266,6 +270,21 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 		}
 		h.sink.PersistReadAsync(e, c, role)
 		h.FanoutToConv(ctx, e)
+	case "page":
+		// 访客跳转页面：只接受 visitor 上报；agent 不允许伪造页面事件
+		if c.Kind != KindVisitor || c.ConvID == "" {
+			return
+		}
+		var url, title string
+		if m, ok := e.Extra.(map[string]any); ok {
+			if v, ok := m["url"].(string); ok {
+				url = v
+			}
+			if v, ok := m["title"].(string); ok {
+				title = v
+			}
+		}
+		h.sink.OnPageNavigation(c.ID, c.ConvID, url, title)
 	case "typing":
 		// 仅转发，不落库
 		h.FanoutToConv(ctx, e)

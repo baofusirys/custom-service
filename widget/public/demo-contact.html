@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>联系我们 · Custom Service Demo</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #f5f7fa;
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "PingFang SC", "Microsoft YaHei", sans-serif; color: #2c3034; }
+    nav { background: #fff; border-bottom: 1px solid #e5e7eb;
+      padding: 12px 24px; display: flex; align-items: center; gap: 24px;
+      position: sticky; top: 0; z-index: 100; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    nav .brand { font-weight: 700; font-size: 18px; color: #2974ff; }
+    nav a { color: #4b5563; text-decoration: none; font-size: 14px;
+      padding: 6px 10px; border-radius: 6px; transition: background .15s; }
+    nav a:hover { background: #f3f4f6; color: #2974ff; }
+    nav a.active { color: #2974ff; background: #eff6ff; }
+    main { max-width: 720px; margin: 40px auto; padding: 0 24px; }
+    h1 { font-size: 28px; margin-bottom: 8px; }
+    .sub { color: #6b7280; margin-bottom: 32px; }
+    .card { background: #fff; padding: 32px; border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+    .card label { display: block; color: #374151; font-size: 14px; margin-bottom: 6px; }
+    .card input, .card textarea {
+      width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 6px;
+      font: inherit; font-size: 14px; outline: none; transition: border .15s;
+    }
+    .card input:focus, .card textarea:focus { border-color: #2974ff; }
+    .card .row { margin-bottom: 16px; }
+    .card button { width: 100%; padding: 12px; background: #2974ff; color: #fff;
+      border: 0; border-radius: 6px; font: inherit; font-size: 15px; cursor: pointer; }
+    .card button:hover { background: #1f5fcc; }
+    .contact-info { margin-top: 24px; padding: 20px; background: #eff6ff;
+      border-radius: 8px; font-size: 14px; color: #1f2937; }
+    .contact-info b { color: #2974ff; }
+    .tip { color: #92400e; background: #fff7ed; border: 1px solid #fed7aa;
+      padding: 10px 14px; border-radius: 8px; margin-top: 16px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="brand">Custom Service Demo</span>
+    <a href="/widget/demo.html">首页</a>
+    <a href="/widget/demo-products.html">产品</a>
+    <a href="/widget/demo-pricing.html">价格</a>
+    <a href="/widget/demo-contact.html" class="active">联系我们</a>
+  </nav>
+  <main>
+    <h1>联系我们</h1>
+    <p class="sub">有任何问题？右下角点开客服直接聊，或者填写下面表单。</p>
+    <div class="card">
+      <form onsubmit="event.preventDefault(); alert('这是演示表单，不会真的提交。请右下角点客服。');">
+        <div class="row">
+          <label>姓名</label>
+          <input type="text" placeholder="您的姓名">
+        </div>
+        <div class="row">
+          <label>邮箱</label>
+          <input type="email" placeholder="name@example.com">
+        </div>
+        <div class="row">
+          <label>留言</label>
+          <textarea rows="4" placeholder="您想咨询什么？"></textarea>
+        </div>
+        <button type="submit">发送</button>
+      </form>
+      <div class="contact-info">
+        <div>📧 邮箱：<b>support@example.com</b></div>
+        <div style="margin-top:8px">📞 电话：<b>400-000-0000</b></div>
+        <div style="margin-top:8px">🏢 地址：北京市朝阳区某某大厦</div>
+      </div>
+      <div class="tip">这是演示页 —— 右下角的客服气泡是真的，可以用！客服后台能看到您从「首页 → 产品 → 价格 → 联系我们」的完整浏览路径。</div>
+    </div>
+  </main>
+  <script src="/widget/loader.js" data-cs-site="default" defer></script>
+</body>
+</html>

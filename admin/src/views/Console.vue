@@ -76,6 +76,26 @@ function markMineReadUpTo(upToTs) {
   }
 }
 
+// 该组是否是「页面跳转」横幅（不是普通消息组）
+function isPageGroup(g) {
+  return g.sender === 'sys' && g.items.length > 0 &&
+    typeof g.items[0].sender_ref === 'string' &&
+    g.items[0].sender_ref.indexOf('page:') === 0
+}
+
+function pageURL(m) {
+  return m.page_url || (m.sender_ref && m.sender_ref.indexOf('page:') === 0 ? m.sender_ref.slice(5) : '')
+}
+function pageTitle(m) {
+  if (m.page_title) return m.page_title
+  // 历史消息从 content 反解析「xxx」
+  if (m.content) {
+    const match = /「(.+?)」/.exec(m.content)
+    if (match) return match[1]
+  }
+  return ''
+}
+
 // 自己发的最新一条消息（用于在它下方显示「已读」角标，不在每组都显示）
 const lastMineMsg = computed(() => {
   const myID = String(session.agent?.id)
@@ -292,15 +312,23 @@ onMounted(async () => {
 
       const inCurrent = activeConv.value && env.conv === activeConv.value.id
       if (inCurrent) {
+        // 页面跳转事件：用 sender_ref 携带 URL 标记，前端按横幅样式渲染
+        const isPageNav = fromSys && env.extra && env.extra.kind === 'page_navigation'
+        const senderRef = isPageNav
+          ? 'page:' + (env.extra?.url || '')
+          : (env.from?.includes(':') ? env.from.split(':')[1] : (fromSys ? 'system' : ''))
         messages.value.push({
           id: env.id,
           sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
-          sender_ref: env.from?.includes(':') ? env.from.split(':')[1] : (fromSys ? 'system' : ''),
+          sender_ref: senderRef,
           content: env.content || '',
           media_url: env.media ? { String: env.media, Valid: true } : null,
           media_kind: env.mkind ? { String: env.mkind, Valid: true } : null,
           media_name: env.mname ? { String: env.mname, Valid: true } : null,
-          created_at: new Date(env.ts || Date.now()).toISOString()
+          created_at: new Date(env.ts || Date.now()).toISOString(),
+          // 给前端渲染用：标记是否是页面跳转 + URL
+          page_url: isPageNav ? env.extra.url : '',
+          page_title: isPageNav ? env.extra.title : ''
         })
         nextTick(scrollToBottom)
         // 访客发到当前会话：发 WSS read 通知访客「客服已读」+ 播声
@@ -414,7 +442,19 @@ onUnmounted(() => {
             <div class="time-divider">
               <span>{{ fmtGroupTime(g.ts) }}</span>
             </div>
-            <div class="msg-line" :class="{ 'msg-line--mine': isMineGroup(g) }">
+            <!-- 页面跳转：横幅样式（参考 Crisp） -->
+            <template v-if="isPageGroup(g)">
+              <div v-for="m in g.items" :key="m.id" class="page-banner">
+                <span class="page-banner-arrow">→</span>
+                <span class="page-banner-label">访客访问了</span>
+                <a :href="pageURL(m)" target="_blank" class="page-banner-link"
+                   :title="pageURL(m)">
+                  {{ pageTitle(m) || pageURL(m) }}
+                </a>
+              </div>
+            </template>
+            <!-- 普通消息组 -->
+            <div v-else class="msg-line" :class="{ 'msg-line--mine': isMineGroup(g) }">
               <el-avatar
                 :size="36"
                 :style="{
@@ -545,4 +585,22 @@ onUnmounted(() => {
   font-size: 11px; color: #909399; margin-top: 4px; padding: 0 4px;
   align-self: flex-end;
 }
+
+/* 页面跳转横幅（Crisp 风格） */
+.page-banner {
+  display: flex; align-items: center; gap: 6px;
+  margin: 8px auto;
+  padding: 6px 14px;
+  background: #fff7ed;
+  color: #92400e;
+  border: 1px solid #fed7aa;
+  border-radius: 14px;
+  font-size: 12px; line-height: 1.5;
+  max-width: 90%;
+  word-break: break-all;
+}
+.page-banner-arrow { color: #f97316; font-weight: 600; flex-shrink: 0; }
+.page-banner-label { color: #c2410c; flex-shrink: 0; }
+.page-banner-link { color: #c2410c; text-decoration: underline; }
+.page-banner-link:hover { color: #9a3412; }
 </style>

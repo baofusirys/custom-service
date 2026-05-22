@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,19 +24,27 @@ type Service struct {
 	auditLog *zap.Logger
 	limiter  *security.RateLimiter
 	visMsgPM int
+	hub      *ws.Hub // 由 main.go 创建 Hub 后通过 SetHub 注入（解决 Hub<->Service 循环依赖）
+	// 页面跳转去重：同一访客 30 秒内相同 URL 只记一次
+	pageDedupe   map[string]time.Time
+	pageDedupeMu sync.Mutex
 }
 
 func New(st *store.Store, cipher *security.Cipher, biz, sec, audit *zap.Logger, lim *security.RateLimiter, visMsgPM int) *Service {
 	return &Service{
-		store:    st,
-		cipher:   cipher,
-		bizLog:   biz,
-		secLog:   sec,
-		auditLog: audit,
-		limiter:  lim,
-		visMsgPM: visMsgPM,
+		store:      st,
+		cipher:     cipher,
+		bizLog:     biz,
+		secLog:     sec,
+		auditLog:   audit,
+		limiter:    lim,
+		visMsgPM:   visMsgPM,
+		pageDedupe: make(map[string]time.Time),
 	}
 }
+
+// SetHub 在 main.go 创建 Hub 后回填，解决 Hub<->Service 循环依赖。
+func (s *Service) SetHub(h *ws.Hub) { s.hub = h }
 
 // ============ MessageSink 实现 ============
 
@@ -84,6 +93,101 @@ func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c 
 		e.Content = security.SanitizeText(e.Content)
 	}
 	return true
+}
+
+// OnPageNavigation 访客每打开/跳转一个页面时触发。
+//
+// 设计：
+//  1. 30 秒去重（同访客 + 同 URL 不重复记）—— 避免刷新 / SPA 跳转刷屏
+//  2. 异步落库为一条 sys 消息（sender=sys, sender_ref="page:<url>"）
+//     —— 让客服历史也能看到访客的浏览路径
+//  3. BroadcastToAllAgents 发 type=chat from=sys + extra.kind=page_navigation
+//     —— 客服端收到后渲染为「灰色横幅」（不是普通气泡），参考 Crisp 风格
+func (s *Service) OnPageNavigation(visitorID, convID, url, title string) {
+	if convID == "" {
+		return
+	}
+	// 清洗 + 限长（防 XSS / 防超长内容）
+	url = security.SanitizeText(url)
+	title = security.SanitizeText(title)
+	if len(url) > 1024 {
+		url = url[:1024]
+	}
+	if len(title) > 256 {
+		title = title[:256]
+	}
+	if url == "" && title == "" {
+		return
+	}
+
+	// 30 秒去重
+	dedupeKey := visitorID + "|" + url
+	now := time.Now()
+	s.pageDedupeMu.Lock()
+	last, ok := s.pageDedupe[dedupeKey]
+	if ok && now.Sub(last) < 30*time.Second {
+		s.pageDedupeMu.Unlock()
+		return
+	}
+	s.pageDedupe[dedupeKey] = now
+	// 顺便清理超过 1 小时的旧 key（防内存泄漏）
+	if len(s.pageDedupe) > 5000 {
+		for k, v := range s.pageDedupe {
+			if now.Sub(v) > time.Hour {
+				delete(s.pageDedupe, k)
+			}
+		}
+	}
+	s.pageDedupeMu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.bizLog.Error("on_page_navigation panic", zap.Any("err", r))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		display := title
+		if display == "" {
+			display = url
+		}
+		content := "访客访问了「" + display + "」"
+
+		msg := &store.Message{
+			ID:          uuid.NewString(),
+			ConvID:      convID,
+			Sender:      "sys",
+			SenderRef:   "page:" + url,
+			Content:     content,
+			CreatedAt:   now,
+			DeliveredWS: true,
+		}
+		if err := s.store.InsertMessage(ctx, msg); err != nil {
+			s.bizLog.Error("page_navigation insert err", zap.Error(err))
+			return
+		}
+		env := &ws.Envelope{
+			Type:    "chat",
+			ID:      msg.ID,
+			From:    "sys",
+			ConvID:  convID,
+			Content: content,
+			TS:      ws.NowMS(),
+			Extra: map[string]any{
+				"kind":  "page_navigation",
+				"url":   url,
+				"title": title,
+			},
+		}
+		if s.hub != nil {
+			s.hub.BroadcastToAllAgents(env)
+		}
+		s.bizLog.Info("page_navigation broadcast",
+			zap.String("vid", visitorID), zap.String("conv", convID),
+			zap.String("url", url), zap.String("title", title))
+	}()
 }
 
 // PersistReadAsync 异步落库已读时刻：把对应 role 的 last_read_*_at 推到 time.Now()。

@@ -88,6 +88,18 @@
         iframe.contentWindow.postMessage({ __cs: 1, type: 'widget_state', open: opened }, '*');
     } catch (e) {}
   }
+  // 把宿主页 URL / title 推给 iframe（chat.html）—— 跨域时 iframe 内的 parent.location 拿不到，
+  // 必须由父页主动 postMessage 过去。
+  function postPageInfo() {
+    try {
+      iframe.contentWindow &&
+        iframe.contentWindow.postMessage({
+          __cs: 1, type: 'page_info',
+          url: location.href, title: document.title || '', referrer: document.referrer || ''
+        }, '*');
+    } catch (e) {}
+  }
+  iframe.addEventListener('load', postPageInfo);
   function open() {
     wrap.style.display = 'block';
     wrap.style.opacity = '0';
