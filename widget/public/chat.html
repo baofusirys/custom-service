@@ -57,78 +57,116 @@
   #list::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
 
   .time-divider {
-    text-align: center; margin: 12px 0 8px;
+    text-align: center; margin: 14px 0 10px;
     font-size: 11px; color: #9ca3af; user-select: none;
   }
   .time-divider span {
-    background: #e5e7eb; padding: 2px 10px; border-radius: 10px;
+    background: #e5e7eb; padding: 3px 12px; border-radius: 10px;
   }
 
   /* 系统提示（chip） */
   .sys-chip {
-    margin: 10px auto; max-width: 80%;
+    margin: 10px auto; max-width: 82%;
     background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa;
     padding: 6px 12px; border-radius: 14px; font-size: 12px;
     text-align: center; line-height: 1.5;
   }
 
-  /* 消息组 */
-  .msg-group { margin-bottom: 8px; }
-  .msg-line { display: flex; align-items: flex-end; gap: 8px; margin-top: 4px; }
+  /* ========== 消息组 ========== */
+  .msg-group { margin-bottom: 4px; }
+
+  .msg-line {
+    display: flex; align-items: flex-end;
+    gap: 10px;            /* 头像与气泡间距 */
+    margin-top: 8px;      /* 不同组之间的间距 */
+    padding: 0 2px;
+  }
   .msg-line.mine { flex-direction: row-reverse; }
+
   .msg-avatar {
-    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
     font-size: 13px; font-weight: 600; color: #fff;
     background: #94a3b8;
+    box-shadow: 0 1px 2px rgba(15,23,42,.06);
   }
   .msg-avatar.agent { background: linear-gradient(135deg, #4a90ff 0%, #2974ff 100%); }
   .msg-avatar.visitor { background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%); }
-  /* 同组连续消息隐藏头像位（保留占位） */
-  .msg-line.no-avatar .msg-avatar { visibility: hidden; }
 
+  /*
+   * msg-stack 关键设计：
+   *   - align-items: flex-start/end 让每条气泡按自己的内容宽度自适应
+   *     （短消息窄、长消息宽，互不影响）—— 修复了"新消息撑开旧消息"的 Bug
+   *   - max-width 限制整组不超出可视区域
+   */
+  .msg-stack {
+    display: flex; flex-direction: column;
+    gap: 3px;
+    max-width: calc(100% - 54px);   /* 留出头像 34px + gap 10px + 余量 */
+    min-width: 0;
+    align-items: flex-start;
+  }
+  .msg-line.mine .msg-stack { align-items: flex-end; }
+
+  /* ========== 气泡 ========== */
   .bubble {
-    max-width: 76%; padding: 9px 13px; border-radius: 14px;
-    line-height: 1.55; word-break: break-word; white-space: pre-wrap;
+    display: inline-block;          /* 关键：宽度跟随内容 */
+    max-width: 100%;
+    padding: 9px 14px;
+    border-radius: 18px;
+    line-height: 1.55;
+    word-break: break-word; white-space: pre-wrap;
     font-size: 14px;
     box-shadow: 0 1px 2px rgba(15,23,42,.04);
-    position: relative;
   }
   .msg-line.mine .bubble {
     background: linear-gradient(135deg, #4a90ff 0%, #2974ff 100%);
-    color: #fff; border-bottom-right-radius: 4px;
+    color: #fff;
   }
   .msg-line.theirs .bubble {
     background: #fff; color: #2c3034;
-    border: 1px solid #e5e7eb; border-bottom-left-radius: 4px;
+    border: 1px solid #e5e7eb;
   }
 
-  .bubble .img-msg {
-    display: block; max-width: 220px; max-height: 220px;
-    border-radius: 8px; cursor: pointer;
-  }
-  .bubble + .bubble { margin-top: 4px; }
+  /* 同组多条气泡的"chain" 视觉：
+   *   - 非最后一条：靠头像那侧的下角小圆角，连接下一条
+   *   - 最后一条：靠头像那侧的下角变成"尾巴"
+   */
+  .msg-line.mine .bubble:not(:last-child) { border-bottom-right-radius: 6px; }
+  .msg-line.theirs .bubble:not(:last-child) { border-bottom-left-radius: 6px; }
+  .msg-line.mine .bubble:last-child { border-bottom-right-radius: 5px; }
+  .msg-line.theirs .bubble:last-child { border-bottom-left-radius: 5px; }
 
+  /* 图片气泡：边距收紧，让图片自身做主 */
+  .bubble.bubble-image {
+    padding: 4px;
+    border-radius: 14px;
+  }
+  .bubble.bubble-image .img-msg {
+    display: block;
+    max-width: 220px; max-height: 220px;
+    border-radius: 10px; cursor: pointer;
+  }
+
+  /* 文件卡片 */
   .file-card {
-    display: inline-flex; align-items: center; gap: 8px;
+    display: inline-flex; align-items: center; gap: 10px;
     text-decoration: none; color: inherit;
-    background: rgba(255,255,255,.15); padding: 6px 8px; border-radius: 8px;
+    min-width: 180px;
   }
-  .msg-line.theirs .file-card { background: #f3f4f6; color: #1f2937; }
   .file-card .ico {
-    width: 28px; height: 28px; border-radius: 6px;
-    background: rgba(255,255,255,.25); flex-shrink: 0;
+    width: 36px; height: 36px; border-radius: 8px;
+    background: rgba(255,255,255,.2); flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
   }
-  .msg-line.theirs .file-card .ico { background: #fff; color: #2974ff; }
-  .file-card .name { font-size: 13px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-  .msg-meta {
-    font-size: 10px; color: #9ca3af;
-    margin-top: 2px;
+  .msg-line.theirs .file-card .ico { background: #eff6ff; color: #2974ff; }
+  .file-card .meta { display: flex; flex-direction: column; min-width: 0; }
+  .file-card .name {
+    font-size: 13px; font-weight: 500;
+    max-width: 170px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .msg-line.mine .msg-meta { text-align: right; padding-right: 40px; }
-  .msg-line.theirs .msg-meta { padding-left: 40px; }
+  .file-card .sub { font-size: 11px; opacity: .75; margin-top: 2px; }
 
   /* ========== 底部输入 ========== */
   footer {
@@ -315,23 +353,29 @@
     var mediaKind = m.media_kind?.String || m.media_kind || m.mkind || '';
     var mediaName = m.media_name?.String || m.media_name || m.mname || '';
 
-    if (mediaURL) {
-      if (mediaKind === 'image') {
-        var img = document.createElement('img');
-        img.className = 'img-msg';
-        img.src = httpBase + mediaURL;
-        img.onclick = function () { window.open(httpBase + mediaURL, '_blank'); };
-        b.appendChild(img);
-      } else {
-        var a = document.createElement('a');
-        a.className = 'file-card';
-        a.target = '_blank';
-        a.href = httpBase + mediaURL;
-        a.innerHTML =
-          '<span class="ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/></svg></span>' +
-          '<span class="name">' + escape(mediaName || '附件') + '</span>';
-        b.appendChild(a);
-      }
+    if (mediaURL && mediaKind === 'image') {
+      b.classList.add('bubble-image');
+      var img = document.createElement('img');
+      img.className = 'img-msg';
+      img.src = httpBase + mediaURL;
+      img.onclick = function () { window.open(httpBase + mediaURL, '_blank'); };
+      b.appendChild(img);
+    } else if (mediaURL) {
+      var a = document.createElement('a');
+      a.className = 'file-card';
+      a.target = '_blank';
+      a.href = httpBase + mediaURL;
+      a.innerHTML =
+        '<span class="ico">' +
+          '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">' +
+            '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/>' +
+          '</svg>' +
+        '</span>' +
+        '<span class="meta">' +
+          '<span class="name">' + escape(mediaName || '附件') + '</span>' +
+          '<span class="sub">点击下载</span>' +
+        '</span>';
+      b.appendChild(a);
     }
     if (m.content) {
       var t = document.createElement('span');
