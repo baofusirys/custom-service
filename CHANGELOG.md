@@ -4,6 +4,69 @@
 
 ---
 
+## [010] 2026-05-21 19:20 — 通知声音 + 访客进入提醒 + 自动问候
+
+**起因 / 需求**
+爷爷要求做完整的通知体系：
+1. 管理后台可以选择「客户端通知声音」和「客服端自己的通知声音」
+2. 访客打开有 widget 的网页时，通知管理后台，并自动给访客发一条问候消息
+3. 上面两个功能在管理后台是可选开关
+
+**新增功能 5 项 / 修改 7 个文件 / 删除 0 项**
+
+新建：
+- `backend/migrations/002_settings.sql` — 新建 `settings` key-value 表（key/value/updated_at），首次部署时插入 5 条默认配置
+- `admin/src/views/Settings.vue` — 新「系统设置」页（仅管理员可见），含：客服端/访客端声音选择（5 种内置音色 + 试听）、访客进入通知开关、自动问候开关 + 文本、Widget 标题
+- `admin/src/api/sound.js` — 5 种内置声音库（classic/chime/ding/soft/alert/none），用 Web Audio API 程序合成，**零外部文件零体积**
+
+修改：
+- `backend/internal/store/store.go` — 新增 `GetSetting/GetSettingsMap/SetSetting/SetSettings` + `EnsureConversation`（返回 isNew，区分新建/已存在会话）
+- `backend/internal/service/service.go` — 新增 `SettingBool/SettingStr/GreetingTextIfEnabled/OnVisitorEnter`（后者异步广播 visitor_enter sys 给所有 agent + 落库 greeting）
+- `backend/internal/ws/hub.go` — 新增 `BroadcastToAllAgents`（不走 byConv，专门给客服推系统通知）
+- `backend/internal/handler/http.go` — 新增 `GetSettings/UpdateSettings/VisitorPublicSettings`；`VisitorSession` 在 isNew 时调 `OnVisitorEnter` 异步通知，并在 HTTP 响应里直接回 `greeting` 文本（避开 WSS 时序问题）
+- `backend/cmd/server/main.go` — 注册 3 个新路由：`GET /api/visitor/settings`（公开） + `GET/POST /api/admin/settings`（仅 admin）
+- `admin/src/router/index.js` + `admin/src/views/Layout.vue` — 加 `/settings` 路由 + 菜单（仅 admin 可见）
+- `admin/src/views/Console.vue` — `onMessage` 处理 `sys/visitor_enter` 弹 `ElNotification`；收到访客 chat 消息播 `agentSound`；onMounted 时拉客服音色偏好 + 监听首次 click 解锁 AudioContext
+- `widget/public/chat.html` — 启动时拉 `/api/visitor/settings` 拿 `notifySound` + `widget_title`；收消息播声；handler 返回 `greeting` 时直接 render
+
+**业务流程**
+
+访客打开网页：
+```
+1. loader.js 注入 iframe → chat.html
+2. chat.html bootstrap → 拉 /api/visitor/settings 拿声音/标题 → 拉 /api/visitor/session 创建会话
+3. 后端 EnsureConversation 返回 isNew=true（新会话）：
+   a) HTTP 响应里返回 greeting 文本（如果 greeting_enabled）
+   b) 异步 OnVisitorEnter:
+      - 广播 sys/visitor_enter 给所有在线 agent → 客服端弹 ElNotification + 播声
+      - InsertMessage 把 greeting 落库（客服拉历史时能看到）
+4. chat.html 渲染 greeting 到访客气泡列表 + 缓存到 localStorage
+5. chat.html 建立 WSS（后续消息走 WSS 实时）
+```
+
+后续访客发消息：
+- WSS chat → 客服端 onMessage → 区分 fromVisitor → push 到当前会话 或 conv.unread++ 并 playSound(agentSound)
+
+客服在设置页修改：
+- POST /api/admin/settings 白名单过滤（防止任意 key 注入）+ SanitizeText 清洗 + 写 audit_log
+
+**触发场景与边界 + 验证方式**
+- 验证 1：访客新打开 demo.html → 客服端右下角弹「访客 xxxxxx 进入了网站」通知 + 响 chime；同时访客气泡列表里出现问候消息
+- 验证 2：管理后台 /settings 修改客服端声音为 "soft"，刷新 console；下次访客发消息 → 客服端播 soft 调
+- 验证 3：管理后台关闭「通知客服」开关 → 下次访客新打开 → 客服端不再弹通知（但 greeting 仍会发，因 greeting_enabled 独立）
+- 验证 4：管理后台修改 greeting_text 为「您好，我是小客服」→ 新访客打开看到这个新文本
+- 边界：访客同一浏览器刷新页面（不是新会话，isNew=false）→ 不再触发 visitor_enter 通知和 greeting，避免刷新风暴
+- 边界：浏览器 AudioContext 需要用户手势解锁，监听首次 click 自动解锁
+
+**安全 / 健壮性**
+- settings key 白名单 6 项，POST 时严格过滤；greeting_text / widget_title 走 SanitizeText 防 XSS；长度限制 500 字
+- audit_log 记录每次 update_settings 的 actor + IP + diff
+- OnVisitorEnter 用 goroutine + 5s timeout + panic recover；失败不影响访客主流程
+- Web Audio API 播放 500ms 内同种音色防抖（避免连发消息时声音叠成噪声）
+- 浏览器 AudioContext 未解锁时静默失败，不报错
+
+---
+
 ## [009] 2026-05-21 18:32 — 重做 Widget 消息气泡：宽度按内容自适应 + 头像间距 + 尾巴设计
 
 **起因 / 需求**

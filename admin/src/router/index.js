@@ -11,7 +11,8 @@ const router = createRouter({
       children: [
         { path: 'console', component: () => import('../views/Console.vue') },
         { path: 'history', component: () => import('../views/History.vue') },
-        { path: 'agents', component: () => import('../views/Agents.vue') }
+        { path: 'agents', component: () => import('../views/Agents.vue') },
+        { path: 'settings', component: () => import('../views/Settings.vue') }
       ]
     }
   ]

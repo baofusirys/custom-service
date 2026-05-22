@@ -134,6 +134,7 @@ func main() {
 		visitor.Use(limiter.HTTPMiddleware(cfg.IPHTTPRPM))
 		{
 			visitor.POST("/session", h.VisitorSession)
+			visitor.GET("/settings", h.VisitorPublicSettings)
 		}
 
 		// 客服登录
@@ -156,6 +157,8 @@ func main() {
 			adm.GET("/agents", h.ListAgents)
 			adm.POST("/agents", h.CreateAgent)
 			adm.POST("/agents/active", h.DisableAgent)
+			adm.GET("/settings", h.GetSettings)
+			adm.POST("/settings", h.UpdateSettings)
 		}
 
 		// 文件上传 / 下载

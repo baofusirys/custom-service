@@ -22,6 +22,7 @@ function logout() {
         <el-menu-item index="/console">在线会话</el-menu-item>
         <el-menu-item index="/history">历史记录</el-menu-item>
         <el-menu-item index="/agents" v-if="session.agent?.role === 'admin'">客服管理</el-menu-item>
+        <el-menu-item index="/settings" v-if="session.agent?.role === 'admin'">系统设置</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

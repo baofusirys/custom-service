@@ -96,7 +96,7 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50001, "msg": "保存访客失败"})
 		return
 	}
-	conv, err := h.svc.Store().OpenOrGetConversation(c.Request.Context(), v.SiteID, v.ID)
+	conv, isNew, err := h.svc.Store().EnsureConversation(c.Request.Context(), v.SiteID, v.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50002, "msg": "创建会话失败"})
 		return
@@ -106,13 +106,21 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50003, "msg": "签发 token 失败"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"code":          0,
 		"visitor_id":    v.ID,
 		"conversation":  conv.ID,
 		"visitor_token": tok,
 		"server_now":    time.Now().In(h.cfg.Timezone).Format("2006-01-02 15:04:05"),
-	})
+	}
+	// 新会话时：1) 异步通知客服 + 落库问候 2) 在 HTTP 响应里直接回 greeting 文本
+	if isNew {
+		if g := h.svc.GreetingTextIfEnabled(c.Request.Context()); g != "" {
+			resp["greeting"] = g
+		}
+		h.svc.OnVisitorEnter(v, conv, h.hub)
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // VisitorWS 访客的 WSS 入口。query: token=<visitor_token>
@@ -466,6 +474,90 @@ func (h *HTTP) ListAgents(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": list})
+}
+
+// =========== 系统设置（仅管理员） ===========
+
+// 允许的 setting key 白名单（防止任意 key 注入）
+var allowedSettingKeys = map[string]bool{
+	"agent_notify_sound":   true,
+	"visitor_notify_sound": true,
+	"notify_visitor_enter": true,
+	"greeting_enabled":     true,
+	"greeting_text":        true,
+	"widget_title":         true,
+}
+
+// GetSettings 拉所有可见 setting（仅管理员可读全部）
+func (h *HTTP) GetSettings(c *gin.Context) {
+	keys := make([]string, 0, len(allowedSettingKeys))
+	for k := range allowedSettingKeys {
+		keys = append(keys, k)
+	}
+	m, err := h.svc.Store().GetSettingsMap(c.Request.Context(), keys)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50030, "msg": "查询失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": m})
+}
+
+// UpdateSettings 批量更新 setting（仅管理员）
+func (h *HTTP) UpdateSettings(c *gin.Context) {
+	var body map[string]string
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40030, "msg": "参数错误"})
+		return
+	}
+	// 过滤：只允许白名单内的 key；值统一过 SanitizeText 清洗
+	filtered := make(map[string]string, len(body))
+	for k, v := range body {
+		if !allowedSettingKeys[k] {
+			continue
+		}
+		// greeting_text 可能含正常标点，只做 XSS 清洗保留文本
+		if k == "greeting_text" || k == "widget_title" {
+			v = security.SanitizeText(v)
+			if len(v) > 500 {
+				v = v[:500]
+			}
+		}
+		filtered[k] = v
+	}
+	if len(filtered) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40031, "msg": "无可更新字段"})
+		return
+	}
+	if err := h.svc.Store().SetSettings(c.Request.Context(), filtered); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50031, "msg": "保存失败"})
+		return
+	}
+	actor, _ := c.Get("agent_username")
+	h.svc.Store().AuditLog(c.Request.Context(), fmt.Sprintf("%v", actor),
+		"update_settings", "", fmt.Sprintf("%v", filtered), security.ClientIP(c))
+	c.JSON(http.StatusOK, gin.H{"code": 0})
+}
+
+// VisitorPublicSettings 给访客 widget 拉取的公开子集（不需要 token）
+func (h *HTTP) VisitorPublicSettings(c *gin.Context) {
+	ctx := c.Request.Context()
+	m, _ := h.svc.Store().GetSettingsMap(ctx, []string{
+		"visitor_notify_sound", "widget_title",
+	})
+	c.JSON(http.StatusOK, gin.H{
+		"code": 0,
+		"data": gin.H{
+			"notify_sound": defaultIfEmpty(m["visitor_notify_sound"], "classic"),
+			"widget_title": defaultIfEmpty(m["widget_title"], "在线客服"),
+		},
+	})
+}
+
+func defaultIfEmpty(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 func (h *HTTP) DisableAgent(c *gin.Context) {

@@ -359,6 +359,18 @@ func (h *Hub) PushToVisitor(visitorID string, e *Envelope) bool {
 	return false
 }
 
+// BroadcastToAllAgents 给本节点所有在线客服发广播（如「访客进入」系统通知）。
+// 不走 byConv（避免访客自己也收到针对客服的提醒）。
+// 注：v0.2.0 单节点部署，未做跨节点 Redis 桥接，多副本场景下其他节点的 agent 暂时不会收到，
+// 由 v0.3.0 通过专用频道 cs:bcast:agents 解决。
+func (h *Hub) BroadcastToAllAgents(e *Envelope) {
+	e.Node = h.cfg.NodeID
+	h.agents.Range(func(_, v any) bool {
+		v.(*Client).Send(e)
+		return true
+	})
+}
+
 func beijing() *time.Location {
 	tz, _ := time.LoadLocation("Asia/Shanghai")
 	return tz

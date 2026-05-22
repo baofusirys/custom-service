@@ -1,11 +1,12 @@
 <script setup>
 import { onMounted, onUnmounted, ref, nextTick, computed } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElNotification } from 'element-plus'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import 'dayjs/locale/zh-cn'
 import http from '../api/http'
 import { AgentWS } from '../api/ws'
+import { playSound, unlockAudio } from '../api/sound'
 import { useSession } from '../store/session'
 
 dayjs.extend(relativeTime)
@@ -19,7 +20,17 @@ const draft = ref('')
 const onlineStats = ref({ visitors: 0, agents: 0 })
 const fileInput = ref(null)
 const sending = ref(false)
+const agentSound = ref('chime') // 由 /admin/settings 拉到的客服端通知音
 let ws = null
+
+async function loadSoundPref() {
+  // 仅管理员可读全设置；普通客服 fallback 默认值
+  if (session.agent?.role !== 'admin') return
+  try {
+    const r = await http.get('/admin/settings')
+    agentSound.value = r.data?.agent_notify_sound || 'chime'
+  } catch {}
+}
 
 async function refreshConvs() {
   const r = await http.get('/agent/conversations')
@@ -204,19 +215,34 @@ function scheduleConvsRefresh() {
 
 let convsTimer
 onMounted(async () => {
-  await refreshConvs()
-  await refreshStats()
+  await Promise.all([refreshConvs(), refreshStats(), loadSoundPref()])
+  // 解锁 AudioContext（Chrome 等需要用户手势）—— 用户既然能进到 console 页就算手势
+  document.addEventListener('click', unlockAudio, { once: true, capture: true })
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   ws = new AgentWS({
     url: `${proto}://${location.host}/ws/agent`,
     token: session.token,
     onMessage: (env) => {
-      if (env.type !== 'chat') {
-        if (env.type === 'sys') scheduleConvsRefresh()
+      if (env.type === 'sys') {
+        // 系统通知：访客进入提醒（弹 toast + 播声 + 刷会话列表）
+        if (env.extra?.kind === 'visitor_enter') {
+          ElNotification({
+            title: '访客进入',
+            message: env.content || '有新访客进入网站',
+            type: 'info',
+            duration: 4500,
+            position: 'bottom-right'
+          })
+          playSound(agentSound.value)
+        }
+        scheduleConvsRefresh()
         return
       }
+      if (env.type !== 'chat') return
+
       const fromAgent = env.from && env.from.startsWith('agent:')
       const fromVisitor = env.from && env.from.startsWith('visitor:')
+      const fromSys = env.from === 'sys'
       const isMyOwn = fromAgent && String(env.from.split(':')[1]) === String(session.agent?.id)
       // 自己发的回声：本地已乐观渲染过，跳过避免重复
       if (isMyOwn) return
@@ -225,8 +251,8 @@ onMounted(async () => {
       if (inCurrent) {
         messages.value.push({
           id: env.id,
-          sender: fromAgent ? 'agent' : 'visitor',
-          sender_ref: env.from?.split(':')[1] || '',
+          sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
+          sender_ref: env.from?.includes(':') ? env.from.split(':')[1] : (fromSys ? 'system' : ''),
           content: env.content || '',
           media_url: env.media ? { String: env.media, Valid: true } : null,
           media_kind: env.mkind ? { String: env.mkind, Valid: true } : null,
@@ -234,9 +260,10 @@ onMounted(async () => {
           created_at: new Date(env.ts || Date.now()).toISOString()
         })
         nextTick(scrollToBottom)
-        // 访客发到当前会话：静默把未读清零（服务端持久化）
+        // 访客发到当前会话：静默把未读清零（服务端持久化）+ 播声
         if (fromVisitor) {
           http.post(`/agent/conversations/${env.conv}/read`).catch(() => {})
+          playSound(agentSound.value)
         }
         return
       }
@@ -244,9 +271,10 @@ onMounted(async () => {
       // 非当前会话的新消息：本地实时更新（WSS，0 延迟）
       const conv = convs.value.find(x => x.id === env.conv)
       if (conv) {
-        // 只有访客的消息才 +1 未读；其他客服发的消息只更新活动时间 + 上浮
+        // 只有访客的消息才 +1 未读 + 播声；其他客服/sys 发的只更新活动时间 + 上浮
         if (fromVisitor) {
           conv.unread = (conv.unread || 0) + 1
+          playSound(agentSound.value)
         }
         conv.updated_at = new Date(env.ts || Date.now()).toISOString()
         const idx = convs.value.indexOf(conv)
@@ -257,6 +285,7 @@ onMounted(async () => {
       } else if (fromVisitor) {
         // 全新访客（不在当前列表）：触发一次防抖刷新（仅访客触发，避免无谓拉取）
         scheduleConvsRefresh()
+        playSound(agentSound.value)
       }
     }
   })

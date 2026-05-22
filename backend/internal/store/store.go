@@ -100,6 +100,19 @@ ON DUPLICATE KEY UPDATE
 
 // ============ Conversation ============
 
+// EnsureConversation 拿到（或新建）一个 open 会话，并返回是否新建。
+// 调用方可以用 isNew 判断要不要触发"访客进入"通知和问候消息。
+func (s *Store) EnsureConversation(ctx context.Context, siteID, visitorID string) (*Conversation, bool, error) {
+	c, err := s.OpenOrGetConversation(ctx, siteID, visitorID)
+	if err != nil {
+		return nil, false, err
+	}
+	// 新建的会话特征：started_at == updated_at（同一时刻插入）且差距毫秒级
+	isNew := !c.StartedAt.IsZero() && c.StartedAt.Equal(c.UpdatedAt) &&
+		time.Since(c.StartedAt) < 2*time.Second
+	return c, isNew, nil
+}
+
 func (s *Store) OpenOrGetConversation(ctx context.Context, siteID, visitorID string) (*Conversation, error) {
 	c := &Conversation{}
 	err := s.db.QueryRowContext(ctx, `
@@ -346,6 +359,92 @@ INSERT INTO files(id, conv_id, upload_by, uploader_ref, filename, store_key, siz
 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		f.ID, f.ConvID, f.UploadBy, f.UploaderRef, f.Filename, f.StoreKey, f.Size, f.MIME, f.CreatedAt)
 	return err
+}
+
+// ============ Settings (key-value) ============
+
+// GetSetting 单条读取；missing 时返回 def。
+func (s *Store) GetSetting(ctx context.Context, key, def string) string {
+	var v sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key_name=?`, key).Scan(&v)
+	if err != nil || !v.Valid {
+		return def
+	}
+	return v.String
+}
+
+// GetSettingsMap 批量读取。允许 keys 为空表示拉全表。
+func (s *Store) GetSettingsMap(ctx context.Context, keys []string) (map[string]string, error) {
+	out := map[string]string{}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if len(keys) == 0 {
+		rows, err = s.db.QueryContext(ctx, `SELECT key_name, value FROM settings`)
+	} else {
+		// IN 子句安全拼接（keys 来自代码硬编码，非用户输入）
+		placeholders := ""
+		args := make([]any, len(keys))
+		for i, k := range keys {
+			if i > 0 {
+				placeholders += ","
+			}
+			placeholders += "?"
+			args[i] = k
+		}
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT key_name, value FROM settings WHERE key_name IN (`+placeholders+`)`, args...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var v sql.NullString
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		if v.Valid {
+			out[k] = v.String
+		} else {
+			out[k] = ""
+		}
+	}
+	return out, rows.Err()
+}
+
+// SetSetting upsert 单条。
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO settings(key_name, value, updated_at) VALUES(?, ?, ?)
+ON DUPLICATE KEY UPDATE value=VALUES(value), updated_at=VALUES(updated_at)`,
+		key, value, time.Now())
+	return err
+}
+
+// SetSettings 批量 upsert。
+func (s *Store) SetSettings(ctx context.Context, kv map[string]string) error {
+	if len(kv) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for k, v := range kv {
+		_, err := tx.ExecContext(ctx, `
+INSERT INTO settings(key_name, value, updated_at) VALUES(?, ?, ?)
+ON DUPLICATE KEY UPDATE value=VALUES(value), updated_at=VALUES(updated_at)`,
+			k, v, now)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ============ Audit ============

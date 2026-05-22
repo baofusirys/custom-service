@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/custom-service/backend/internal/security"
@@ -128,6 +129,101 @@ func (s *Service) Cipher() *security.Cipher       { return s.cipher }
 func (s *Service) Limiter() *security.RateLimiter { return s.limiter }
 func (s *Service) BizLog() *zap.Logger            { return s.bizLog }
 func (s *Service) AuditLog() *zap.Logger          { return s.auditLog }
+
+// ============ Settings ============
+
+// SettingBool 读 bool 类型 setting（值为 "true" 视为 true，其他/缺失返回 def）。
+func (s *Service) SettingBool(ctx context.Context, key string, def bool) bool {
+	v := s.store.GetSetting(ctx, key, "")
+	if v == "" {
+		return def
+	}
+	return v == "true" || v == "1" || v == "yes"
+}
+
+// SettingStr 读 string 类型 setting。
+func (s *Service) SettingStr(ctx context.Context, key, def string) string {
+	v := s.store.GetSetting(ctx, key, "")
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// ============ 访客进入通知 + 自动问候 ============
+
+// GreetingTextIfEnabled 返回当前问候文本；未开启返回 ""。
+// handler.VisitorSession 在 HTTP 响应里把这段文本回给访客，访客 bootstrap 后立即渲染 —— 不依赖 WSS 时序。
+func (s *Service) GreetingTextIfEnabled(ctx context.Context) string {
+	if !s.SettingBool(ctx, "greeting_enabled", true) {
+		return ""
+	}
+	return s.SettingStr(ctx, "greeting_text", "您好，欢迎光临！请问有什么可以帮您？")
+}
+
+// OnVisitorEnter 异步执行两件事（不阻塞访客主流程）：
+//   1. 给所有在线客服广播 visitor_enter 通知（带画像）
+//   2. 把 greeting 消息落库（让客服端历史能看到这条 sys 消息）
+//
+// 注：问候消息不通过 WSS 推给访客 —— 访客已经从 HTTP 响应直接拿到 greeting 文本本地渲染。
+// 这样规避了「访客 WSS 还没建立时服务端就广播」的时序丢消息问题。
+func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversation, hub *ws.Hub) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.bizLog.Error("on_visitor_enter panic", zap.Any("err", r))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		identifier := visitor.Identifier
+		if identifier == "" {
+			identifier = "访客 " + visitor.ID[:6]
+		}
+
+		// 1) 给所有在线客服推「访客进入」通知
+		if s.SettingBool(ctx, "notify_visitor_enter", true) {
+			hub.BroadcastToAllAgents(&ws.Envelope{
+				Type:    "sys",
+				ID:      uuid.NewString(),
+				ConvID:  conv.ID,
+				TS:      ws.NowMS(),
+				Content: identifier + " 进入了网站",
+				Extra: map[string]any{
+					"kind":       "visitor_enter",
+					"visitor_id": visitor.ID,
+					"site_id":    visitor.SiteID,
+					"country":    visitor.Country,
+					"city":       visitor.City,
+					"referer":    visitor.Referer,
+					"last_page":  visitor.LastPage,
+				},
+			})
+			s.bizLog.Info("visitor_enter notified",
+				zap.String("vid", visitor.ID), zap.String("conv", conv.ID))
+		}
+
+		// 2) 把 greeting 落库（客服端拉历史时能看到）
+		if s.SettingBool(ctx, "greeting_enabled", true) {
+			text := s.SettingStr(ctx, "greeting_text", "您好，欢迎光临！请问有什么可以帮您？")
+			msg := &store.Message{
+				ID:          uuid.NewString(),
+				ConvID:      conv.ID,
+				Sender:      "sys",
+				SenderRef:   "system",
+				Content:     text,
+				CreatedAt:   time.Now(),
+				DeliveredWS: true,
+			}
+			if err := s.store.InsertMessage(ctx, msg); err != nil {
+				s.bizLog.Error("greeting insert err", zap.Error(err))
+				return
+			}
+			s.bizLog.Info("greeting persisted", zap.String("conv", conv.ID), zap.String("msg", msg.ID))
+		}
+	}()
+}
 
 // EnsureBootstrapAdmin 启动时确保至少存在一个超管账号。
 func (s *Service) EnsureBootstrapAdmin(ctx context.Context, username, password string) error {
