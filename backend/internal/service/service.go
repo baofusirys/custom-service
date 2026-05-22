@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"database/sql"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,21 +24,17 @@ type Service struct {
 	limiter  *security.RateLimiter
 	visMsgPM int
 	hub      *ws.Hub // 由 main.go 创建 Hub 后通过 SetHub 注入（解决 Hub<->Service 循环依赖）
-	// 页面跳转去重：同一访客 30 秒内相同 URL 只记一次
-	pageDedupe   map[string]time.Time
-	pageDedupeMu sync.Mutex
 }
 
 func New(st *store.Store, cipher *security.Cipher, biz, sec, audit *zap.Logger, lim *security.RateLimiter, visMsgPM int) *Service {
 	return &Service{
-		store:      st,
-		cipher:     cipher,
-		bizLog:     biz,
-		secLog:     sec,
-		auditLog:   audit,
-		limiter:    lim,
-		visMsgPM:   visMsgPM,
-		pageDedupe: make(map[string]time.Time),
+		store:    st,
+		cipher:   cipher,
+		bizLog:   biz,
+		secLog:   sec,
+		auditLog: audit,
+		limiter:  lim,
+		visMsgPM: visMsgPM,
 	}
 }
 
@@ -97,12 +92,14 @@ func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c 
 
 // OnPageNavigation 访客每打开/跳转一个页面时触发。
 //
-// 设计：
-//  1. 30 秒去重（同访客 + 同 URL 不重复记）—— 避免刷新 / SPA 跳转刷屏
-//  2. 异步落库为一条 sys 消息（sender=sys, sender_ref="page:<url>"）
+// 设计（按爷爷要求：不做服务端去重，每次都立即上报展示）：
+//  1. 异步落库为一条 sys 消息（sender=sys, sender_ref="page:<url>"）
 //     —— 让客服历史也能看到访客的浏览路径
-//  3. BroadcastToAllAgents 发 type=chat from=sys + extra.kind=page_navigation
-//     —— 客服端收到后渲染为「灰色横幅」（不是普通气泡），参考 Crisp 风格
+//  2. BroadcastToAllAgents 发 type=chat from=sys + extra.kind=page_navigation
+//     —— 客服端收到后渲染为「橙色横幅」（不是普通气泡），参考 Crisp 风格
+//
+// 注：客户端 chat.html 内部有 pageReported 状态，同 URL 在同一会话实例内不会重复触发；
+// 跨页面跳转时 chat.html 是新实例，pageReported 重置，会重新上报。
 func (s *Service) OnPageNavigation(visitorID, convID, url, title string) {
 	if convID == "" {
 		return
@@ -119,26 +116,7 @@ func (s *Service) OnPageNavigation(visitorID, convID, url, title string) {
 	if url == "" && title == "" {
 		return
 	}
-
-	// 30 秒去重
-	dedupeKey := visitorID + "|" + url
 	now := time.Now()
-	s.pageDedupeMu.Lock()
-	last, ok := s.pageDedupe[dedupeKey]
-	if ok && now.Sub(last) < 30*time.Second {
-		s.pageDedupeMu.Unlock()
-		return
-	}
-	s.pageDedupe[dedupeKey] = now
-	// 顺便清理超过 1 小时的旧 key（防内存泄漏）
-	if len(s.pageDedupe) > 5000 {
-		for k, v := range s.pageDedupe {
-			if now.Sub(v) > time.Hour {
-				delete(s.pageDedupe, k)
-			}
-		}
-	}
-	s.pageDedupeMu.Unlock()
 
 	go func() {
 		defer func() {
