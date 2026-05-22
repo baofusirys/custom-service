@@ -325,10 +325,10 @@ onMounted(async () => {
           convs.value.splice(idx, 1)
           convs.value.unshift(conv)
         }
-      } else if (fromVisitor) {
-        // 全新访客（不在当前列表）：触发一次防抖刷新（仅访客触发，避免无谓拉取）
+      } else if (fromVisitor || fromSys) {
+        // 全新访客（或新会话的系统问候）—— 会话还没在客服当前列表里，触发一次防抖刷新
         scheduleConvsRefresh()
-        playSound(agentSound.value)
+        if (fromVisitor) playSound(agentSound.value)
       }
     }
   })

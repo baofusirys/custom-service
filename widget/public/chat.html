@@ -571,15 +571,8 @@
       token = data.visitor_token;
       localStorage.setItem(STORE_KEY, JSON.stringify({ visitor_id: visitorID }));
       loadHistoryFromCache();
-      // 服务端在新会话时回了 greeting 文本 —— 直接渲染，规避 WSS 时序丢消息
-      if (data.greeting) {
-        var gm = {
-          sender: 'agent',
-          content: data.greeting,
-          created_at: new Date().toISOString()
-        };
-        render(gm); persistMsg(gm);
-      }
+      // 注意：问候消息不在这里渲染。服务端会在我们的 WSS 上线后主动推送
+      // type=chat from=sys 消息，由下面的 ws.onmessage 走完整逻辑（含播声 / 未读）
       connectWS();
     } catch (e) {
       setStatus('连接失败，重试中', false);

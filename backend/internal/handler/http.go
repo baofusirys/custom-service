@@ -113,11 +113,10 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		"visitor_token": tok,
 		"server_now":    time.Now().In(h.cfg.Timezone).Format("2006-01-02 15:04:05"),
 	}
-	// 新会话时：1) 异步通知客服 + 落库问候 2) 在 HTTP 响应里直接回 greeting 文本
+	// 新会话时：异步通知客服 + 落库问候 + 等访客 WSS 上线后通过 WSS 推送问候
+	// 不再在 HTTP 响应里塞 greeting —— 让 greeting 走完整 WSS 通道，
+	// 访客端能走正常的 playNotify / unread+1 / 已读机制
 	if isNew {
-		if g := h.svc.GreetingTextIfEnabled(c.Request.Context()); g != "" {
-			resp["greeting"] = g
-		}
 		h.svc.OnVisitorEnter(v, conv, h.hub)
 	}
 	c.JSON(http.StatusOK, resp)

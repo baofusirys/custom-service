@@ -4,6 +4,74 @@
 
 ---
 
+## [014] 2026-05-21 21:00 — 问候消息走完整 WSS 通道：触发提示音 + 未读 + 已读
+
+**起因 / 需求**
+爷爷指出新访客的自动问候消息应该走"正常消息"的处理逻辑，包括：
+- 触发访客端提示音
+- widget 收起时 badge 未读 +1
+- 走 [013] 的已读机制
+
+但之前 [010] 我把 greeting 走的是"HTTP response 直接返回文本 + chat.html 本地 render"路径，目的是规避"访客 WSS 还没建立时服务端就推消息会丢"的时序问题。这条路径绕过了 `ws.onmessage` 完整逻辑，所以**没播声、没累计未读、没已读机制**。
+
+**新设计：完全 WSS 通道 + 服务端等访客上线**
+服务端在 OnVisitorEnter 内启动 goroutine：
+1. 立即广播 `visitor_enter` sys 通知给所有客服（不变）
+2. InsertMessage greeting 落库（不变）
+3. 立即 BroadcastToAllAgents 把 greeting 推给所有客服（让客服端左侧列表立即看到新会话 + 这条 sys 消息）
+4. **轮询等访客 WSS 上线**：最多等 8 秒，每 150ms 调一次 `hub.PushToVisitor(visitorID, env)`；上线（PushToVisitor 返回 true）立即推送 greeting
+
+这样问候消息对访客端来说就是一条普通 type=chat 消息，走完整 ws.onmessage 逻辑：
+- `playNotify()` 触发提示音
+- widget 收起时 `unread++` + 通知父框红 badge
+- widget 打开时 `sendReadAck()` 立即回送已读
+
+**改了什么 / 加了什么 / 删了什么**（修改 4 个 / 新增 0 个 / 删除 0 个）
+- 修改：[backend/internal/service/service.go](backend/internal/service/service.go) — `OnVisitorEnter` 重做：
+  - 异步 goroutine timeout 5s → 15s（要容纳 8 秒等访客上线的轮询）
+  - 删掉"只落库不推送"的旧逻辑，换成"落库 + 立即推所有客服 + 轮询等访客上线 → PushToVisitor"
+- 修改：[backend/internal/handler/http.go](backend/internal/handler/http.go) — 删除 `resp["greeting"] = ...`，不再在 HTTP 响应里塞 greeting 文本
+- 修改：[widget/public/chat.html](widget/public/chat.html) — 删除 bootstrap 里 `if (data.greeting) { render(...); persistMsg(...); }` 这段，让 greeting 完全从 WSS 推送
+- 修改：[admin/src/views/Console.vue](admin/src/views/Console.vue) — `onMessage` 收到非当前会话的 chat 消息时，`fromVisitor || fromSys` 都触发 `scheduleConvsRefresh()`，让客服端能在新访客 + greeting 到达时立即拉到新会话列表
+
+**业务流程对比**
+
+旧（[010]/[013] 之前）：
+```
+访客打开网站
+  → HTTP /visitor/session 返回 visitor_token + greeting 文本
+  → chat.html bootstrap 直接 render(greeting) 本地绘制
+  → 没播声、没未读、没已读
+```
+
+新（[014]）：
+```
+访客打开网站
+  → HTTP /visitor/session 返回 visitor_token (无 greeting)
+  → 服务端启动 goroutine：
+     1) BroadcastToAllAgents(visitor_enter sys) — 客服弹通知 + 播声
+     2) InsertMessage(greeting) 落库
+     3) BroadcastToAllAgents(greeting chat from=sys) — 客服列表显示新会话 + 消息
+     4) 轮询每 150ms：尝试 PushToVisitor(visitor.ID, greeting)
+  → 同时访客端 chat.html bootstrap → connectWS → onopen
+     hub.handleRegister → 访客进入 visitors map
+  → 下一次 PushToVisitor 返回 true → 访客端收到 chat from=sys
+  → 走完整 onmessage 逻辑：playNotify + (widget 收起 → unread++; 打开 → sendReadAck)
+```
+
+**触发场景与边界 + 验证方式**
+- 验证 1：访客新打开 demo → 应该听到提示音、看到客服头像左侧出现问候消息气泡（不是之前那个"瞬间出现"）
+- 验证 2：访客 widget 收起状态进入网站 → 浮动按钮红 badge 显示 1（之前是 0）
+- 验证 3：访客 widget 打开状态进入网站 → 自动 sendReadAck → 客服端能看到这条 greeting 已被读
+- 验证 4：业务日志里看到 `greeting pushed to visitor via WSS`（成功推送）；如果访客 WSS 一直没建立成功，看到 `greeting WSS push timeout (visitor not online within 8s)`，但 DB 仍然有这条记录
+- 边界：8 秒超时基本覆盖正常网络（访客 WSS 建立通常 100-500ms）；超时后访客仍可通过下次 `loadMessages` 拉历史看到
+
+**注意事项**
+- 服务端轮询是 `for time.Now().Before(deadline) { sleep 150ms; PushToVisitor }`，单 goroutine 阻塞 8 秒最多，资源占用小
+- 多个新访客同时进入：每个独立 goroutine 互不影响
+
+---
+
 ## [013] 2026-05-21 20:40 — 双向「已读」状态：WSS 实时 + DB 持久化
 
 **起因 / 需求**

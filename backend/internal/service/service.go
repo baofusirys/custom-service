@@ -186,12 +186,19 @@ func (s *Service) GreetingTextIfEnabled(ctx context.Context) string {
 	return s.SettingStr(ctx, "greeting_text", "您好，欢迎光临！请问有什么可以帮您？")
 }
 
-// OnVisitorEnter 异步执行两件事（不阻塞访客主流程）：
-//   1. 给所有在线客服广播 visitor_enter 通知（带画像）
-//   2. 把 greeting 消息落库（让客服端历史能看到这条 sys 消息）
+// OnVisitorEnter 异步执行三件事（不阻塞访客主流程，goroutine 内运行）：
+//   1. 立即广播 visitor_enter sys 通知给所有在线客服（触发客服端 ElNotification + 播声）
+//   2. 把 greeting 落库（DB 持久化，客服端历史能查到）
+//   3. 等访客 WSS 上线后 PushToVisitor greeting（type=chat, from=sys），
+//      让访客端走完整的 onmessage 逻辑：播提示音 / 累计未读 / 显示「已读」机制
+//      同时给所有在线客服广播一份（客服端能在左侧列表立即看到这条 sys 消息）
 //
-// 注：问候消息不通过 WSS 推给访客 —— 访客已经从 HTTP 响应直接拿到 greeting 文本本地渲染。
-// 这样规避了「访客 WSS 还没建立时服务端就广播」的时序丢消息问题。
+// 为啥不用之前那套「HTTP response 里返回 greeting 文本，访客端直接 render」的旧方案：
+// 旧方案虽然简单，但访客端是"自己绘制"消息，没走 WSS onmessage 通道，所以：
+//   - 没触发提示音 playNotify
+//   - 没累计未读（widget 收起时 badge 不动）
+//   - 没已读机制
+// 新方案让 greeting 完全等同于"客服真实发的消息"。
 func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversation, hub *ws.Hub) {
 	go func() {
 		defer func() {
@@ -199,7 +206,7 @@ func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversatio
 				s.bizLog.Error("on_visitor_enter panic", zap.Any("err", r))
 			}
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		identifier := visitor.Identifier
@@ -207,7 +214,7 @@ func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversatio
 			identifier = "访客 " + visitor.ID[:6]
 		}
 
-		// 1) 给所有在线客服推「访客进入」通知
+		// 1) 立即通知客服「访客进入」
 		if s.SettingBool(ctx, "notify_visitor_enter", true) {
 			hub.BroadcastToAllAgents(&ws.Envelope{
 				Type:    "sys",
@@ -229,24 +236,48 @@ func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversatio
 				zap.String("vid", visitor.ID), zap.String("conv", conv.ID))
 		}
 
-		// 2) 把 greeting 落库（客服端拉历史时能看到）
-		if s.SettingBool(ctx, "greeting_enabled", true) {
-			text := s.SettingStr(ctx, "greeting_text", "您好，欢迎光临！请问有什么可以帮您？")
-			msg := &store.Message{
-				ID:          uuid.NewString(),
-				ConvID:      conv.ID,
-				Sender:      "sys",
-				SenderRef:   "system",
-				Content:     text,
-				CreatedAt:   time.Now(),
-				DeliveredWS: true,
-			}
-			if err := s.store.InsertMessage(ctx, msg); err != nil {
-				s.bizLog.Error("greeting insert err", zap.Error(err))
+		// 2) 自动问候
+		if !s.SettingBool(ctx, "greeting_enabled", true) {
+			return
+		}
+		text := s.SettingStr(ctx, "greeting_text", "您好，欢迎光临！请问有什么可以帮您？")
+		msg := &store.Message{
+			ID:          uuid.NewString(),
+			ConvID:      conv.ID,
+			Sender:      "sys",
+			SenderRef:   "system",
+			Content:     text,
+			CreatedAt:   time.Now(),
+			DeliveredWS: true,
+		}
+		if err := s.store.InsertMessage(ctx, msg); err != nil {
+			s.bizLog.Error("greeting insert err", zap.Error(err))
+			return
+		}
+		env := &ws.Envelope{
+			Type:    "chat",
+			ID:      msg.ID,
+			From:    "sys",
+			ConvID:  conv.ID,
+			Content: text,
+			TS:      ws.NowMS(),
+		}
+		// 立即广播给所有在线客服（客服端能在左侧列表立即看到「新会话+这条 sys 消息」）
+		hub.BroadcastToAllAgents(env)
+
+		// 轮询等访客 WSS 上线（最多 8 秒），上线立即 PushToVisitor。
+		// PushToVisitor 返回 false 表示访客还没在 hub.visitors 注册（WSS 还没建立完成）。
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			if hub.PushToVisitor(visitor.ID, env) {
+				s.bizLog.Info("greeting pushed to visitor via WSS",
+					zap.String("vid", visitor.ID), zap.String("msg", msg.ID))
 				return
 			}
-			s.bizLog.Info("greeting persisted", zap.String("conv", conv.ID), zap.String("msg", msg.ID))
+			time.Sleep(150 * time.Millisecond)
 		}
+		s.bizLog.Warn("greeting WSS push timeout (visitor not online within 8s)",
+			zap.String("vid", visitor.ID), zap.String("msg", msg.ID))
 	}()
 }
 
