@@ -82,6 +82,12 @@
   iframe.style.cssText = 'width:100%;height:100%;border:0;display:block;background:#fff';
   wrap.appendChild(iframe);
 
+  function postState(opened) {
+    try {
+      iframe.contentWindow &&
+        iframe.contentWindow.postMessage({ __cs: 1, type: 'widget_state', open: opened }, '*');
+    } catch (e) {}
+  }
   function open() {
     wrap.style.display = 'block';
     wrap.style.opacity = '0';
@@ -92,10 +98,12 @@
     });
     btn.style.display = 'none';
     badge.style.display = 'none';
+    postState(true);
   }
   function close() {
     wrap.style.display = 'none';
     btn.style.display = 'flex';
+    postState(false);
   }
   btn.addEventListener('click', open);
 

@@ -1,22 +1,17 @@
 # HTTP 入口（80 端口）
-# 如果有 SSL 证书，则把所有 HTTP 重定向到 HTTPS；
-# 如果没有，则直接服务（开发 / 自签场景）。
-
-upstream cs_backend { server backend:8080; keepalive 64; }
-upstream cs_admin   { server admin:80;     keepalive 32; }
-upstream cs_widget  { server widget:80;    keepalive 32; }
+# 关键设计：不再使用 upstream 块（开源 nginx 的 upstream server 用 hostname 时只在
+# 启动时解析一次 DNS，docker compose 重启后容器 IP 变了，会把请求反代到错误容器）。
+# 改用 resolver + 变量 proxy_pass，nginx 每次请求都向 Docker DNS（127.0.0.11）查询
+# 当前最新的 service IP。resolver 已在 nginx.conf 的 http 块声明。
 
 server {
-    listen 80;
-    server_name ${DOMAIN};
+    listen 80 default_server;
+    server_name ${DOMAIN} _;
 
-    # ACME / Let's Encrypt 验证目录（可选；用户可挂 webroot）
+    # ACME / Let's Encrypt 验证目录
     location /.well-known/acme-challenge/ {
         root /var/www/acme;
     }
 
-    # 当有证书时，重定向到 HTTPS（由 ssl.conf 启用 443）；
-    # 没有证书时直接服务（取决于实际部署）。
-    # 这里默认无证书也能用。
     include /etc/nginx/conf.d/_upstream.inc;
 }

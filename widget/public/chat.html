@@ -274,6 +274,9 @@
   var lastGroup = null; // 最近一组消息的元数据，用于合并
   var notifySound = 'classic'; // 通知声音，启动时拉服务端覆盖
   var audioCtx = null;
+  // widget 是否处于打开状态。loader.js 通过 postMessage('widget_state') 通知。
+  // 默认 false（页面刚加载时 iframe 在但 widget 收起）；打开时清零未读。
+  var isWidgetOpen = false;
 
   // ====== DOM ======
   var listEl = document.getElementById('list');
@@ -601,7 +604,8 @@
         };
         render(m); persistMsg(m);
         playNotify(); // 收到客服 / 系统消息播声
-        if (document.visibilityState !== 'visible' || parent !== window) {
+        // 只在 widget 收起时累计未读。loader.js 通过 widget_state 通知。
+        if (!isWidgetOpen) {
           unread++;
           parent.postMessage({ __cs: 1, type: 'unread', count: unread }, '*');
         }
@@ -663,6 +667,18 @@
     if (document.visibilityState === 'visible') {
       unread = 0;
       parent.postMessage({ __cs: 1, type: 'unread', count: 0 }, '*');
+    }
+  });
+
+  // 接收 loader.js 通知的 widget 开关状态
+  window.addEventListener('message', function (ev) {
+    if (!ev.data || ev.data.__cs !== 1) return;
+    if (ev.data.type === 'widget_state') {
+      isWidgetOpen = !!ev.data.open;
+      if (isWidgetOpen) {
+        unread = 0;
+        parent.postMessage({ __cs: 1, type: 'unread', count: 0 }, '*');
+      }
     }
   });
 

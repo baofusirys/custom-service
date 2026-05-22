@@ -4,6 +4,52 @@
 
 ---
 
+## [012] 2026-05-21 20:10 — 修复 /admin/settings 返回 nginx 默认页（致命）+ 访客浮动按钮未读角标
+
+**起因 / 需求**
+用户实测发现 2 个问题：
+1. **致命 Bug**：访问 `http://38.76.193.68/admin/settings` 显示 "Welcome to nginx!" 默认欢迎页。
+2. 访客端浮动按钮（收起状态）在收到客服消息时**没有显示未读红角标**。
+
+**根因 1：nginx upstream 启动时只解析一次 DNS → IP 错位**
+Redis 抓取实证：
+- 实际容器 IP：cs-admin = 172.19.0.3，cs-widget = 172.19.0.5
+- DNS 解析正确：admin → 172.19.0.3，widget → 172.19.0.5
+- 但 nginx access.log 显示 `/admin/` 请求 `upstream: 172.19.0.5:80` —— **被反代到了 widget 容器**
+- widget 容器内没有 index.html，nginx 返回 1.27-alpine 镜像自带的默认欢迎页 615 字节
+
+完整故事：早期 `docker compose up` 时 admin 容器拿到 172.19.0.5；nginx 启动时把这个 IP 锁进 upstream（开源 nginx 限制，**upstream + hostname 只在启动时解析一次**）。后来反复 `docker compose up -d --build` 重建 admin，admin 容器拿到新 IP 172.19.0.3，**但 172.19.0.5 现在被 widget 占了** —— nginx 还在用 172.19.0.5，于是 /admin/* 全部错位转到了 widget。
+
+**根因 2：访客端 chat.html 用 `document.visibilityState` 判断 widget 是否打开**
+但 iframe 即使 `display:none` 时 `visibilityState` 在某些浏览器仍是 'visible'，导致未读永远不 +1。
+
+**改了什么 / 加了什么 / 删了什么**（修改 5 个 / 新增 0 个 / 删除 0 个）
+- 修改：[nginx/nginx.conf](nginx/nginx.conf) — http 块新增 `resolver 127.0.0.11 valid=10s ipv6=off;`（Docker 内置 DNS + 10s TTL）
+- 修改：[nginx/conf.d/default.conf.template](nginx/conf.d/default.conf.template) — 去掉 `upstream cs_admin/cs_widget/cs_backend` 块；server 块加 `default_server` 标记 + `server_name ${DOMAIN} _`（IP 访问也兼容）
+- 修改：[nginx/conf.d/ssl.conf.template](nginx/conf.d/ssl.conf.template) — 同步去 upstream + server_name 加 `_`
+- 修改：[nginx/conf.d/_upstream.inc](nginx/conf.d/_upstream.inc) — 所有 `proxy_pass http://cs_xxx/` 改为 `set $host_var xxx; proxy_pass http://$host_var:port`。**变量 proxy_pass 时 nginx 每次请求都用 resolver 动态查 DNS**，绕过 upstream 静态解析。同时 `/admin/`、`/widget/` 改用 `rewrite ^/admin(/.*)$ $1 break;` 去前缀（变量 proxy_pass 不会自动重写 URI）。
+- 修改：[widget/public/loader.js](widget/public/loader.js) — open/close 时 `iframe.contentWindow.postMessage({type:'widget_state',open:true/false})` 通知 chat.html
+- 修改：[widget/public/chat.html](widget/public/chat.html) — 维护 `isWidgetOpen` 状态；监听 widget_state 消息；收到客服消息时改用 `if (!isWidgetOpen)` 判断（替代不可靠的 visibilityState）
+
+**业务流程对比**
+- 改动前：访问 /admin/settings → 主 nginx 把请求反代到错误的 widget 容器 → 返回 nginx 默认欢迎页
+- 改动后：每次请求 nginx 都从 Docker DNS 查到当前真实的 admin 容器 IP → 正确返回 admin SPA
+- 改动前：widget 收起时收到消息，未读永远 0（visibilityState 判断不准）
+- 改动后：widget 收起时收到消息，loader.js 浮动按钮上立刻显示红 badge 数字；打开 widget 时自动清零
+
+**触发场景与边界 + 验证方式**
+1. `curl http://127.0.0.1/admin/` → 返回 vite 构建的 index.html（984 字节，含 `<title>Custom Service 客服工作台</title>`），不再是 nginx 欢迎页
+2. `docker compose restart admin` 让 admin 换 IP → 再次访问 /admin/ 仍正确（DNS 10s TTL）
+3. 访客打开 demo.html → 不点客服按钮（收起态）→ 客服发消息 → 右下角圆形按钮右上角出现红 badge 数字
+4. 点开 widget → badge 立即消失，未读清零
+5. 边界：rewrite 前缀去除规则只匹配 `/admin/xxx` 和 `/widget/xxx`，根路径 `/` 仍由 `location = /` 重定向到 /admin/
+
+**为什么不直接 docker compose restart cs-nginx 临时修复？**
+- 那只是把 IP 重新锁定一次，下次任何容器重启 IP 又会错位
+- resolver + 变量是开源 nginx 唯一稳定方案（nginx-plus 才支持 `server xxx resolve` 动态解析）
+
+---
+
 ## [011] 2026-05-21 19:40 — 通知声音库扩展：新增 5 个响亮长音色
 
 **起因 / 需求**

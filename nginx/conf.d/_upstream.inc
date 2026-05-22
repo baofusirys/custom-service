@@ -1,10 +1,19 @@
     # ====== 反代规则（HTTP/HTTPS 共用） ======
+    #
+    # 关键设计：所有 proxy_pass 都用变量（$admin_host / $widget_host / $backend_host），
+    # 让 nginx 每次请求向 Docker DNS（127.0.0.11，已在 nginx.conf http 块声明 resolver）
+    # 动态解析 service 名到当前容器 IP。
+    # 这样可以解决「docker compose 重启后容器换 IP，nginx upstream 静态解析旧 IP 把请求
+    # 转到错误容器」的问题。
 
     limit_conn conn_per_ip 200;
 
     # 管理后台静态文件：把 /admin/ 反代到 admin 容器
+    # 变量 proxy_pass 时 nginx 不做 URI 重写，所以用 rewrite ... break; 去掉 /admin 前缀
     location /admin/ {
-        proxy_pass http://cs_admin/;
+        set $admin_host admin;
+        rewrite ^/admin(/.*)$ $1 break;
+        proxy_pass http://$admin_host:80;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -14,7 +23,9 @@
 
     # 嵌入式 widget 静态文件
     location /widget/ {
-        proxy_pass http://cs_widget/;
+        set $widget_host widget;
+        rewrite ^/widget(/.*)$ $1 break;
+        proxy_pass http://$widget_host:80;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -24,7 +35,8 @@
     # 登录接口：严格限速（防爆破）
     location = /api/agent/login {
         limit_req zone=login_rps burst=5 nodelay;
-        proxy_pass http://cs_backend;
+        set $backend_host backend;
+        proxy_pass http://$backend_host:8080$request_uri;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -35,7 +47,8 @@
     # 一般 API
     location /api/ {
         limit_req zone=api_rps burst=40 nodelay;
-        proxy_pass http://cs_backend;
+        set $backend_host backend;
+        proxy_pass http://$backend_host:8080$request_uri;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -47,7 +60,8 @@
 
     # 文件直出
     location /files/ {
-        proxy_pass http://cs_backend;
+        set $backend_host backend;
+        proxy_pass http://$backend_host:8080$request_uri;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -58,7 +72,8 @@
     # WebSocket — 必须 Upgrade + 关闭超时
     location /ws/ {
         limit_req zone=ws_rps burst=20 nodelay;
-        proxy_pass http://cs_backend;
+        set $backend_host backend;
+        proxy_pass http://$backend_host:8080$request_uri;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
