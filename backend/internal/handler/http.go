@@ -161,7 +161,8 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 
 	a, err := h.svc.Store().GetAgentByUsername(ctx, r.Username)
 	if err != nil || a == nil {
-		h.svc.Limiter().RecordViolation(ctx, ip, "agent_login_fail_nouser", r.Username)
+		// 用户输错账号是常见情况，不计 violation（防爆破靠 Nginx login_rps 2 r/s + bcrypt 慢）
+		h.svc.Limiter().LogSecurityWarn(ip, "agent_login_fail_nouser", r.Username)
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40105, "msg": "账号或密码错误"})
 		return
 	}
@@ -170,7 +171,7 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 		return
 	}
 	if !security.CheckPassword(a.PassHash, r.Password) {
-		h.svc.Limiter().RecordViolation(ctx, ip, "agent_login_fail_password", r.Username)
+		h.svc.Limiter().LogSecurityWarn(ip, "agent_login_fail_password", r.Username)
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40105, "msg": "账号或密码错误"})
 		return
 	}
@@ -326,7 +327,8 @@ func (h *HTTP) Upload(c *gin.Context) {
 		// 退一步看后缀
 		ext := strings.ToLower(filepath.Ext(mh.Filename))
 		if guessed := mime.TypeByExtension(ext); !allowedMIME[guessed] {
-			h.svc.Limiter().RecordViolation(ctx, ip, "upload_mime_blocked", mimeType+"|"+ext)
+			// 用户误传不支持的文件类型是常见情况，记日志即可，不计 violation
+			h.svc.Limiter().LogSecurityWarn(ip, "upload_mime_blocked", mimeType+"|"+ext)
 			c.JSON(http.StatusUnsupportedMediaType, gin.H{"code": 41501, "msg": "文件类型不允许"})
 			return
 		}

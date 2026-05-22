@@ -146,8 +146,19 @@ func (r *RateLimiter) recordViolation(ctx context.Context, ip, kind, path string
 	}
 }
 
-// RecordViolation 暴露给外部主动上报（如 SQL 注入嫌疑、XSS 嫌疑）。
+// RecordViolation 暴露给外部主动上报（SQL 注入嫌疑、WSS 握手洪水等真攻击行为）。
+// 会累计 24h 计数，达到阈值自动拉黑。
 func (r *RateLimiter) RecordViolation(ctx context.Context, ip, kind, detail string) {
 	r.recordViolation(ctx, ip, kind, detail)
+}
+
+// LogSecurityWarn 只写安全日志，不计入 violation 累计（不会拉黑）。
+// 适用于"用户失误而非攻击"的场景：密码输错、上传不支持的文件类型等。
+// 防爆破靠 Nginx 登录限速 + bcrypt cost=12（每次 ~250ms），不靠拉黑机制。
+func (r *RateLimiter) LogSecurityWarn(ip, kind, detail string) {
+	r.secLog.Warn("security warn",
+		zap.String("ip", ip),
+		zap.String("kind", kind),
+		zap.String("detail", detail))
 }
 

@@ -4,6 +4,62 @@
 
 ---
 
+## [008] 2026-05-21 18:15 — 修复"自己的安全机制把自己拉黑"误伤
+
+**起因 / 需求**
+爷爷登录测试服时被弹「您的 IP 已被临时限制访问，请稍后再试」。爷爷追问到底是什么在轮询、把 IP 也限制了。
+
+**真相（用 Redis 数据实证）**
+查 Redis 后真相大白：
+- 爷爷的 IP `110.241.19.222` 累计 **697 次** violation
+- 24h 累计违规阈值是 200，所以触发了自动拉黑
+- 违规类型分布（按数量）：
+  - `ws_handshake_flood`: **712 次（占 96%）** — 这是 WSS 握手频率超过 5/分钟的累计
+  - `http_rpm_exceeded`: 16 次（[004] 之前 60/分钟时代的遗留）
+  - `agent_login_fail_*`: 7 次（爷爷输错账号 / 密码）
+  - `visitor_msg_flood`: 5 次（[006] 之前 10 条/分钟时代的遗留）
+
+**不是什么神秘轮询**。是一天里反复刷新 / 切标签 / 多标签同时连 / 网络抖动重连，浏览器每次重建 WSS 都触发 1 次握手；我之前限速 5 次/分钟太严，人类用户轻易超。
+
+**改了什么 / 加了什么 / 删了什么**（修改 3 个 / 新增 0 个 / 删除 0 个 + 1 次 Redis 解封操作）
+- **立即操作**：在测试服执行 `redis-cli DEL bl:110.241.19.222 viol:110.241.19.222 viol:60.1.87.36 viol:172.19.0.1 viol:visitor:...`，解封爷爷的 IP + 清掉所有累积的违规计数（5 个 key）。
+- 修改：[.env](.env):
+  - `SECURITY_IP_WS_HANDSHAKE_PM 5 → 30`（浏览器刷新/切标签/重连一下就破 5，30 既挡机器人又不卡正常人）
+  - `SECURITY_IP_BLACKLIST_THRESHOLD 200 → 1000`（更宽松的拉黑阈值，避免误伤）
+- 修改：[backend/internal/security/ratelimit.go](backend/internal/security/ratelimit.go) — 新增 `LogSecurityWarn(ip, kind, detail)` 方法：只写安全日志，**不计** violation。区分「真攻击」（继续走 RecordViolation 计数 + 可拉黑）和「用户失误」（只记日志不拉黑）。
+- 修改：[backend/internal/handler/http.go](backend/internal/handler/http.go) — 3 处从 `RecordViolation` 改为 `LogSecurityWarn`：
+  - `agent_login_fail_nouser`（输错账号）
+  - `agent_login_fail_password`（输错密码）
+  - `upload_mime_blocked`（上传不支持的文件类型）
+  - 这些都是用户失误，不应该拉黑。防爆破靠 Nginx 登录限速 (2 r/s burst=5) + bcrypt cost=12（每次 ~250ms 慢算抗爆破）。
+
+**业务流程对比**
+- 改动前：爷爷一天里反复刷新页面 → WSS 握手累积 712 次违规 → 自动拉黑 24h → 登录都进不去。
+- 改动后：
+  - WSS 握手阈值 30/分钟（即使刷新 30 次也不触发）
+  - 拉黑阈值 1000（攒到 1000 次违规才拉黑，正常人 24h 内不可能）
+  - 输错密码 / 上传错文件不再计违规（只记日志）
+
+**触发场景与边界 + 验证方式**
+- 爷爷已经可以重新登录（IP 解封）。
+- 反复刷新 admin 页面 / 切标签 5 次 → 不再触发 WSS 握手限速。
+- 故意输错密码 5 次 → 仅 security.log 有 warn 记录，Redis 里 viol:<ip> 不增加。
+- 边界：如果真有人 1 分钟内 100 次 WSS 握手 → 仍然触发限速 + 拉黑（30/min 阈值挡住明显的机器人攻击）。
+
+**保留的真攻击防御**
+- `ws_handshake_flood`（超过 30/min 仍计 violation）
+- `sqli_suspect`（SQL 注入模式仍计 violation）
+- `http_rpm_exceeded`（HTTP 超过 600/min 仍计 violation）
+- 注入侦测仍然 SanitizeText 清洗
+
+**为什么登录失败不再计 violation 仍然安全？**
+- Nginx 层 `login_rps 2 r/s burst=5` 已经把单 IP 的登录请求压到 2 次/秒
+- 后端 bcrypt cost=12 每次校验约 250ms，单 IP 每秒最多算 4 次
+- 攻击者 24h 最多算 ~34 万次 bcrypt（vs 6 位数字密码空间 100 万 / 8 位字母数字空间 218 万亿）
+- 实际防爆破靠的就是 bcrypt 慢和 Nginx 节流，不靠拉黑机制
+
+---
+
 ## [007] 2026-05-21 17:58 — 测试服超管密码改为 ***REDACTED***
 
 **起因 / 需求**
