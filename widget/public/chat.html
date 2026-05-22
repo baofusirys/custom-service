@@ -304,11 +304,18 @@
 
   // ====== 通知声音（Web Audio API 程序合成） ======
   var SOUND_DEFS = {
+    // ---- 短促音色 ----
     classic: function (ctx) { tone(ctx, 880, 0.18, 'sine', 0.3); },
     chime:   function (ctx) { seq(ctx, [{f:1320,d:0.08},{f:990,d:0.18}], 'sine', 0.3); },
     ding:    function (ctx) { seq(ctx, [{f:587,d:0.1},{f:784,d:0.18}], 'sine', 0.35); },
     soft:    function (ctx) { tone(ctx, 523, 0.35, 'triangle', 0.22); },
     alert:   function (ctx) { seq(ctx, [{f:700,d:0.06},{f:0,d:0.04},{f:700,d:0.06},{f:0,d:0.04},{f:700,d:0.1}], 'sine', 0.28); },
+    // ---- 响亮长音色 ----
+    bell:    function (ctx) { layered(ctx, [{f:1046.5,v:0.5,d:1.2},{f:2093,v:0.18,d:0.85}], 'sine'); },
+    doorbell:function (ctx) { seq(ctx, [{f:659.25,d:0.25},{f:523.25,d:0.6}], 'sine', 0.5); },
+    trill:   function (ctx) { seq(ctx, [{f:880,d:0.08},{f:1100,d:0.08},{f:880,d:0.08},{f:1100,d:0.08},{f:880,d:0.08},{f:1100,d:0.08},{f:880,d:0.22}], 'sine', 0.45); },
+    fanfare: function (ctx) { seq(ctx, [{f:523.25,d:0.12},{f:659.25,d:0.12},{f:783.99,d:0.12},{f:1046.5,d:0.4}], 'sine', 0.5); },
+    chord:   function (ctx) { layered(ctx, [{f:523.25,v:0.28,d:0.8},{f:659.25,v:0.28,d:0.8},{f:783.99,v:0.28,d:0.8}], 'sine'); },
     none:    function () {}
   };
   function getAudio() {
@@ -341,6 +348,19 @@
       o.connect(g).connect(ctx.destination);
       o.start(t); o.stop(t + n.d + 0.02);
       t += n.d;
+    });
+  }
+  // 多层叠加（和弦 / 谐波）：所有层同时开始，各自有独立时长和音量
+  function layered(ctx, layers, type) {
+    var t0 = ctx.currentTime;
+    layers.forEach(function (n) {
+      var o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = type; o.frequency.value = n.f;
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(n.v, t0 + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.d);
+      o.connect(g).connect(ctx.destination);
+      o.start(t0); o.stop(t0 + n.d + 0.02);
     });
   }
   var lastPlay = 0;
