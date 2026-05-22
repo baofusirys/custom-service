@@ -447,11 +447,30 @@
     }
   }
 
+  // Fallback：同域时 chat.html 自己读 parent.location，不依赖 loader.js postMessage。
+  // 这样即使集成方还在用 loader.js 的旧缓存（没 postPageInfo），同域场景也能正常上报。
+  // 跨域时 parent.location 访问 throws SecurityError，由 loader.js postMessage 兜底。
+  function tryReadHostPageDirectly() {
+    try {
+      if (parent && parent !== window) {
+        var u = parent.location && parent.location.href;
+        var t = parent.document && parent.document.title;
+        if (u && !hostURL) {
+          hostURL = u;
+          hostTitle = t || '';
+          return true;
+        }
+      }
+    } catch (e) { /* 跨域，忽略 */ }
+    return false;
+  }
+
   // 上报当前页面给服务端（让客服后台看到访客的浏览轨迹）。
-  // 触发时机：(1) WSS 上线 onopen (2) 收到 loader.js 推送的 page_info
+  // 触发时机：(1) WSS 上线 onopen (2) 收到 loader.js 推送的 page_info (3) 启动时 fallback 自读
   // 上报需要同时满足：WSS alive + convID 已建立 + 拿到 hostURL + URL 跟上次不同
   function reportPageView() {
     if (!alive || !convID) return;
+    if (!hostURL) tryReadHostPageDirectly(); // 兜底自读
     if (!hostURL) return;
     if (pageReported === hostURL) return;
     pageReported = hostURL;
@@ -574,6 +593,8 @@
   }
 
   async function bootstrap() {
+    // 启动时立即尝试自读 parent.location（同域 fallback），不等 loader.js postMessage
+    tryReadHostPageDirectly();
     await loadPublicSettings();
     try {
       var resp = await fetch(httpBase + '/api/visitor/session', {

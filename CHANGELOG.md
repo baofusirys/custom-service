@@ -4,6 +4,52 @@
 
 ---
 
+## [016] 2026-05-21 23:55 — 修复页面跟踪无效：浏览器缓存旧 loader.js + 加同域 fallback
+
+**起因 / 需求**
+爷爷按 [015] 流程测试：客服后台**没看到任何橙色横幅**。
+
+**根因定位（用日志实证）**
+查 `/srv/cs-data/logs/backend/raw_ws.log`：半小时内 rx 消息分布只有 ping/chat/read，**没有一条 type=page**。也就是访客端**根本没发** page 事件。
+
+进一步查 widget 容器内的文件版本：
+- `docker exec cs-widget grep -c 'postPageInfo' /usr/share/nginx/html/loader.js` → 2（新版有）
+- 但 widget nginx 给 `.js` 设了 `Cache-Control: public, max-age=604800`（7 天）
+
+**结论**：服务器上的 loader.js 是新版的，但访客浏览器还在用上次缓存的旧版（没有 `postPageInfo`）。旧 loader.js → 不推 page_info → chat.html 永远拿不到 hostURL → reportPageView 直接 return → 服务端永远收不到 page 事件 → 客服后台永远没横幅。
+
+**双重修复**
+1. **根除：widget nginx 改 no-cache**
+   - 之前：`location ~* \.(?:js|css|svg|png)$ { expires 7d; }` 把 loader.js 长缓存
+   - 现在：单独给 `/loader.js` 和 `/chat.html` 配 `Cache-Control: no-cache, must-revalidate`
+   - 这样浏览器每次都 If-None-Match 验证 ETag：文件没变 → 304 不下载（零开销）；文件有变 → 200 + 新内容（立即生效）
+   - 其他静态资源（图片/字体/css）仍保留 7 天长缓存
+2. **兜底：chat.html 加同域 fallback**
+   - 即使集成方网站还在用 loader.js 旧缓存（没 postPageInfo），同域场景下 chat.html 自己也能拿到当前 URL
+   - 实现：bootstrap 入口 + reportPageView 内调 `tryReadHostPageDirectly()`，尝试 `parent.location.href` / `parent.document.title`
+   - 同域成功（demo 测试场景）；跨域 throws SecurityError 被 catch 忽略，由 loader.js postMessage 兜底（生产部署到第三方网站时）
+
+**改了什么 / 加了什么 / 删了什么**（修改 2 个 / 新增 0 个 / 删除 0 个）
+- 修改：[widget/nginx.conf](widget/nginx.conf) — 把 `/loader.js` 和 `/chat.html` 单独提到 `location =` exact match，加 `Cache-Control: no-cache, must-revalidate` + `Pragma: no-cache`；其他 .css/.png/.svg 等保留 7 天缓存
+- 修改：[widget/public/chat.html](widget/public/chat.html) — 新增 `tryReadHostPageDirectly()` 同域读 parent.location；bootstrap 入口 + reportPageView 内主动调一次
+
+**业务流程对比**
+- 改动前：访客浏览器加载 loader.js 时如果命中缓存（7 天有效期内）→ 用旧版 → 没 postPageInfo → 永远不上报页面
+- 改动后：每次访客加载 widget，浏览器都向服务器问一下 loader.js 有没有更新；新版立即生效。同时即使 loader.js 还是旧的，chat.html 自己也能读 parent.location 兜底
+
+**触发场景与边界 + 验证方式**
+- 验证 1：爷爷 Ctrl+F5 强刷 demo.html → 客服后台立即看到「访客访问了「Custom Service · 首页」」横幅
+- 验证 2：跳转产品页 → 第 2 条横幅
+- 验证 3：`curl -sI /widget/loader.js | grep -i cache-control` → 应该看到 `no-cache, must-revalidate`（不是 max-age=604800）
+- 验证 4：`tail raw_ws.log | grep type.:.page` 应该能看到访客实际发出的 page 消息
+
+**关于「集成方网站使用旧 loader.js 缓存」的兼容**
+- 旧 loader.js（无 postPageInfo）+ 新 chat.html（有 tryReadHostPageDirectly fallback）：同域 demo 场景仍能工作；跨域时 fallback 失败，但不影响其他功能（聊天/已读/未读都正常）
+- 新 loader.js + 新 chat.html：完整页面跟踪，跨域也工作
+- 由于 nginx 改了 no-cache，**最多 1 次访问之后**就拿到新 loader.js，跨域场景也自动恢复
+
+---
+
 ## [015] 2026-05-21 21:30 — 访客页面跟踪 (Crisp 风格横幅) + 4 个可跳转 demo 页面
 
 **起因 / 需求**
