@@ -26,8 +26,11 @@ type Hub struct {
 	cfg HubConfig
 
 	visitors sync.Map // visitorID -> *Client
-	agents   sync.Map // agentID(string) -> *Client
-	byConv   sync.Map // convID -> map[connID]*Client（一会话多端：访客 + 多客服）
+	// agents: agentID(string) -> *sync.Map[connID]*Client
+	// 一个 agentID 可以有多个 WSS 连接（同账号在 web + app 双端同时登录），
+	// 所有连接都会收到 BroadcastToAllAgents / fanoutLocal 的外溢。
+	agents sync.Map
+	byConv sync.Map // convID -> *sync.Map[connID]*Client（一会话多端：访客 + 多客服）
 
 	register   chan *Client
 	unregister chan *Client
@@ -147,7 +150,9 @@ func (h *Hub) handleRegister(ctx context.Context, c *Client) {
 		h.bizLog.Info("visitor connected",
 			zap.String("conn", c.ConnID), zap.String("vid", c.ID), zap.String("site", c.SiteID))
 	case KindAgent:
-		h.agents.Store(c.ID, c)
+		// 多连接：把这个 conn 加进该 agentID 的 conn map（不覆盖已有连接）
+		connsMap, _ := h.agents.LoadOrStore(c.ID, &sync.Map{})
+		connsMap.(*sync.Map).Store(c.ConnID, c)
 		_ = h.sink.OnAgentConnect(ctx, c)
 		h.bizLog.Info("agent connected",
 			zap.String("conn", c.ConnID), zap.String("aid", c.ID))
@@ -178,9 +183,17 @@ func (h *Hub) handleUnregister(ctx context.Context, c *Client) {
 		h.bizLog.Info("visitor disconnected",
 			zap.String("conn", c.ConnID), zap.String("vid", c.ID))
 	case KindAgent:
-		if v, ok := h.agents.Load(c.ID); ok && v == c {
-			h.agents.Delete(c.ID)
+		// 多连接：只删除当前这个 conn；如果该 agent 没有任何连接了再删 agentID
+		if v, ok := h.agents.Load(c.ID); ok {
+			m := v.(*sync.Map)
+			m.Delete(c.ConnID)
+			empty := true
+			m.Range(func(_, _ any) bool { empty = false; return false })
+			if empty {
+				h.agents.Delete(c.ID)
+			}
 		}
+		h.detachConv(c)
 		_ = h.sink.OnAgentDisconnect(ctx, c)
 		h.bizLog.Info("agent disconnected",
 			zap.String("conn", c.ConnID), zap.String("aid", c.ID))
@@ -205,13 +218,16 @@ func (h *Hub) detachConv(c *Client) {
 }
 
 // AttachAgentToConv 客服动态加入一个会话（接管访客）。
+// 同 agentID 的所有连接都会被同时 attach（保证多端一致）。
 func (h *Hub) AttachAgentToConv(agentID, convID string) {
 	if v, ok := h.agents.Load(agentID); ok {
-		c := v.(*Client)
-		// 先卸下旧会话
-		h.detachConv(c)
-		c.ConvID = convID
-		h.attachConv(c)
+		v.(*sync.Map).Range(func(_, cv any) bool {
+			c := cv.(*Client)
+			h.detachConv(c)
+			c.ConvID = convID
+			h.attachConv(c)
+			return true
+		})
 	}
 }
 
@@ -219,11 +235,12 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 	e := in.Env
 	c := in.Client
 
-	// 服务器盖时间戳（防客户端伪造）+ 强制北京时
+	// 服务器盖时间戳（防客户端伪造）+ 强制北京时 + 盖发起方 ConnID（多端去重用）
 	e.TS = NowMS()
 	if e.ID == "" {
 		e.ID = uuid.NewString()
 	}
+	e.ConnID = c.ConnID
 
 	switch e.Type {
 	case "ping":
@@ -308,14 +325,14 @@ func (h *Hub) FanoutToConv(ctx context.Context, e *Envelope) {
 
 // fanoutLocal 给本节点对应连接投递消息。
 //
-// 两路投递（爷爷需求：客服后台必须能实时看到所有访客的消息，未读 +1 / 会话上浮）：
+// 投递策略：
+//  1. byConv[ConvID] 内所有连接：访客 + 已接管该会话的客服
+//  2. 所有在线 agent 的所有连接：让 chat 和 read 都能在双端实时同步
+//     - chat 外溢：未接管的客服也能立刻看到「新消息 + unread+1 + 会话上浮」
+//     - read 外溢：同账号在另一端（web/app）读了消息时，本端能同步清未读
+//  3. typing 不外溢（节省带宽，且只有正在打字的会话才关心）
 //
-//	1. 给 byConv[ConvID] 内的所有连接发（同会话的访客 + 已接管的客服）
-//	2. 给所有在线 agent 发（让没接管该会话的客服也能在左侧列表实时刷未读 / 上浮 / 提醒）
-//
-// 用 ConnID 去重，保证同一连接只收到一份。
-//
-// typing / read 这类轻量消息不广播给非会话内的 agent，节省带宽。
+// 用 ConnID 去重，每个连接只收到一份。
 func (h *Hub) fanoutLocal(e *Envelope) {
 	if e.ConvID == "" {
 		return
@@ -329,13 +346,15 @@ func (h *Hub) fanoutLocal(e *Envelope) {
 			return true
 		})
 	}
-	// 仅 chat 类消息额外广播给所有在线 agent；typing/read 不外溢
-	if e.Type == "chat" {
+	if e.Type == "chat" || e.Type == "read" {
 		h.agents.Range(func(_, v any) bool {
-			c := v.(*Client)
-			if _, dup := sent[c.ConnID]; !dup {
-				c.Send(e)
-			}
+			v.(*sync.Map).Range(func(_, cv any) bool {
+				c := cv.(*Client)
+				if _, dup := sent[c.ConnID]; !dup {
+					c.Send(e)
+				}
+				return true
+			})
 			return true
 		})
 	}
@@ -365,7 +384,7 @@ func (h *Hub) fanoutFromRedis(ctx context.Context) {
 	}
 }
 
-// OnlineAgentCount 公开 API：当前在线客服数。
+// OnlineAgentCount 公开 API：当前在线客服数（按 agentID 数，不重复计同账号多端）。
 func (h *Hub) OnlineAgentCount() int {
 	n := 0
 	h.agents.Range(func(_, _ any) bool { n++; return true })
@@ -379,11 +398,16 @@ func (h *Hub) OnlineVisitorCount() int {
 	return n
 }
 
-// PushToAgent 服务端主动给客服推消息（如有未分配会话）。
+// PushToAgent 服务端主动给客服推消息（多端：同 agentID 所有连接都会收到）。
 func (h *Hub) PushToAgent(agentID string, e *Envelope) bool {
 	if v, ok := h.agents.Load(agentID); ok {
-		v.(*Client).Send(e)
-		return true
+		sent := false
+		v.(*sync.Map).Range(func(_, cv any) bool {
+			cv.(*Client).Send(e)
+			sent = true
+			return true
+		})
+		return sent
 	}
 	return false
 }
@@ -397,14 +421,15 @@ func (h *Hub) PushToVisitor(visitorID string, e *Envelope) bool {
 	return false
 }
 
-// BroadcastToAllAgents 给本节点所有在线客服发广播（如「访客进入」系统通知）。
+// BroadcastToAllAgents 给本节点所有在线客服的所有连接发广播（多端：web + app 都收到）。
 // 不走 byConv（避免访客自己也收到针对客服的提醒）。
-// 注：v0.2.0 单节点部署，未做跨节点 Redis 桥接，多副本场景下其他节点的 agent 暂时不会收到，
-// 由 v0.3.0 通过专用频道 cs:bcast:agents 解决。
 func (h *Hub) BroadcastToAllAgents(e *Envelope) {
 	e.Node = h.cfg.NodeID
 	h.agents.Range(func(_, v any) bool {
-		v.(*Client).Send(e)
+		v.(*sync.Map).Range(func(_, cv any) bool {
+			cv.(*Client).Send(e)
+			return true
+		})
 		return true
 	})
 }

@@ -4,6 +4,71 @@
 
 ---
 
+## [022] 2026-05-23 15:00 — 双端 WSS 同步：同账号 web + app 实时同步消息 + 未读 + 已读
+
+**起因 / 需求**
+爷爷反馈：web 端和 app 端用同一个客服账号登录时，两端不同步。要求：
+- 访客发消息 → 两端 unread badge 都 +1
+- 一端读了 → 两端 unread 都清零
+- 一端发消息 → 另一端 WSS 实时收到
+- 两端 + 访客三方对话时，所有消息要互相看见
+
+**根因（设计 Bug）**
+`Hub.agents` map 是 `agentID → *Client` **单连接结构**：app 端登录时 `h.agents.Store(c.ID, c)` **覆盖**了 web 端的 client，web 端就被遗忘，永远收不到 `BroadcastToAllAgents` 的消息。第二个问题：`fanoutLocal` 之前只让 `chat` 外溢给所有 agent，**read 不外溢**，所以另一端读了消息，本端不知道。
+
+**改了什么 / 加了什么 / 删了什么**（修改 4 个 / 新增 0 个 / 删除 0 个）
+
+后端：
+- [backend/internal/ws/protocol.go](backend/internal/ws/protocol.go) — `Envelope` 加 `ConnID string \`json:"conn,omitempty"\`` 字段（服务端在 chat/read 转发时盖发起方 connID，让客户端能区分「自己当前端的回声」和「同账号另一端发的」）
+- [backend/internal/ws/hub.go](backend/internal/ws/hub.go) — **核心重构**：
+  - `agents` 字段语义改为 `sync.Map[agentID → *sync.Map[connID → *Client]]`，**一个 agentID 多连接共存**
+  - `handleRegister`：把 conn 加进 agent 的 connID map（不覆盖）
+  - `handleUnregister`：只删当前 conn；该 agent 没连接才删 agentID；同时 `detachConv`
+  - `BroadcastToAllAgents` / `PushToAgent` / `AttachAgentToConv` 全部改为遍历嵌套 map（影响该 agent 的所有连接）
+  - `fanoutLocal` 把 `chat || read` 都外溢给所有 agent 的所有连接（之前只 chat 外溢）
+  - `handleIncoming` 盖 `e.ConnID = c.ConnID`（统一在源头盖，所有 type 都带）
+
+前端（web + app）：
+- [admin/src/views/Console.vue](admin/src/views/Console.vue)
+  - 新增 `myConnId ref('')`，从 `hello.extra.conn_id` 解析保存
+  - chat 回声判断从「`from == agent:<myID>`」**改为**「`env.conn == myConnId`」—— 只跳过自己端的回声，同账号其他端的消息正常接受
+  - read 事件加分支：`from=agent:<myID>` 且 `conn != myConnId` → 同账号另一端读了 → 同步清掉本端该 conv 的 unread
+- [mobile_app/lib/state/app_state.dart](mobile_app/lib/state/app_state.dart) — 同上改造（保存 `myConnId`，chat connID 去重，read 多端同步）；`stopWs` 时清掉 `myConnId`
+
+**业务流程对比**
+
+旧（[021] 之前）：
+```
+agent 1 在 web 登录 → agents[1] = web_client
+agent 1 在 app 登录 → agents[1] = app_client   ← 覆盖了 web！
+访客发消息 → fanoutLocal → 遍历 agents → 只给 app_client 推
+web_client 收不到 ✗
+```
+
+新（[022]）：
+```
+agent 1 在 web 登录 → agents[1] = { web_conn: web_client }
+agent 1 在 app 登录 → agents[1] = { web_conn: web_client, app_conn: app_client }
+访客发消息 → fanoutLocal → 遍历 agents[1].* → web + app 都收到 ✓
+web 端用户读消息 → 服务端广播 read → app 端收到 read → 检测到 conn≠myConnId 但 from=自己 → 清 unread ✓
+app 端用户发消息 → web 端收到 chat → conn≠myConnId → 不当回声 → push 到 messages 渲染 ✓
+```
+
+**触发场景与边界 + 验证方式**
+- 验证 1：web 端 + app 端同时登录 admin → 访客发消息 → 两端 unread 都 +1
+- 验证 2：web 端点开该会话（清未读）→ app 端的同会话 unread 也立即清 0
+- 验证 3：web 端发消息 → app 端在同会话内立刻看到（作为蓝色 mine 气泡，因为 sender_ref 是自己 agentID）
+- 验证 4：app 端在 conv A，web 端在 conv B → 访客 A 发消息 → web 端 conv A 列表 +1，app 端 conv A 消息流出现新消息（因为 app 在 byConv[A]）
+- 边界：BroadcastToAllAgents（visitor_enter 通知）现在会推给同账号每一端，两端都弹通知；这是合理的（多端共同接收提醒）
+
+**安全 / 健壮性**
+- conn 字段服务端盖（客户端不可伪造）
+- handleUnregister 用 connID 精确删除（不会误删同 agent 其他连接）
+- agent 断线时同时 detachConv，避免 byConv 残留死引用
+- 客户端 myConnId 为空时不算回声去重（首次连接 hello 还没到达时收到的消息不会误丢）
+
+---
+
 ## [020] 2026-05-23 13:30 — Flutter 移动 App 第 1 批：骨架 + URL 配置 + 登录 + 会话列表 + 聊天 WSS 实时
 
 **起因 / 需求**

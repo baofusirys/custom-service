@@ -21,6 +21,7 @@ const onlineStats = ref({ visitors: 0, agents: 0 })
 const fileInput = ref(null)
 const sending = ref(false)
 const agentSound = ref('chime') // 由 /admin/settings 拉到的客服端通知音
+const myConnId = ref('') // 自己 WSS 连接 ID（hello 时拿到，用于多端同步去重）
 let ws = null
 
 async function loadSoundPref() {
@@ -277,11 +278,28 @@ onMounted(async () => {
     url: `${proto}://${location.host}/ws/agent`,
     token: session.token,
     onMessage: (env) => {
-      // 已读事件：对端（访客）已读了我（客服）发的消息
+      // hello：记住自己的 connID（多端同步去重必需）
+      if (env.type === 'hello') {
+        myConnId.value = env.extra?.conn_id || ''
+        return
+      }
+
+      const myId = String(session.agent?.id)
+
+      // 已读事件
       if (env.type === 'read') {
-        if (!activeConv.value || env.conv !== activeConv.value.id) return
-        // 只处理「访客读了客服消息」这种方向
-        if (env.from && env.from.startsWith('visitor:')) {
+        const fromVisitor = env.from && env.from.startsWith('visitor:')
+        const fromAgent = env.from && env.from.startsWith('agent:')
+        const isFromMyAccount = fromAgent && env.from.split(':')[1] === myId
+
+        // 同账号在另一端读了 → 同步清掉本端该 conv 的 unread
+        if (isFromMyAccount && env.conn !== myConnId.value) {
+          const c = convs.value.find(x => x.id === env.conv)
+          if (c && c.unread > 0) c.unread = 0
+          return
+        }
+        // 访客读了客服消息 → 当前会话标 mine 已读
+        if (fromVisitor && activeConv.value && env.conv === activeConv.value.id) {
           markMineReadUpTo(env.ts || Date.now())
         }
         return
@@ -306,9 +324,10 @@ onMounted(async () => {
       const fromAgent = env.from && env.from.startsWith('agent:')
       const fromVisitor = env.from && env.from.startsWith('visitor:')
       const fromSys = env.from === 'sys'
-      const isMyOwn = fromAgent && String(env.from.split(':')[1]) === String(session.agent?.id)
-      // 自己发的回声：本地已乐观渲染过，跳过避免重复
-      if (isMyOwn) return
+      // 多端去重改用 connID：只有自己这一端（同 connID）发的回声才跳过；
+      // 同账号另一端（web/app）发的消息，本端正常接受（这才是「双端同步」的关键）
+      const isMyConnEcho = env.conn && env.conn === myConnId.value
+      if (isMyConnEcho) return
 
       const inCurrent = activeConv.value && env.conv === activeConv.value.id
       if (inCurrent) {

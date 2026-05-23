@@ -24,6 +24,8 @@ class AppState extends ChangeNotifier {
   // ===== WSS =====
   AgentWS? _ws;
   bool get wsAlive => _ws?.isAlive ?? false;
+  // 自己 WSS 连接 ID（从 hello envelope 拿）—— 多端同步去重的关键
+  String? myConnId;
 
   Future<void> bootstrap() async {
     backendUrl = await Settings.getBackendUrl();
@@ -166,25 +168,49 @@ class AppState extends ChangeNotifier {
   void stopWs() {
     _ws?.stop();
     _ws = null;
+    myConnId = null;
   }
 
   void _onEnvelope(Map<String, dynamic> env) {
     final type = env['type']?.toString();
-    if (type == 'pong' || type == 'hello') return;
+    if (type == 'pong') return;
+    if (type == 'hello') {
+      // 记住自己 connID（多端去重必需）
+      final extra = env['extra'];
+      if (extra is Map && extra['conn_id'] is String) {
+        myConnId = extra['conn_id'] as String;
+      }
+      return;
+    }
     if (type == 'sys') {
-      // 访客进入通知 / 其他系统消息
       refreshConvs();
       return;
     }
+
+    final myId = agent?.id.toString() ?? '';
+    final convId = env['conv']?.toString() ?? '';
+
     if (type == 'read') {
-      if (activeConv == null || env['conv']?.toString() != activeConv!.id) return;
       final from = env['from']?.toString() ?? '';
+      final fromAgent = from.startsWith('agent:');
+      final isFromMyAccount = fromAgent && from.split(':').last == myId;
+      // 同账号在另一端（web/app）读了 → 同步清掉本端该 conv 的 unread
+      if (isFromMyAccount && env['conn']?.toString() != myConnId) {
+        final idx = convs.indexWhere((c) => c.id == convId);
+        if (idx >= 0 && convs[idx].unread > 0) {
+          convs[idx].unread = 0;
+          notifyListeners();
+        }
+        return;
+      }
+      // 访客读了客服消息 → 当前会话标 mine 已读
+      if (activeConv == null || convId != activeConv!.id) return;
       if (from.startsWith('visitor:')) {
         final ts = env['ts'] is int ? env['ts'] : 0;
         final upTo = DateTime.fromMillisecondsSinceEpoch(ts);
         for (final m in messages) {
           if (m.sender == 'agent' &&
-              m.senderRef == agent?.id.toString() &&
+              m.senderRef == myId &&
               !m.read &&
               m.createdAt.compareTo(upTo) <= 0) {
             m.read = true;
@@ -200,10 +226,11 @@ class AppState extends ChangeNotifier {
     final fromAgent = from.startsWith('agent:');
     final fromVisitor = from.startsWith('visitor:');
     final fromSys = from == 'sys';
-    final isMyOwn = fromAgent && from.split(':').last == agent?.id.toString();
-    if (isMyOwn) return;
+    // 多端去重：只有自己这一端的 connID 才算"回声"跳过；
+    // 同账号其他端发的消息正常接受（实现双端同步）
+    final isMyConnEcho = env['conn']?.toString() == myConnId && myConnId != null && myConnId!.isNotEmpty;
+    if (isMyConnEcho) return;
 
-    final convId = env['conv']?.toString() ?? '';
     final extra = env['extra'] is Map ? Map<String, dynamic>.from(env['extra']) : null;
     final kind = extra?['kind']?.toString();
 

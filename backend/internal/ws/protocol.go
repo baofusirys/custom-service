@@ -32,6 +32,9 @@ type Envelope struct {
 	// Node 标记消息来源节点 ID。FanoutToConv 时盖上本节点 ID；
 	// fanoutFromRedis 收到自己节点的回环消息时跳过，避免单节点部署的"广播两次"。
 	Node      string      `json:"node,omitempty"`
+	// ConnID 服务端在转发 chat/read 时盖发起方 connID，让客户端能区分
+	// 「自己当前这一端的回声」和「同账号另一端发的」—— 用于多端同步去重。
+	ConnID    string      `json:"conn,omitempty"`
 	Extra     interface{} `json:"extra,omitempty"`
 }
 
