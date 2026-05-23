@@ -96,7 +96,9 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50001, "msg": "保存访客失败"})
 		return
 	}
-	conv, isNew, err := h.svc.Store().EnsureConversation(c.Request.Context(), v.SiteID, v.ID)
+	// 60 分钟无活动则关闭旧会话 + 开新会话，让访客重新触发问候 + 提示音
+	// 旧会话只是 status=closed，消息历史保留在 messages 表，客服「历史记录」页可查
+	conv, isNew, err := h.svc.Store().EnsureFreshConversation(c.Request.Context(), v.SiteID, v.ID, 60)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50002, "msg": "创建会话失败"})
 		return

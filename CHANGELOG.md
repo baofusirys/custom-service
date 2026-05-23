@@ -4,6 +4,60 @@
 
 ---
 
+## [018] 2026-05-23 01:00 — 会话「活跃期」概念：60 分钟无活动则重开（问候 + 提示音再触发，旧消息保留）
+
+**起因 / 需求**
+爷爷反馈：访客打开过一次之后，再次打开（即使过几小时）也不会再触发问候 + 提示音。希望 1 小时之后再来就重新触发问候，但聊天记录不丢。
+
+**根因**
+`OpenOrGetConversation` 看到 status='open' 的会话就一直复用，导致一个访客永远只有一个 "open" 会话。`EnsureConversation` 的 isNew 判定仅在「刚 INSERT 2 秒内」为 true。所以**访客只在「第一次打开 demo」时 isNew=true 触发 OnVisitorEnter**；之后再来任何次都是 isNew=false，不会再有问候 + visitor_enter 通知。
+
+**改了什么 / 加了什么 / 删了什么**（修改 2 个 / 新增 0 个 / 删除 0 个）
+- 修改：[backend/internal/store/store.go](backend/internal/store/store.go)
+  - 拆出私有方法 `findOpenConversation`（仅查不建）和 `createConversation`（仅建不查）
+  - 新增 `EnsureFreshConversation(ctx, siteID, visitorID, freshMinutes int) (conv, isNewSession, err)`：
+    - 没 open 会话 → 新建 → `isNewSession=true`
+    - 有 open 会话且 `updated_at` 距今 ≤ freshMinutes → 复用 → `isNewSession=false`
+    - 有 open 会话但 `updated_at` 距今 > freshMinutes → **关闭旧的**（status=closed，消息历史保留在 messages 表）**+ 新建一个** → `isNewSession=true`
+  - `EnsureConversation` 保留兼容（不再被调用）
+- 修改：[backend/internal/handler/http.go](backend/internal/handler/http.go)
+  - `VisitorSession` 从 `EnsureConversation` 改用 `EnsureFreshConversation(ctx, siteID, visitorID, 60)`
+
+**业务流程对比**
+
+旧（[017] 及之前）：
+```
+访客首次打开 demo                  → 新建 conv A → 问候 + 提示音 ✓
+访客 1 小时后再打开                 → 复用 conv A → 不触发 ✗
+访客 10 小时后再打开                → 复用 conv A → 不触发 ✗
+访客今后任何次再打开                → 复用 conv A → 永远不再触发 ✗
+```
+
+新（[018]）：
+```
+访客首次打开 demo                  → 新建 conv A → 问候 + 提示音 ✓
+访客 30 分钟后再打开                → 复用 conv A → 不触发（视为同一访问段）
+访客 1 小时 1 分钟后再打开          → 关闭 conv A + 新建 conv B → 问候 + 提示音 ✓
+访客之后每次>60 分钟无活动再打开    → 新建 conv → 问候 + 提示音 ✓ ✓ ✓
+```
+
+**「聊天记录不丢」如何保证**
+- 旧会话只是 `status=closed`，`messages` 表里的所有消息一字未删
+- 客服后台「历史记录」页能看到所有 closed 会话
+- 访客 widget 的 `chat.html` 通过 `localStorage` 缓存最近 200 条消息（按 visitor_id 维度，不区分 conv），跨会话连贯展示
+
+**触发场景与边界 + 验证方式**
+- 验证 1：访客打开 demo → 听到提示音 + 看到问候
+- 验证 2：5 分钟内再次打开 → 不会重复触发（同一活跃段）
+- 验证 3：手动改数据库：`UPDATE conversations SET updated_at=NOW()-INTERVAL 70 MINUTE WHERE id='<convID>'`，然后访客再打开 → 应该触发新问候 + 提示音；DB 里 `<convID>` 应该 status='closed'；新出现一条 status='open' 的 conv
+- 边界：freshMinutes=60（hardcode 60 分钟），未来可放进 `settings` 表让管理后台配置
+
+**潜在问题**
+- 如果客服正在和访客对话，但访客 60 分钟无活动 → 旧会话被关闭，客服在旧 conv 里发的消息没人看了。**注意**：客服后台的 conv 列表只显示 status='open'，所以旧会话会从客服列表消失，访客新开的会话作为新条目出现 —— 体验类似"会话超时重连"
+- 1 小时是客服行业的常见值（Intercom / Crisp 都用 30-60 分钟）
+
+---
+
 ## [017] 2026-05-23 00:30 — 去掉服务端 30 秒页面跟踪去重
 
 **起因 / 需求**

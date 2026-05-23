@@ -116,6 +116,79 @@ func (s *Store) EnsureConversation(ctx context.Context, siteID, visitorID string
 	return c, isNew, nil
 }
 
+// EnsureFreshConversation 在 EnsureConversation 基础上加「活跃期」语义：
+//   - 没有 open 会话 → 新建 → isNewSession=true
+//   - 有 open 会话且 updated_at 距今 ≤ freshMinutes → 复用 → isNewSession=false
+//   - 有 open 会话但 updated_at 距今 > freshMinutes → 关闭旧的 + 新建新的 →
+//     isNewSession=true（让访客重新触发"问候 + 进入通知"，旧消息保留）
+//
+// freshMinutes <= 0 时等价于 EnsureConversation（永不超时重开）。
+func (s *Store) EnsureFreshConversation(ctx context.Context, siteID, visitorID string, freshMinutes int) (*Conversation, bool, error) {
+	existing, err := s.findOpenConversation(ctx, siteID, visitorID)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing == nil {
+		c, err := s.createConversation(ctx, siteID, visitorID)
+		if err != nil {
+			return nil, false, err
+		}
+		return c, true, nil
+	}
+	if freshMinutes > 0 && time.Since(existing.UpdatedAt) > time.Duration(freshMinutes)*time.Minute {
+		// 旧会话超时：关闭它（消息不删，可在客服「历史记录」页查到）+ 开新会话
+		if err := s.CloseConversation(ctx, existing.ID); err != nil {
+			return nil, false, err
+		}
+		c, err := s.createConversation(ctx, siteID, visitorID)
+		if err != nil {
+			return nil, false, err
+		}
+		return c, true, nil
+	}
+	return existing, false, nil
+}
+
+// findOpenConversation 仅查询，不新建。没找到返回 (nil, nil)。
+func (s *Store) findOpenConversation(ctx context.Context, siteID, visitorID string) (*Conversation, error) {
+	c := &Conversation{}
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, site_id, visitor_id, agent_id, status, unread_visitor, unread_agent, started_at, updated_at, closed_at
+FROM conversations
+WHERE visitor_id=? AND site_id=? AND status='open'
+ORDER BY started_at DESC LIMIT 1`, visitorID, siteID).Scan(
+		&c.ID, &c.SiteID, &c.VisitorID, &c.AgentID, &c.Status, &c.UnreadV, &c.UnreadA,
+		&c.StartedAt, &c.UpdatedAt, &c.ClosedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// createConversation 仅新建一条 open 会话。
+func (s *Store) createConversation(ctx context.Context, siteID, visitorID string) (*Conversation, error) {
+	now := time.Now()
+	c := &Conversation{
+		ID:        uuid.NewString(),
+		SiteID:    siteID,
+		VisitorID: visitorID,
+		Status:    "open",
+		StartedAt: now,
+		UpdatedAt: now,
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO conversations(id, site_id, visitor_id, status, unread_visitor, unread_agent, started_at, updated_at)
+VALUES(?, ?, ?, 'open', 0, 0, ?, ?)`,
+		c.ID, c.SiteID, c.VisitorID, c.StartedAt, c.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
 func (s *Store) OpenOrGetConversation(ctx context.Context, siteID, visitorID string) (*Conversation, error) {
 	c := &Conversation{}
 	err := s.db.QueryRowContext(ctx, `
