@@ -99,4 +99,26 @@ class Api {
     if (data is List) return data.cast<Map<String, dynamic>>();
     return const [];
   }
+
+  static Future<int> createAgent({
+    required String username,
+    required String password,
+    required String role,
+    required String nickname,
+  }) async {
+    final dio = await _ensure();
+    final r = await dio.post('/admin/agents', data: {
+      'username': username,
+      'password': password,
+      'role': role,
+      'nickname': nickname,
+    });
+    final id = r.data['id'];
+    return id is int ? id : int.tryParse(id.toString()) ?? 0;
+  }
+
+  static Future<void> setAgentActive(int id, bool active) async {
+    final dio = await _ensure();
+    await dio.post('/admin/agents/active', data: {'id': id, 'active': active});
+  }
 }

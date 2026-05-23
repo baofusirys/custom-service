@@ -26,6 +26,7 @@ class _HomePageState extends State<HomePage> {
       final s = context.read<AppState>();
       s.startWs();
       s.refreshConvs();
+      s.loadAgentSound();
     });
   }
 

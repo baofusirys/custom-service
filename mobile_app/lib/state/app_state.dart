@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import '../api/http_client.dart';
 import '../api/models.dart';
+import '../api/sound.dart' as snd;
 import '../api/ws_client.dart';
 import '../config/settings.dart';
 
@@ -26,6 +27,16 @@ class AppState extends ChangeNotifier {
   bool get wsAlive => _ws?.isAlive ?? false;
   // 自己 WSS 连接 ID（从 hello envelope 拿）—— 多端同步去重的关键
   String? myConnId;
+  // 客服端通知音色（admin 才能拉到完整设置，普通客服 fallback 默认）
+  String agentSound = 'chime';
+
+  Future<void> loadAgentSound() async {
+    if (agent?.role != 'admin') return;
+    try {
+      final s = await Api.getSettings();
+      agentSound = (s['agent_notify_sound'] ?? 'chime').toString();
+    } catch (_) {}
+  }
 
   Future<void> bootstrap() async {
     backendUrl = await Settings.getBackendUrl();
@@ -183,6 +194,11 @@ class AppState extends ChangeNotifier {
       return;
     }
     if (type == 'sys') {
+      // 访客进入通知 -> 播声
+      final extra = env['extra'];
+      if (extra is Map && extra['kind']?.toString() == 'visitor_enter') {
+        snd.playSound(agentSound);
+      }
       refreshConvs();
       return;
     }
@@ -267,7 +283,10 @@ class AppState extends ChangeNotifier {
       activeConv!.lastMessageSender = senderTag;
       activeConv!.lastMessagePreview = preview;
       activeConv!.updatedAt = m.createdAt;
-      if (fromVisitor) _sendRead(convId);
+      if (fromVisitor) {
+        _sendRead(convId);
+        snd.playSound(agentSound);
+      }
       notifyListeners();
       return;
     }
@@ -276,7 +295,10 @@ class AppState extends ChangeNotifier {
     final idx = convs.indexWhere((x) => x.id == convId);
     if (idx >= 0) {
       final c = convs[idx];
-      if (fromVisitor) c.unread++;
+      if (fromVisitor) {
+        c.unread++;
+        snd.playSound(agentSound);
+      }
       c.updatedAt = m.createdAt;
       c.lastMessageSender = senderTag;
       c.lastMessagePreview = preview;
@@ -287,6 +309,7 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     } else if (fromVisitor || fromSys) {
       refreshConvs();
+      if (fromVisitor) snd.playSound(agentSound);
     }
   }
 }

@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../state/app_state.dart';
+import 'history_page.dart';
+import 'agents_page.dart';
+import 'settings_page.dart';
 
 class MePage extends StatelessWidget {
   const MePage({super.key});
@@ -72,11 +75,25 @@ class MePage extends StatelessWidget {
               ),
             ),
           ),
-          _section('待开发（第 2 批 [021]）'),
-          _tile(icon: Icons.history, title: '历史记录', enabled: false),
-          _tile(icon: Icons.group, title: '客服管理', enabled: false),
-          _tile(icon: Icons.settings, title: '系统设置', enabled: false),
-          _section('待开发（第 3 批 [022]）'),
+          _section('管理'),
+          _tile(
+            icon: Icons.history,
+            title: '历史记录',
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const HistoryPage())),
+          ),
+          if (agent?.role == 'admin') ...[
+            _tile(
+              icon: Icons.group,
+              title: '客服管理',
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AgentsPage())),
+            ),
+            _tile(
+              icon: Icons.settings,
+              title: '系统设置',
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SettingsPage())),
+            ),
+          ],
+          _section('待开发（第 3 批 [025]）'),
           _tile(icon: Icons.notifications_active, title: 'APNs / FCM 推送', enabled: false),
           const SizedBox(height: 24),
           Container(

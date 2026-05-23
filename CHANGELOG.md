@@ -4,6 +4,80 @@
 
 ---
 
+## [024] 2026-05-23 17:00 — Flutter 移动 App 第 2 批：历史记录 + 客服管理 + 系统设置 + 11 种程序合成提示音
+
+**起因 / 需求**
+爷爷要求把 App「我的」页里 3 个待开发项补齐（历史记录 / 客服管理 / 系统设置），实现跟 Web 端完全一致的客服功能。
+
+**改了什么 / 加了什么**（新增 4 文件 / 修改 4 文件）
+
+新建：
+- `mobile_app/lib/api/sound.dart` — **跟 Web 端 sound.js 完全对齐的 11 种音色**：
+  - 短促：classic / chime / ding / soft / alert
+  - 响亮长音：bell / doorbell / trill / fanfare / chord
+  - 静音：none
+  - 实现：dart 程序合成 PCM 浮点采样 + 16-bit WAV 头封装，`audioplayers` 的 `BytesSource` 播放
+  - 零外部 mp3 文件，跟 Web 端 Web Audio API 等价的能力
+  - 500ms 同声防抖（连发消息不叠声）+ `_envelope` 10ms 渐入 + 指数衰减
+- `mobile_app/lib/pages/history_page.dart` — 历史记录页（复用 `/agent/conversations`，跟首页相同的卡片样式）
+- `mobile_app/lib/pages/agents_page.dart` — 客服管理页（admin 才能访问）：列出账号、新建（用户名/密码/昵称/角色单选）、启用/禁用，原生 Material Dialog
+- `mobile_app/lib/pages/settings_page.dart` — 系统设置页（admin 才能访问）：跟 Web 端 Settings.vue 一致：
+  - 客服端/访客端音色下拉 + 试听按钮（用本机 sound.dart 真实播放）
+  - 「通知客服」「自动问候」开关
+  - 问候内容多行文本框（500 字限长）
+  - Widget 标题输入框
+  - 保存按钮（顶部 AppBar action）
+
+修改：
+- `mobile_app/pubspec.yaml` — 加 `audioplayers: ^5.2.1`
+- `mobile_app/lib/api/http_client.dart` — 补 `createAgent` / `setAgentActive` API
+- `mobile_app/lib/pages/me_page.dart` — 去掉「待开发 [021]」占位段；按 role 条件渲染管理菜单：
+  - 历史记录（所有客服可见）
+  - 客服管理（admin only）
+  - 系统设置（admin only）
+  - APNs/FCM 推送（保留 [025] 待开发占位）
+- `mobile_app/lib/state/app_state.dart`:
+  - 加 `agentSound` 字段 + `loadAgentSound()` 方法（admin 启动时拉 `/admin/settings`，普通客服 fallback 默认）
+  - WSS 收到访客 chat 时调 `playSound(agentSound)` —— inCurrent / 非当前 / 全新会话 三种情况都覆盖
+  - sys/visitor_enter 通知也触发播声（跟 Web Console 一致）
+- `mobile_app/lib/pages/home_page.dart` — `initState` 启动时调 `loadAgentSound()`
+
+**业务流程**
+
+声音体验流程：
+```
+admin 登录 App → HomePage initState → AppState.loadAgentSound() →
+  GET /admin/settings → 拿到 agent_notify_sound（如 "chime"）
+访客发消息 → WSS chat 到达 → AppState._onEnvelope:
+  - 自己端 echo 跳过（[022] 已实现）
+  - 同账号他端 echo 接受（[022] 已实现）
+  - fromVisitor → playSound(agentSound) ← 这里
+  - 500ms 同名音色防抖
+```
+
+设置页流程：
+```
+admin → 我的 Tab → 点系统设置 → SettingsPage initState 拉 settings
+切换客服端音色为「铃声 (长)」→ 点「试听」→ playSound('bell') → 听到 1.2s C6+C7 叠加铃声
+→ 保存 → POST /admin/settings → 后端持久化到 DB
+→ 下次 admin 进 App 自动拉到这个新音色
+```
+
+**触发场景与边界 + 验证方式**
+- 验证 1：admin 进入 App → 我的 Tab → 看到「历史记录 / 客服管理 / 系统设置」3 个可点项；普通客服只看到「历史记录」
+- 验证 2：客服管理页 → 新建账号「test1 / password123 / 客服」→ 列表立即出现
+- 验证 3：系统设置页 → 切换客服端音色为「号角」→ 试听 → 听到 C-E-G-C 上升音阶 + 末音延长
+- 验证 4：保存后 → 让访客发消息 → App 应该播放「号角」音色（替代之前的 chime）
+- 边界：role != admin 时 me_page 隐藏管理菜单；agents_page 的 createAgent 后端有 password 至少 8 位校验，前端也校验
+- 边界：audioplayers 在静音模式 / 来电中静默失败（try-catch 已包），不影响业务
+
+**安全 / 健壮性**
+- admin API 都走 HTTP token + 后端 AdminOnly 中间件
+- WAV 字节流 in-memory 生成 + audioplayers BytesSource 播放，不写临时文件
+- sound 库 try-catch 包裹，setReleaseMode(stop) 防止资源泄漏
+
+---
+
 ## [023] 2026-05-23 16:00 — 会话列表显示最后一条消息预览 + App 聊天进入直接定位最新
 
 **起因 / 需求**
