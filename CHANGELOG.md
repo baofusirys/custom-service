@@ -4,6 +4,31 @@
 
 ---
 
+## [019] 2026-05-23 11:00 — 访客 widget 打开时自动滚到最新消息
+
+**起因 / 需求**
+爷爷反馈：访客把 widget 关闭后再次打开，聊天窗口停留在上次的滚动位置（可能是中间），需要手动往下拉才能看到最新消息。希望打开时自动跳到最底部（最新消息），跟主流 IM 一致。
+
+**根因**
+widget 收起 / 打开是 loader.js 切换 iframe wrap 的 `display:block/none`，iframe 内的 chat.html DOM 不会重新加载，`#list` 的 `scrollTop` 保持上次离开时的位置。
+
+**改了什么**（修改 1 个 / 新增 0 个 / 删除 0 个）
+- 修改：[widget/public/chat.html](widget/public/chat.html)
+  - 新增 `scrollToBottom()` 函数：用双 `requestAnimationFrame` 等浏览器完成 `display:none → display:block` 的 layout reflow（否则首次打开时 `scrollHeight` 可能还是 0），然后 `listEl.scrollTop = listEl.scrollHeight`
+  - `widget_state.open=true` 事件处理里调 `scrollToBottom()`
+
+**业务流程对比**
+- 改动前：访客上次滚到中间→关 widget→再开 widget，仍停留中间，要手动下拉
+- 改动后：每次打开 widget 都直接显示最新消息，无需任何操作
+
+**触发场景与边界 + 验证方式**
+- 验证 1：访客发几条消息使列表有滚动条 → 手动滚到中间 → 关 widget → 再开 → 应该立即看到最底部最新消息
+- 验证 2：访客第一次打开 widget（缓存里没历史）→ 也直接显示在底部（虽然只有问候一条）
+- 验证 3：CSS `scroll-behavior: smooth` 不变，滚动有平滑动画（视觉自然）
+- 边界：双 rAF 保证在浏览器至少经过一帧的 reflow 后才计算 scrollHeight，避免首次打开 scrollHeight=0 的坑
+
+---
+
 ## [018] 2026-05-23 01:00 — 会话「活跃期」概念：60 分钟无活动则重开（问候 + 提示音再触发，旧消息保留）
 
 **起因 / 需求**

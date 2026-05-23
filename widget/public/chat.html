@@ -751,6 +751,17 @@
     }
   });
 
+  // 跳到最新消息（最底部）。打开 widget 时 / loadHistory 完成时调。
+  // 用双 rAF 等浏览器完成 display:none -> display:block 的 layout reflow，
+  // 否则首次打开时 scrollHeight 可能还是 0。
+  function scrollToBottom() {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        if (listEl) listEl.scrollTop = listEl.scrollHeight;
+      });
+    });
+  }
+
   // 接收 loader.js 通知的 widget 开关状态 / 宿主页面信息
   window.addEventListener('message', function (ev) {
     if (!ev.data || ev.data.__cs !== 1) return;
@@ -761,6 +772,8 @@
         parent.postMessage({ __cs: 1, type: 'unread', count: 0 }, '*');
         // widget 刚打开：访客看到了所有客服消息 → 发 read 通知客服
         sendReadAck();
+        // 自动跳到最新消息（不让访客看到上次的滚动位置，省去手动下拉）
+        scrollToBottom();
       }
     }
     if (ev.data.type === 'page_info') {
