@@ -115,14 +115,18 @@ function sendText() {
     return
   }
   sending.value = true
+  const now = new Date().toISOString()
   ws.send({ type: 'chat', conv: activeConv.value.id, content: text, ts: Date.now(), prio: 0 })
   messages.value.push({
     id: 'local-' + Date.now(),
     sender: 'agent',
     sender_ref: String(session.agent?.id),
     content: text,
-    created_at: new Date().toISOString()
+    created_at: now
   })
+  // 自己发的消息也要更新会话列表的 last_message 预览（不然左侧列表停留在旧文本）
+  activeConv.value.last_message = { sender: 'agent', content: text, created_at: now }
+  activeConv.value.updated_at = now
   draft.value = ''
   sending.value = false
   nextTick(scrollToBottom)
@@ -217,8 +221,17 @@ function fmtGroupTime(t) {
 }
 
 function lastMsgPreview(c) {
-  // 简化：服务端 list 接口暂未返回最后一条；用更新时间提示
-  return '最近活动 · ' + fmtGroupTime(c.updated_at)
+  const lm = c.last_message
+  if (lm && lm.content) {
+    let prefix = ''
+    if (lm.sender === 'agent') prefix = '我：'
+    else if (lm.sender === 'sys') prefix = ''
+    else prefix = ''
+    return prefix + lm.content
+  }
+  // fallback：地理位置 / 活动时间
+  const loc = [c.country, c.city].filter(Boolean).join(' · ')
+  return loc || ('最近活动 · ' + fmtGroupTime(c.updated_at))
 }
 
 function senderName(g) {
@@ -350,6 +363,18 @@ onMounted(async () => {
           page_title: isPageNav ? env.extra.title : ''
         })
         nextTick(scrollToBottom)
+        // 同步更新当前会话的 last_message 预览（保持左侧列表跟实时一致）
+        if (activeConv.value && !isPageNav) {
+          let preview = env.content || ''
+          if (!preview && env.mkind === 'image') preview = '[图片]'
+          else if (!preview && env.media) preview = '[文件]'
+          activeConv.value.last_message = {
+            sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
+            content: preview,
+            created_at: new Date(env.ts || Date.now()).toISOString(),
+          }
+          activeConv.value.updated_at = new Date(env.ts || Date.now()).toISOString()
+        }
         // 访客发到当前会话：发 WSS read 通知访客「客服已读」+ 播声
         if (fromVisitor) {
           sendReadAck(env.conv)
@@ -367,6 +392,15 @@ onMounted(async () => {
           playSound(agentSound.value)
         }
         conv.updated_at = new Date(env.ts || Date.now()).toISOString()
+        // 实时更新最后一条消息预览（WSS 本地维护，跟服务端 last_message 字段一致）
+        let preview = env.content || ''
+        if (!preview && env.mkind === 'image') preview = '[图片]'
+        else if (!preview && env.media) preview = '[文件]'
+        conv.last_message = {
+          sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
+          content: preview,
+          created_at: new Date(env.ts || Date.now()).toISOString(),
+        }
         const idx = convs.value.indexOf(conv)
         if (idx > 0) {
           convs.value.splice(idx, 1)
@@ -425,7 +459,7 @@ onUnmounted(() => {
                 <span class="conv-time">{{ fmtGroupTime(c.updated_at) }}</span>
               </div>
               <div class="conv-row2">
-                <span class="conv-preview">{{ [c.country, c.city].filter(Boolean).join(' · ') || lastMsgPreview(c) }}</span>
+                <span class="conv-preview">{{ lastMsgPreview(c) }}</span>
                 <el-badge v-if="c.unread > 0" :value="c.unread" :max="99" />
               </div>
             </div>

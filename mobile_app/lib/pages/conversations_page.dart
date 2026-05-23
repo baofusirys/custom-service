@@ -74,7 +74,9 @@ class ConversationsPage extends StatelessWidget {
         children: [
           Expanded(
             child: Text(
-              c.location.isNotEmpty ? c.location : '最近活动 · ${_fmt(c.updatedAt)}',
+              c.displayPreview.isNotEmpty
+                  ? c.displayPreview
+                  : '最近活动 · ${_fmt(c.updatedAt)}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12),

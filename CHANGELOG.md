@@ -4,6 +4,55 @@
 
 ---
 
+## [023] 2026-05-23 16:00 — 会话列表显示最后一条消息预览 + App 聊天进入直接定位最新
+
+**起因 / 需求**
+爷爷反馈：
+1. App 端进入聊天页面要直接显示最新消息位置，不要停在中间需要手动滚动
+2. App + Web 端会话列表要能看到「最后一条对话内容预览」（截图显示当前只有时间，应该像 IM 一样显示「我：xxx」或「访客：xxx」）
+
+**改了什么**（修改 6 个 / 新增 0 个 / 删除 0 个）
+
+后端：
+- [backend/internal/store/store.go](backend/internal/store/store.go) — `ListOpenConversations` 给每条 conv 补 `last_message` 字段（应用层 N+1 拉最新消息：sender + content + created_at；图片/文件占位 [图片]/[文件]；文本超 50 字截断带 …）；新增私有方法 `getLastMessagePreview`
+
+Web 客服后台：
+- [admin/src/views/Console.vue](admin/src/views/Console.vue):
+  - `lastMsgPreview(c)` 改为优先读 `c.last_message.content`，自己发的加「我：」前缀
+  - 模板改用 `lastMsgPreview(c)`（去掉地理位置 fallback）
+  - `sendText` 发完消息本地立即更新 `activeConv.last_message`（左侧列表跟随）
+  - WSS 收到 chat 消息时，无论 inCurrent 还是非当前会话都同步更新 `conv.last_message`
+
+App 移动端：
+- [mobile_app/lib/api/models.dart](mobile_app/lib/api/models.dart) — `Conversation` 加 `lastMessageSender` + `lastMessagePreview` 字段；`fromJson` 解析 `last_message`；新增 `displayPreview` getter（自动加「我：」前缀 + 地理位置 fallback）
+- [mobile_app/lib/state/app_state.dart](mobile_app/lib/state/app_state.dart) — WSS 收到 chat 消息时（inCurrent 或非当前都）实时更新 conv 的 `lastMessageSender` + `lastMessagePreview`
+- [mobile_app/lib/pages/conversations_page.dart](mobile_app/lib/pages/conversations_page.dart) — subtitle 改用 `c.displayPreview`
+- [mobile_app/lib/pages/chat_page.dart](mobile_app/lib/pages/chat_page.dart):
+  - **ListView 改为 `reverse: true`**：进入页面天然显示最新消息（在视觉底部），不再依赖 `maxScrollExtent` 计算
+  - `_scrollToBottom()` 改为 `jumpTo(0)`（reverse 模式底部就是 offset 0），告别 ListView 懒渲染算不准的坑
+  - `NotificationListener` 的 `_autoScroll` 判断改为 `pixels < 50`（reverse 模式下 pixels=0 就是底部）
+  - `itemBuilder` 用 `msgs.length - 1 - i` 反向索引（让 ListView 的视觉顺序仍是「早消息在上、新消息在下」）
+
+**业务流程对比**
+
+App 聊天页：
+- 改动前：进入会话 → ListView.builder 懒渲染 → `addPostFrameCallback` 算 `maxScrollExtent` 但第一帧算不准 → 停在中间
+- 改动后：`reverse: true` → 视觉底部 = offset 0 → 进入就在最新消息 ✓
+
+会话列表：
+- 改动前：subtitle 只显示「最近活动 · 13:31」时间
+- 改动后：显示「我：发的是」/ 访客最后一句 / 「[图片]」等，跟主流 IM（微信、企业微信）一致
+
+**触发场景与边界 + 验证方式**
+- 验证 1：App 点开任何会话 → 立即看到最新消息（在屏幕底部），不需要手动滚
+- 验证 2：手指向上滑查历史，到底部时新消息自动跟随；离开底部 50px 以上后停止自动滚动
+- 验证 3：会话列表显示「我：xxx」/「[图片]」等；自己发消息或访客新消息立即更新预览
+- 验证 4：发送图片/文件后预览显示「[图片]」/「[文件]」
+- 边界：last_message N+1 查询限 200 条 conv，每个走 `idx_conv_time` 索引（ms 级），列表接口总响应仍 < 100ms
+- 边界：reverse 模式下 sendText 后 `_scrollToBottom` jumpTo(0) 准确（不再有 maxScrollExtent 不稳定的问题）
+
+---
+
 ## [022] 2026-05-23 15:00 — 双端 WSS 同步：同账号 web + app 实时同步消息 + 未读 + 已读
 
 **起因 / 需求**

@@ -34,6 +34,9 @@ class Conversation {
   final String city;
   final String lastPage;
   final String referer;
+  // 最后一条消息预览（拉列表时填，WSS 实时也会维护）
+  String lastMessageSender;  // 'agent' / 'visitor' / 'sys' / ''
+  String lastMessagePreview; // 文本预览（图片/文件已替换为 [图片]/[文件]）
 
   Conversation({
     required this.id,
@@ -46,20 +49,33 @@ class Conversation {
     this.city = '',
     this.lastPage = '',
     this.referer = '',
+    this.lastMessageSender = '',
+    this.lastMessagePreview = '',
   });
 
-  factory Conversation.fromJson(Map<String, dynamic> j) => Conversation(
-        id: j['id']?.toString() ?? '',
-        visitorId: j['visitor_id']?.toString() ?? '',
-        unread: j['unread'] is int ? j['unread'] : int.tryParse(j['unread'].toString()) ?? 0,
-        startedAt: _parseDate(j['started_at']),
-        updatedAt: _parseDate(j['updated_at']),
-        identifier: j['identifier']?.toString() ?? '',
-        country: j['country']?.toString() ?? '',
-        city: j['city']?.toString() ?? '',
-        lastPage: j['last_page']?.toString() ?? '',
-        referer: j['referer']?.toString() ?? '',
-      );
+  factory Conversation.fromJson(Map<String, dynamic> j) {
+    String lmSender = '';
+    String lmContent = '';
+    final lm = j['last_message'];
+    if (lm is Map) {
+      lmSender = lm['sender']?.toString() ?? '';
+      lmContent = lm['content']?.toString() ?? '';
+    }
+    return Conversation(
+      id: j['id']?.toString() ?? '',
+      visitorId: j['visitor_id']?.toString() ?? '',
+      unread: j['unread'] is int ? j['unread'] : int.tryParse(j['unread'].toString()) ?? 0,
+      startedAt: _parseDate(j['started_at']),
+      updatedAt: _parseDate(j['updated_at']),
+      identifier: j['identifier']?.toString() ?? '',
+      country: j['country']?.toString() ?? '',
+      city: j['city']?.toString() ?? '',
+      lastPage: j['last_page']?.toString() ?? '',
+      referer: j['referer']?.toString() ?? '',
+      lastMessageSender: lmSender,
+      lastMessagePreview: lmContent,
+    );
+  }
 
   String get displayName => identifier.isNotEmpty
       ? identifier
@@ -70,6 +86,17 @@ class Conversation {
     if (country.isNotEmpty) parts.add(country);
     if (city.isNotEmpty) parts.add(city);
     return parts.join(' · ');
+  }
+
+  /// 列表显示用：「我：xxx」/「xxx」/ fallback 到地理位置 / 活动时间
+  String get displayPreview {
+    if (lastMessagePreview.isNotEmpty) {
+      final prefix = lastMessageSender == 'agent' ? '我：' : '';
+      return prefix + lastMessagePreview;
+    }
+    final loc = location;
+    if (loc.isNotEmpty) return loc;
+    return '';
   }
 }
 

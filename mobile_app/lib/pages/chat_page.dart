@@ -15,15 +15,11 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
+  // 用户当前是否处于「底部附近」—— 在底部时新消息自动滚到底，
+  // 用户主动往上看历史时不强制滚动
   bool _autoScroll = true;
   // 缓存 AppState 引用，避免 dispose 时通过已 deactivated 的 context 查找 ancestor
   AppState? _state;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
-  }
 
   @override
   void didChangeDependencies() {
@@ -39,9 +35,11 @@ class _ChatPageState extends State<ChatPage> {
     super.dispose();
   }
 
+  /// reverse: true 模式下，pixels=0 就是视觉上的底部。
+  /// 用 jumpTo(0) 而不是 maxScrollExtent，避免 ListView.builder 懒渲染时算不准的问题。
   void _scrollToBottom() {
     if (!_scroll.hasClients) return;
-    _scroll.jumpTo(_scroll.position.maxScrollExtent);
+    _scroll.jumpTo(0);
   }
 
   void _send() {
@@ -61,7 +59,7 @@ class _ChatPageState extends State<ChatPage> {
     }
     final msgs = state.messages;
     final lastMine = _lastMineMsg(msgs, state.agent?.id ?? -1);
-    // 收到新消息时尝试自动滚到底（用户没有手动往上看的话）
+    // 新消息到来时，若用户当前在底部附近，自动跟随到底
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_autoScroll) _scrollToBottom();
     });
@@ -86,16 +84,25 @@ class _ChatPageState extends State<ChatPage> {
             child: NotificationListener<ScrollNotification>(
               onNotification: (n) {
                 if (n is ScrollEndNotification) {
-                  final pos = n.metrics;
-                  _autoScroll = pos.maxScrollExtent - pos.pixels < 50;
+                  // reverse: true 模式下，pixels=0 就是底部，pixels 增大时往历史方向走
+                  _autoScroll = n.metrics.pixels < 50;
                 }
                 return false;
               },
+              // reverse: true —— 进入页面时天然显示最新消息（在视觉底部），
+              // 不再依赖 maxScrollExtent 计算，告别 ListView 懒渲染滚不到底的坑
               child: ListView.builder(
                 controller: _scroll,
-                padding: const EdgeInsets.only(top: 8, bottom: 12),
+                reverse: true,
+                padding: const EdgeInsets.only(top: 12, bottom: 8),
                 itemCount: msgs.length,
-                itemBuilder: (ctx, i) => _row(msgs[i], i == 0 ? null : msgs[i - 1], lastMine, state),
+                itemBuilder: (ctx, i) {
+                  // i 是从底往上的 index；映射到原数组的真实索引
+                  final realIdx = msgs.length - 1 - i;
+                  final m = msgs[realIdx];
+                  final prev = realIdx == 0 ? null : msgs[realIdx - 1];
+                  return _row(m, prev, lastMine, state);
+                },
               ),
             ),
           ),

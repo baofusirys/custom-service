@@ -255,8 +255,18 @@ class AppState extends ChangeNotifier {
       pageTitle: isPageNav ? (extra?['title']?.toString() ?? '') : '',
     );
 
+    // 计算预览文本（图片/文件占位）
+    String preview = m.content;
+    if (preview.isEmpty && m.mediaKind == 'image') preview = '[图片]';
+    else if (preview.isEmpty && m.mediaUrl.isNotEmpty) preview = '[文件]';
+    final senderTag = fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor');
+
     if (activeConv != null && convId == activeConv!.id) {
       messages.add(m);
+      // 同步更新当前会话的 lastMessage 预览
+      activeConv!.lastMessageSender = senderTag;
+      activeConv!.lastMessagePreview = preview;
+      activeConv!.updatedAt = m.createdAt;
       if (fromVisitor) _sendRead(convId);
       notifyListeners();
       return;
@@ -268,6 +278,8 @@ class AppState extends ChangeNotifier {
       final c = convs[idx];
       if (fromVisitor) c.unread++;
       c.updatedAt = m.createdAt;
+      c.lastMessageSender = senderTag;
+      c.lastMessagePreview = preview;
       if (idx > 0) {
         convs.removeAt(idx);
         convs.insert(0, c);

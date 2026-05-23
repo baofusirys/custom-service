@@ -236,7 +236,7 @@ func (s *Store) CloseConversation(ctx context.Context, convID string) error {
 	return err
 }
 
-// ListOpenConversations 给客服后台用：当前所有进行中的会话（含访客信息）。
+// ListOpenConversations 给客服后台用：当前所有进行中的会话（含访客信息 + 最后一条消息预览）。
 func (s *Store) ListOpenConversations(ctx context.Context, limit int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -256,10 +256,10 @@ LIMIT ?`, limit)
 	out := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var (
-			id, vid                       string
-			aid                           sql.NullInt64
-			unread                        int
-			started, updated              time.Time
+			id, vid                         string
+			aid                             sql.NullInt64
+			unread                          int
+			started, updated                time.Time
 			ident, country, city, page, ref sql.NullString
 		)
 		if err := rows.Scan(&id, &vid, &aid, &unread, &started, &updated,
@@ -280,7 +280,54 @@ LIMIT ?`, limit)
 			"referer":    nullStr(ref),
 		})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 每条 conv 补一条 last_message 预览（应用层 N+1，limit≤200 时仍 ms 级）
+	for _, c := range out {
+		if cid, ok := c["id"].(string); ok {
+			if lm, err := s.getLastMessagePreview(ctx, cid); err == nil && lm != nil {
+				c["last_message"] = lm
+			}
+		}
+	}
+	return out, nil
+}
+
+// getLastMessagePreview 返回会话最近一条消息的预览（用于列表展示）。
+// 图片/文件类型用占位文案，文本超长截断 50 字。
+func (s *Store) getLastMessagePreview(ctx context.Context, convID string) (map[string]any, error) {
+	var sender, content string
+	var mediaKind sql.NullString
+	var createdAt time.Time
+	err := s.db.QueryRowContext(ctx, `
+SELECT sender, content, media_kind, created_at
+FROM messages WHERE conv_id=? ORDER BY created_at DESC LIMIT 1`, convID).Scan(
+		&sender, &content, &mediaKind, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	preview := content
+	if preview == "" && mediaKind.Valid {
+		switch mediaKind.String {
+		case "image":
+			preview = "[图片]"
+		default:
+			preview = "[文件]"
+		}
+	}
+	rs := []rune(preview)
+	if len(rs) > 50 {
+		preview = string(rs[:50]) + "…"
+	}
+	return map[string]any{
+		"sender":     sender,
+		"content":    preview,
+		"created_at": createdAt,
+	}, nil
 }
 
 // ============ Message ============
