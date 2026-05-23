@@ -83,16 +83,29 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     }
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('系统设置'),
-        actions: [
-          TextButton(
-            onPressed: _saving ? null : _save,
-            child: _saving
-                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('保存', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+      appBar: AppBar(title: const Text('系统设置')),
+      // 底部固定「保存」按钮（避免藏在 AppBar 右上角看不见）
+      bottomNavigationBar: SafeArea(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
           ),
-        ],
+          child: FilledButton(
+            onPressed: _saving ? null : _save,
+            style: FilledButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+              textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            child: _saving
+                ? const SizedBox(
+                    width: 20, height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  )
+                : const Text('保 存'),
+          ),
+        ),
       ),
       body: ListView(
         children: [

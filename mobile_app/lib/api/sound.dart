@@ -14,7 +14,11 @@ class _SoundDef {
 
 const _sampleRate = 44100;
 
-final _player = AudioPlayer()..setReleaseMode(ReleaseMode.stop);
+// lowLatency 模式：Android 用 SoundPool（专为短音效设计，稳定无延迟），
+// iOS 用 AVAudioPlayer。避免 MediaPlayer 处理 BytesSource 时的 -38 错误。
+final _player = AudioPlayer()
+  ..setReleaseMode(ReleaseMode.stop)
+  ..setPlayerMode(PlayerMode.lowLatency);
 DateTime _lastPlay = DateTime.fromMillisecondsSinceEpoch(0);
 
 /// 播放音色。500ms 内同名音色防抖（避免连发消息时声音叠成噪声）。
@@ -27,10 +31,11 @@ Future<void> playSound(String name) async {
   if (def == null) return;
   try {
     final wav = def.build();
+    // lowLatency 模式：先 setSource 再 resume，避免快速重复调用时的状态错乱
     await _player.stop();
     await _player.play(BytesSource(wav));
   } catch (_) {
-    // 静默失败：手机静音模式 / 音频设备未就绪
+    // 静默失败：手机静音模式 / 音频设备未就绪 / 资源占用
   }
 }
 
