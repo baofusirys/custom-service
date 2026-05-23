@@ -4,6 +4,76 @@
 
 ---
 
+## [020] 2026-05-23 13:30 — Flutter 移动 App 第 1 批：骨架 + URL 配置 + 登录 + 会话列表 + 聊天 WSS 实时
+
+**起因 / 需求**
+爷爷要求开发 iOS / Android 双端原生 App，复刻客服工作台功能，可配置后端 URL（自托管），后续加 APNs / FCM 推送。
+
+**分批方案**
+- **[020]（本批）**：项目骨架 + URL 配置页 + 登录 + 主框架 + 在线会话列表 + 聊天页 + WSS 实时（含已读、页面跳转横幅、未读 badge、可访客进入提醒）
+- [021] 待办：历史记录 / 客服管理 / 系统设置（含声音）
+- [022] 待办：APNs（iOS） / FCM（Android） 推送集成（前后端）
+
+**技术栈**
+- Flutter 3.13+（dart 3.0+），双端 iOS + Android 一套代码
+- HTTP：dio
+- WebSocket：web_socket_channel
+- 状态管理：provider (ChangeNotifier)
+- 持久化：shared_preferences
+- 时间：intl
+
+**改了什么 / 加了什么 / 删了什么**（新增 14 文件 / 修改 0 / 删除 0）
+- 新建：`mobile_app/pubspec.yaml` — Flutter 项目配置 + 依赖声明
+- 新建：`mobile_app/README.md` — 项目说明 + Windows / macOS 双平台初始化步骤
+- 新建：`mobile_app/.gitignore`
+- 新建：`mobile_app/lib/main.dart` — 入口 + AppState 初始化
+- 新建：`mobile_app/lib/app.dart` — MaterialApp + 根路由（URL 没配 → 配置页；没 token → 登录页；都有 → 主页）
+- 新建：`mobile_app/lib/config/settings.dart` — backendUrl / token / agent 持久化；httpToWs 工具；切换服务器时自动清 session
+- 新建：`mobile_app/lib/api/models.dart` — Agent / Conversation / Message 数据模型；Message.fromJson 兼容后端 `sql.NullString` 包装
+- 新建：`mobile_app/lib/api/http_client.dart` — dio 封装；token 拦截器；登录/拉会话/拉消息/接管/标已读/拉/存设置等 API
+- 新建：`mobile_app/lib/api/ws_client.dart` — WSS 客户端：30s 心跳 + 指数退避重连（1.6 倍最高 30s）+ envelope 回调
+- 新建：`mobile_app/lib/state/app_state.dart` — 全局 ChangeNotifier；处理 onMessage（chat / read / sys / 已读）；本地维护未读 +1 与上浮；乐观渲染发送消息
+- 新建：`mobile_app/lib/pages/server_setup_page.dart` — URL 配置页（输入后自动调 /api/health 验证再保存）
+- 新建：`mobile_app/lib/pages/login_page.dart` — 登录页（展示当前服务器 URL，支持「切换服务器地址」）
+- 新建：`mobile_app/lib/pages/home_page.dart` — 主框架（底部 Tab：会话 / 我的；进入时启动 WSS + refreshConvs）
+- 新建：`mobile_app/lib/pages/conversations_page.dart` — 在线会话列表（头像哈希配色 + 未读红 badge + WSS 状态点）
+- 新建：`mobile_app/lib/pages/chat_page.dart` — 聊天页（消息分组时间分隔 + 自动滚到底 + 用户上拉时停止自动滚 + 已读角标）
+- 新建：`mobile_app/lib/pages/me_page.dart` — 我的页（展示账号 / WSS 状态 / 切换服务器 / 退出登录 / 占位待开发项）
+- 新建：`mobile_app/lib/widgets/message_bubble.dart` — 消息气泡（mine 蓝渐变 / theirs 白底 / 不对称尾巴）+ TimeDivider
+- 新建：`mobile_app/lib/widgets/page_banner.dart` — 「访客访问了 XXX」橙色横幅
+
+**业务流程（与 Web 客服工作台等价）**
+```
+首次启动 → 服务器配置页 → 输入 http://38.76.193.68 → 调 /api/health 验证 → 保存
+→ 登录页 → admin / ***REDACTED*** → POST /api/agent/login → 保存 token + agent
+→ 主页（底部 Tab：会话 + 我的）→ 启动 WSS → 拉会话列表
+→ 点会话 → 拉历史消息 + POST /assign + WSS 发 read
+→ 聊天页：发消息走 WSS（type=chat）；收到 WSS chat/read/sys 实时更新
+→ 我的页：切换服务器（自动清 session）/ 退出登录
+```
+
+**与 Web 端一致的功能**
+- WSS 长连接 + 自动重连 + 心跳
+- 消息分组（5 分钟同发送者合并）+ 时间分隔条
+- 已读角标（自己最后一条被读了才显示）
+- 页面跳转橙色横幅（sender_ref="page:<url>" 触发）
+- 未读 badge + 会话上浮
+- 切换服务器自动登出（旧 token 跟旧服务器走）
+
+**爷爷需要做的下一步**
+1. 装 Flutter SDK（Windows + Android Studio 就能测 Android）
+2. `cd mobile_app && flutter create -t app --org com.customservice --platforms=ios,android .`
+3. `flutter pub get`
+4. `flutter run`（Android 模拟器 / 真机 / 接 iPhone）
+5. 首次进入输入 `http://38.76.193.68` 测试
+
+**注意**
+- iOS 编译必须用 macOS + Xcode（苹果硬性规定），Windows 上只能编 Android
+- iOS 要测 HTTP 测试服需要在 `ios/Runner/Info.plist` 加 NSAllowsArbitraryLoads（生产 HTTPS 后去掉）
+- APNs 推送测试需要 iPhone 真机（模拟器收不到）—— 这部分留到 [022]
+
+---
+
 ## [019] 2026-05-23 11:00 — 访客 widget 打开时自动滚到最新消息
 
 **起因 / 需求**
