@@ -14,14 +14,14 @@ class _SoundDef {
 
 const _sampleRate = 44100;
 
-// lowLatency 模式：Android 用 SoundPool（专为短音效设计，稳定无延迟），
-// iOS 用 AVAudioPlayer。避免 MediaPlayer 处理 BytesSource 时的 -38 错误。
-final _player = AudioPlayer()
-  ..setReleaseMode(ReleaseMode.stop)
-  ..setPlayerMode(PlayerMode.lowLatency);
 DateTime _lastPlay = DateTime.fromMillisecondsSinceEpoch(0);
 
 /// 播放音色。500ms 内同名音色防抖（避免连发消息时声音叠成噪声）。
+///
+/// 实现要点：每次都 new 一个全新的 AudioPlayer 实例，播完或超时自动 dispose。
+/// 原因：audioplayers 在 Android 用 MediaPlayer + BytesSource 时，复用同一个
+///   player 会触发 state machine 错误（MEDIA_ERROR_UNKNOWN {what:-38}），
+///   表现为「第一次能响、第二次以后哑」。每次 new 实例最彻底，零状态残留。
 Future<void> playSound(String name) async {
   if (name.isEmpty || name == 'none') return;
   final now = DateTime.now();
@@ -29,13 +29,20 @@ Future<void> playSound(String name) async {
   _lastPlay = now;
   final def = _sounds[name];
   if (def == null) return;
+  final p = AudioPlayer();
   try {
     final wav = def.build();
-    // lowLatency 模式：先 setSource 再 resume，避免快速重复调用时的状态错乱
-    await _player.stop();
-    await _player.play(BytesSource(wav));
+    // 播放完成主动释放，避免 native MediaPlayer 泄漏
+    p.onPlayerComplete.listen((_) async {
+      try { await p.dispose(); } catch (_) {}
+    });
+    // 兜底：8 秒后即使没收到 complete 也强制 dispose（防 complete 事件丢失）
+    Future.delayed(const Duration(seconds: 8), () async {
+      try { await p.dispose(); } catch (_) {}
+    });
+    await p.play(BytesSource(wav));
   } catch (_) {
-    // 静默失败：手机静音模式 / 音频设备未就绪 / 资源占用
+    try { await p.dispose(); } catch (_) {}
   }
 }
 

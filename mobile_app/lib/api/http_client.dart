@@ -46,6 +46,19 @@ class Api {
     return Map<String, dynamic>.from(r.data);
   }
 
+  /// 用临时 baseUrl 测 health，不污染全局 _dio——服务器配置页用，避免提前
+  /// notifyListeners 导致页面 dispose 后 setState 报错。
+  static Future<Map<String, dynamic>> healthAt(String baseUrl) async {
+    final tmpDio = Dio(BaseOptions(
+      baseUrl: baseUrl + '/api',
+      connectTimeout: const Duration(seconds: 10),
+      receiveTimeout: const Duration(seconds: 15),
+      headers: {'Content-Type': 'application/json'},
+    ));
+    final r = await tmpDio.get('/health');
+    return Map<String, dynamic>.from(r.data);
+  }
+
   // ===== Conversations =====
   static Future<List<Map<String, dynamic>>> listConversations() async {
     final dio = await _ensure();

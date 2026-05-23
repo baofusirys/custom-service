@@ -45,5 +45,12 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- 允许 HTTP 请求：自托管客服系统的服务器可能是 HTTP IP/局域网，不强制 HTTPS。
+	     跟 Android usesCleartextTraffic=true 等价。 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>

@@ -137,11 +137,18 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+      ENABLE_HTTPS: ${ENABLE_HTTPS:-true}
+      # Let's Encrypt 自动证书申请的邮箱（必填，否则只跑 HTTP）。
+      # 用于证书到期通知；不验证邮箱本身，但必须是合法格式。
+      ACME_EMAIL: ${ACME_EMAIL}
     volumes:
-      # nginx 日志同样 bind 到仓库外
+      # nginx 日志 bind 到仓库外（铁律：日志要能宿主机直接查看）
       - ${HOST_DATA_DIR:-/srv/cs-data}/logs/nginx:/var/log/nginx
-      # SSL 证书目录（用户自己挂载）— 默认 /srv/cs-data/ssl/<domain>.pem & .key
-      - ${HOST_DATA_DIR:-/srv/cs-data}/ssl:/etc/nginx/ssl:ro
+      # SSL 证书改为 named volume，acme.sh 自动写入。
+      # 不再用仓库目录 bind mount，避免 deploy 时被清空。
+      - cs_ssl_data:/etc/nginx/ssl
+      # acme.sh 账户密钥 + 配置（首次注册账户后必须持久化，否则次次重新注册会撞 LE 配额）
+      - cs_acme_data:/opt/acme.sh
     networks: [cs-net]
 
 volumes:
@@ -149,6 +156,12 @@ volumes:
     name: cs_mysql_data
   cs_redis_data:
     name: cs_redis_data
+  # SSL 证书持久化：acme.sh 申请的证书 + 私钥都在这里
+  cs_ssl_data:
+    name: cs_ssl_data
+  # acme.sh 账户密钥 / 配置持久化：避免重启容器后丢账户撞 Let's Encrypt 配额
+  cs_acme_data:
+    name: cs_acme_data
 
 networks:
   cs-net:

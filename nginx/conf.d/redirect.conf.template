@@ -1,0 +1,19 @@
+# HTTPS 启用后由 entrypoint.sh 渲染并覆盖 default.conf。
+# 80 端口的唯一职责：
+#   1) 保留 /.well-known/acme-challenge/ 路径，让 cron 续期时的 HTTP-01 验证仍能通过
+#   2) 其他所有路径 301 永久跳转到 HTTPS
+
+server {
+    listen 80 default_server;
+    server_name ${DOMAIN} _;
+
+    # Let's Encrypt webroot challenge（续期时也要用）
+    location /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+
+    # 其他全部 301 → HTTPS（永久跳转，浏览器会缓存）
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}

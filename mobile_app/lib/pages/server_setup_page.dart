@@ -17,8 +17,8 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
   bool _testing = false;
   String? _hint;
 
-  // 快速填入测试服（爷爷的服务器）
-  static const _demoUrl = 'http://38.76.193.68';
+  // 快速填入测试服（爷爷的服务器，maihaocs.icu 已挂 HTTPS）
+  static const _demoUrl = 'https://maihaocs.icu';
 
   @override
   void dispose() {
@@ -69,16 +69,19 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
       _hint = null;
     });
     try {
-      // 先临时设置 baseUrl，再调 health
-      await context.read<AppState>().setBackend(url);
-      final h = await Api.health();
+      // 先用临时 baseUrl 测 health，不动 AppState；测通了才 setBackend
+      // 否则 setBackend 会立刻 notifyListeners 让本页 dispose，后续 await 报
+      // setState-after-dispose
+      final h = await Api.healthAt(url);
       if (h['status'] != 'ok') {
-        setState(() => _hint = '服务器响应异常：${h.toString()}');
-      } else {
-        // 验证成功，AppState 已保存，会自动跳到登录页
+        if (mounted) setState(() => _hint = '服务器响应异常：${h.toString()}');
+        return;
       }
+      // 测通了再保存 — 这一刻顶层会切到登录页，本页随即 dispose
+      if (!mounted) return;
+      await context.read<AppState>().setBackend(url);
     } catch (e) {
-      setState(() => _hint = '无法连接：$e\n请检查 URL 是否正确、服务器是否启动');
+      if (mounted) setState(() => _hint = '无法连接：$e\n请检查 URL 是否正确、服务器是否启动');
     } finally {
       if (mounted) setState(() => _testing = false);
     }
@@ -119,7 +122,7 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
                 autocorrect: false,
                 decoration: const InputDecoration(
                   labelText: '服务器地址',
-                  hintText: '例如：http://38.76.193.68',
+                  hintText: '例如：https://maihaocs.icu',
                   helperText: '必须以 http:// 或 https:// 开头',
                   border: OutlineInputBorder(),
                   prefixIcon: Icon(Icons.link),
@@ -149,9 +152,9 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
                       ],
                     ),
                     const SizedBox(height: 8),
+                    _hintRow('域名 HTTPS', 'https://maihaocs.icu'),
                     _hintRow('IP 地址', 'http://38.76.193.68'),
                     _hintRow('带端口', 'http://192.168.1.100:8080'),
-                    _hintRow('域名 HTTPS', 'https://cs.example.com'),
                     const SizedBox(height: 6),
                     Text(
                       '不要在末尾加 /；不要加 /admin 或 /api',
@@ -164,7 +167,7 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
               // 一键填入测试服
               OutlinedButton.icon(
                 icon: const Icon(Icons.flash_on, size: 16),
-                label: const Text('一键填入测试服 38.76.193.68'),
+                label: const Text('一键填入测试服 maihaocs.icu'),
                 onPressed: () {
                   _ctl.text = _demoUrl;
                   _ctl.selection = TextSelection.fromPosition(TextPosition(offset: _ctl.text.length));

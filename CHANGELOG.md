@@ -4,6 +4,129 @@
 
 ---
 
+## [025] 2026-05-24 07:55 — iOS App 真机 Release 调试通跑 + 域名 maihaocs.icu 全自动 HTTPS 证书
+
+**起因 / 需求**
+
+爷爷两件事：
+1. iOS App 要在自己的 iPhone 上跑起来，且**拔了 USB 数据线也能用**（不是单纯 Debug 模式 attach）
+2. 给客服系统上正式域名 `maihaocs.icu` 并启用 HTTPS，且证书要 docker **自己判断是否申请、自动续期**，仍保持 `docker compose up -d --build` 一条命令完成
+
+第二件事是核心：自托管系统部署给非技术人员用，绝不能让他们手动跑 certbot / 配 nginx ssl_certificate。
+
+**改了什么 / 加了什么 / 删了什么**（新增 3 文件 / 修改 9 文件）
+
+### A. iOS 真机调试链路打通（5 文件）
+
+1. `mobile_app/lib/pages/server_setup_page.dart` — _confirm() 顺序 bug 修复 + 全端 URL 改 HTTPS
+   - 原 bug：先调 `setBackend(url)` → AppState.notifyListeners → 顶层 widget 重建跳到登录页 → ServerSetupPage dispose → 但 `await Api.health()` 还在跑 → 失败时 catch 里 setState → 抛 "setState called after dispose"
+   - 修复：先 `Api.healthAt(url)` 临时测试通了再 `setBackend(url)`；所有 setState 加 `if (mounted)` 检查
+   - 顺手改：`_demoUrl` 从 `http://38.76.193.68` → `https://maihaocs.icu`；输入框 hint / 示例 / 一键填入按钮文本同步改
+
+2. `mobile_app/lib/api/http_client.dart` — 新增 `healthAt(baseUrl)` 方法（line 49-60）
+   - 不依赖全局 `_dio` 单例，临时 Dio 实例只为这一次 health 检测
+   - 避免提前污染全局 baseUrl 触发 [025] 中的 widget dispose 问题
+
+3. `mobile_app/ios/Runner.xcodeproj/project.pbxproj`
+   - Bundle ID 从 `com.customservice.customServiceApp` → `com.chengmeiran.customservice`（全球唯一）
+   - **hardcode `DEVELOPMENT_TEAM = 4ARYS2Z738`** 强制走 baofusir 的 Personal Team（防止 Xcode 自动选 Keychain 里别人遗留的吊销证书）
+
+4. `mobile_app/ios/Runner/Info.plist`
+   - 加 `NSAppTransportSecurity.NSAllowsArbitraryLoads=true` 允许 HTTP 请求（自托管系统的用户可能服务器还没上 HTTPS，要兼容）
+   - 等价于 Android 的 `usesCleartextTraffic="true"`
+
+5. `mobile_app/lib/api/sound.dart` — 音频播放彻底重写，避免 MediaPlayer 状态机 -38 错误
+   - 每次播放 new 一个全新的 `AudioPlayer` 实例，零状态残留
+   - `onPlayerComplete` 监听自动 dispose；8 秒兜底强制释放（防止 complete 事件丢失泄漏）
+   - 之前用单例 + `release()` / `stop()` 都被 MediaPlayer 拒绝（"AndroidAudioError MEDIA_ERROR_UNKNOWN {what:-38}"）
+
+### B. nginx 自动 HTTPS 证书（5 文件，3 新 + 2 改）
+
+6. `nginx/Dockerfile` — 新装 acme.sh + dcron
+   - `apk add bash dcron curl socat` + 从 GitHub `master.tar.gz` 直装 acme.sh 到 `/opt/acme.sh`（绕开 `get.acme.sh` 包装器的参数 bug —— 它会把 `--install-online` 转发成 `----install-online` 4 dash）
+   - 默认 CA 设为 Let's Encrypt（acme.sh 内置默认是 zerossl，需要邮箱注册更繁）
+   - 创建 `/var/www/acme` HTTP-01 challenge webroot 目录
+
+7. `nginx/entrypoint.sh` — 重写为完整自动化逻辑
+   - 决策树：检查 `/etc/nginx/ssl/${DOMAIN}.pem` 存在性 + `openssl x509 -checkend $((30*86400))` 30 天过期判断
+     - 不存在 / < 30 天到期 → 后台启 nginx (HTTP only) → `acme.sh --issue --force --webroot` → `--install-cert` 拷到 nginx ssl 目录
+     - 已有且 > 30 天 → 直接启用 HTTPS
+   - 启动 dcron 守护进程，写 `/etc/crontabs/root`：每天 03:00 调 `acme-renew.sh`（含 PUBLIC_DOMAIN / ACME_EMAIL env，cron 子进程能继承）
+   - HTTPS 启用后渲染 `redirect.conf.template` 覆盖默认 HTTP conf，强制 80→301→HTTPS
+
+8. `nginx/acme-renew.sh` — **新文件**
+   - cron 每天 03:00 调用
+   - `acme.sh --cron` 自动判断证书是否需要续期（默认证书 90 天，60 天后续）
+   - 续期了则 mtime 比较后 `install-cert` + `nginx -s reload`
+
+9. `nginx/conf.d/redirect.conf.template` — **新文件**
+   - HTTPS 启用后的 80 端口配置：只保留 `/.well-known/acme-challenge/`（续期 HTTP-01 用），其余 `return 301 https://$host$request_uri`
+
+10. `docker-compose.yml` — 加 `ACME_EMAIL` env + 新增两个 named volume
+    - `cs_ssl_data:/etc/nginx/ssl`（acme.sh 自动写入的证书 + 私钥，持久化）
+    - `cs_acme_data:/opt/acme.sh`（acme.sh 账户密钥 / 配置，避免重启容器后重复注册撞 LE 配额）
+    - 旧 bind mount `${HOST_DATA_DIR}/ssl:/etc/nginx/ssl:ro` 移除（不再需要用户手动放证书）
+
+### C. 配置示例与依赖（2 文件）
+
+11. `.env.example` — 加 `ACME_EMAIL=` 字段及详细说明（首次启动行为 / 触发条件 / DNS 前置要求）
+
+12. `.gitignore` — 加 `cert/`、`cert*/`、`*.p12`、`*.mobileprovision`、`*.cer`、`*.pem`、`*.key`（防止 iOS 开发者证书私钥误入库）
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+|---|---|---|
+| iOS App 装到 iPhone | 没法 build（DEVELOPMENT_TEAM 选错证书 / Keychain ACL 错） | Windows 写代码 → mcp 同步 Mac → `flutter build ios --release` → `flutter install` → iPhone 桌面点开能跑，**拔 USB 也能用** |
+| iOS App ATS | 默认禁止明文 HTTP，自托管 IP 服务器连不上 | Info.plist 加 NSAllowsArbitraryLoads，HTTP/HTTPS 都通 |
+| 客服系统部署 HTTPS | 用户手动跑 certbot certonly + 改 nginx conf + reload + 写 cron renew | `cp .env.example .env` → 填 PUBLIC_DOMAIN + ACME_EMAIL → `docker compose up -d --build` 完事 |
+| 证书续期 | 用户手动 / 容易忘 | cron 每天 03:00 自动 `acme.sh --cron`，证书 < 30 天自动续 + reload nginx |
+| HTTP 访问 | 直接通 | 强制 301 跳 HTTPS（保留 /.well-known 路径供续期 challenge） |
+
+**触发场景与边界 + 验证方式**
+
+触发：
+- 每次 `docker compose up -d --build` 启动 nginx 容器 → entrypoint.sh 判断证书状态决定要不要 issue
+- 每天 03:00 北京时间（容器 TZ=Asia/Shanghai） → cron 调 acme-renew.sh
+- iPhone 上每次点 App 图标 → Release 模式独立运行
+
+不触发：
+- 证书有效期 > 30 天 → 跳过申请
+- ENABLE_HTTPS=false 或 ACME_EMAIL 留空 → 不申请证书，只跑 HTTP
+- 容器重启但 `cs_ssl_data` named volume 保留 → 用旧证书 + cron 续期，不重新申请
+
+边界：
+- DNS 必须先生效（公网 8.8.8.8/1.1.1.1 能解析 PUBLIC_DOMAIN → 本服务器）—— acme.sh HTTP-01 challenge 时 Let's Encrypt 服务器要主动访问 `http://${DOMAIN}/.well-known/acme-challenge/...`
+- 80 端口必须可达（防火墙、云服务安全组都要放开）
+- ACME_EMAIL 必须是合法邮箱格式（不验证邮箱本身，但语法错会被 LE 拒）
+- Let's Encrypt 同一域名 7 天最多签 5 张证书（撞了会被 ban 一周，所以 cs_acme_data named volume 不能丢）
+- iOS 免费 Apple ID 签名 7 天过期，到期后需重 build + install
+
+验证方式（已实测）：
+1. `curl -sI https://maihaocs.icu/` → 302 → /admin/ ✓
+2. `curl -s https://maihaocs.icu/api/health` → 200 `{"agents":0,"now":"2026-05-24 07:51:26","status":"ok","tz":"Asia/Shanghai","visitors":0}` ✓
+3. `curl -sI http://maihaocs.icu/` → 301 → `https://maihaocs.icu/` ✓
+4. `openssl s_client -connect maihaocs.icu:443` → issuer=Let's Encrypt, subject=CN=maihaocs.icu, 2026-05-23 ~ 2026-08-21 ✓
+5. `docker exec cs-nginx cat /etc/crontabs/root` → 含 `0 3 * * * /usr/local/bin/acme-renew.sh` ✓
+6. iPhone 上 App 装到 `luck 的iPhone` → 点 Custom Service App → 不闪退 → 见 ServerSetupPage ✓
+
+**安全 / 健壮性**
+
+- TLS 1.2+ 强制（ssl.conf.template）
+- HSTS `max-age=31536000` 一年（浏览器后续永久走 HTTPS）
+- nginx 限速规则保留（api_rps=20r/s, ws_rps=5r/s, login_rps=2r/s, conn_per_ip=200）
+- acme.sh 账户密钥用 named volume 持久化（防止丢账户撞 LE 5/7天/domain 配额）
+- entrypoint.sh 用 `set -e` + 各 risky 命令 `|| true` 兜底，acme 失败不阻塞 nginx 启动（fallback 到 HTTP 模式继续跑）
+- iOS 证书私钥 .p12 通过 .gitignore 严格隔离
+
+**遗留 / 已知问题**
+
+- iOS 卖家给的 .p12 在 macOS 26 `security import` 拒收（PKCS#12 PBE 算法太老，SHA-1 MAC + 3DES），切到了免费 Apple ID 路线，**没用买的证书**（购买证书的 APNs 通道也用不上：卖家不会给 .p8 Key，后端发不出 push）。后续要 APNs 推送只能：续费个人 Apple Developer ($99/年)，或让卖家重补 PBES2 + SHA-256 + AES-256 的现代格式 .p12
+- App 端的 `_demoUrl` 现在写死指向 maihaocs.icu，将来这套代码给别人部署时他们会手动改这一行
+- ENABLE_HTTPS=false 时 `_demoUrl` 是 https://maihaocs.icu，访问 http 服务器会失败 — 这是预期行为，因为爷爷部署的就是 HTTPS
+
+---
+
 ## [024] 2026-05-23 17:00 — Flutter 移动 App 第 2 批：历史记录 + 客服管理 + 系统设置 + 11 种程序合成提示音
 
 **起因 / 需求**
