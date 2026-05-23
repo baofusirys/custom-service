@@ -13,14 +13,49 @@ class ServerSetupPage extends StatefulWidget {
 }
 
 class _ServerSetupPageState extends State<ServerSetupPage> {
-  final _ctl = TextEditingController(text: 'http://');
+  final _ctl = TextEditingController();
   bool _testing = false;
   String? _hint;
+
+  // 快速填入测试服（爷爷的服务器）
+  static const _demoUrl = 'http://38.76.193.68';
 
   @override
   void dispose() {
     _ctl.dispose();
     super.dispose();
+  }
+
+  Widget _hintRow(String tag, String example) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(
+              color: const Color(0xFFDBEAFE),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Text(
+              tag,
+              style: const TextStyle(fontSize: 11, color: Color(0xFF1E3A8A), fontWeight: FontWeight.w500),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: SelectableText(
+              example,
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12,
+                color: Color(0xFF1F2937),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _confirm() async {
@@ -77,21 +112,67 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
                 '请输入您部署的客服服务器地址',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey[600]),
               ),
-              const SizedBox(height: 40),
+              const SizedBox(height: 32),
               TextField(
                 controller: _ctl,
                 keyboardType: TextInputType.url,
                 autocorrect: false,
                 decoration: const InputDecoration(
                   labelText: '服务器地址',
-                  hintText: 'http://cs.example.com',
+                  hintText: '例如：http://38.76.193.68',
+                  helperText: '必须以 http:// 或 https:// 开头',
                   border: OutlineInputBorder(),
                   prefixIcon: Icon(Icons.link),
                 ),
                 onSubmitted: (_) => _confirm(),
               ),
               const SizedBox(height: 12),
-              if (_hint != null)
+              // 格式说明卡片
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEFF6FF),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFBFDBFE)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: const [
+                        Icon(Icons.info_outline, size: 16, color: Color(0xFF2974FF)),
+                        SizedBox(width: 6),
+                        Text(
+                          '怎么填？',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Color(0xFF1E3A8A)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    _hintRow('IP 地址', 'http://38.76.193.68'),
+                    _hintRow('带端口', 'http://192.168.1.100:8080'),
+                    _hintRow('域名 HTTPS', 'https://cs.example.com'),
+                    const SizedBox(height: 6),
+                    Text(
+                      '不要在末尾加 /；不要加 /admin 或 /api',
+                      style: TextStyle(fontSize: 11, color: Colors.grey[700], fontStyle: FontStyle.italic),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              // 一键填入测试服
+              OutlinedButton.icon(
+                icon: const Icon(Icons.flash_on, size: 16),
+                label: const Text('一键填入测试服 38.76.193.68'),
+                onPressed: () {
+                  _ctl.text = _demoUrl;
+                  _ctl.selection = TextSelection.fromPosition(TextPosition(offset: _ctl.text.length));
+                  setState(() => _hint = null);
+                },
+              ),
+              if (_hint != null) ...[
+                const SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -101,16 +182,20 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
                   ),
                   child: Text(_hint!, style: TextStyle(color: Colors.red.shade800)),
                 ),
+              ],
               const SizedBox(height: 20),
               FilledButton(
                 onPressed: _testing ? null : _confirm,
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                ),
                 child: _testing
                     ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : const Text('连接'),
+                    : const Text('连 接', style: TextStyle(fontSize: 16)),
               ),
               const Spacer(),
               Text(
-                '示例：http://38.76.193.68',
+                'App 会自动调 /api/health 验证服务器可达后才保存',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey),
                 textAlign: TextAlign.center,
               ),

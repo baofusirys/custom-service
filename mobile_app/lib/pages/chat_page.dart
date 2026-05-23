@@ -16,6 +16,8 @@ class _ChatPageState extends State<ChatPage> {
   final _input = TextEditingController();
   final _scroll = ScrollController();
   bool _autoScroll = true;
+  // 缓存 AppState 引用，避免 dispose 时通过已 deactivated 的 context 查找 ancestor
+  AppState? _state;
 
   @override
   void initState() {
@@ -24,10 +26,16 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _state = context.read<AppState>();
+  }
+
+  @override
   void dispose() {
     _input.dispose();
     _scroll.dispose();
-    context.read<AppState>().closeActive();
+    _state?.closeActive();
     super.dispose();
   }
 
