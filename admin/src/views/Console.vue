@@ -17,6 +17,9 @@ const convs = ref([])
 const activeConv = ref(null)
 const messages = ref([])
 const draft = ref('')
+// [040] 待发送文件队列（粘贴 / 选附件追加；点发送时依次上传）
+// 每项：{ file: File, blobUrl: string|null, isImage: bool }
+const pendingFiles = ref([])
 const onlineStats = ref({ visitors: 0, agents: 0 })
 const fileInput = ref(null)
 const sending = ref(false)
@@ -107,29 +110,43 @@ const lastMineMsg = computed(() => {
   return null
 })
 
-function sendText() {
+// [040] 发送：先发文本（如果有），再依次上传 pendingFiles 队列里的所有附件
+async function sendText() {
+  if (!activeConv.value) return
   const text = (draft.value || '').trim()
-  if (!text || !activeConv.value) return
+  const files = pendingFiles.value.map(it => it.file)
+  if (!text && files.length === 0) return
   if (!ws?.alive) {
     ElMessage.warning('与服务器断开，正在重连')
     return
   }
   sending.value = true
-  const now = new Date().toISOString()
-  ws.send({ type: 'chat', conv: activeConv.value.id, content: text, ts: Date.now(), prio: 0 })
-  messages.value.push({
-    id: 'local-' + Date.now(),
-    sender: 'agent',
-    sender_ref: String(session.agent?.id),
-    content: text,
-    created_at: now
-  })
-  // 自己发的消息也要更新会话列表的 last_message 预览（不然左侧列表停留在旧文本）
-  activeConv.value.last_message = { sender: 'agent', content: text, created_at: now }
-  activeConv.value.updated_at = now
-  draft.value = ''
-  sending.value = false
-  nextTick(scrollToBottom)
+  try {
+    if (text) {
+      const now = new Date().toISOString()
+      ws.send({ type: 'chat', conv: activeConv.value.id, content: text, ts: Date.now(), prio: 0 })
+      messages.value.push({
+        id: 'local-' + Date.now(),
+        sender: 'agent',
+        sender_ref: String(session.agent?.id),
+        content: text,
+        created_at: now
+      })
+      activeConv.value.last_message = { sender: 'agent', content: text, created_at: now }
+      activeConv.value.updated_at = now
+      draft.value = ''
+    }
+    if (files.length > 0) {
+      // 先清 UI 防重复点；上传失败 uploadAndSendFile 内部静默（catch {}）
+      clearAllPending()
+      for (const f of files) {
+        await uploadAndSendFile(f)
+      }
+    }
+  } finally {
+    sending.value = false
+    nextTick(scrollToBottom)
+  }
 }
 
 // 公共上传函数，附件按钮和粘贴事件共用
@@ -158,10 +175,48 @@ async function uploadAndSendFile(file) {
   } catch {}
 }
 
-async function pickFile(e) {
-  const file = e.target.files?.[0]
-  await uploadAndSendFile(file)
+// [040] 选附件：multiple 支持，所有文件追加到 pendingFiles 队列
+function pickFile(e) {
+  const files = e.target.files
+  if (files && files.length) {
+    for (const f of files) addPendingFile(f)
+  }
   e.target.value = ''
+}
+
+// ============= [040] pendingFiles 队列管理 =============
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+function addPendingFile(file) {
+  if (!file) return
+  const isImage = (file.type || '').indexOf('image/') === 0
+  pendingFiles.value.push({
+    file,
+    blobUrl: isImage ? URL.createObjectURL(file) : null,
+    isImage,
+  })
+}
+
+function removePendingFile(item) {
+  const idx = pendingFiles.value.indexOf(item)
+  if (idx < 0) return
+  if (item.blobUrl) {
+    try { URL.revokeObjectURL(item.blobUrl) } catch {}
+  }
+  pendingFiles.value.splice(idx, 1)
+}
+
+function clearAllPending() {
+  for (const it of pendingFiles.value) {
+    if (it.blobUrl) {
+      try { URL.revokeObjectURL(it.blobUrl) } catch {}
+    }
+  }
+  pendingFiles.value = []
 }
 
 // 复制消息内容到剪贴板：文本消息复制 m.content；文件/图片消息复制 URL
@@ -187,18 +242,19 @@ function copyMessage(m) {
   })
 }
 
-// 输入框粘贴：剪贴板含 file（截图 / 复制的文件）→ 直接上传发出；纯文本不拦截
+// [040] 粘贴：剪贴板里所有 file 都追加到 pendingFiles 队列（支持一次粘多张图）
+// 纯文本粘贴不拦截，仍走默认 textarea 行为
 function onPasteDraft(e) {
   const items = e.clipboardData?.items
   if (!items) return
+  let hadFile = false
   for (const it of items) {
     if (it.kind === 'file') {
-      e.preventDefault()
       const f = it.getAsFile()
-      if (f) uploadAndSendFile(f)
-      break
+      if (f) { addPendingFile(f); hadFile = true }
     }
   }
+  if (hadFile) e.preventDefault()
 }
 
 function scrollToBottom() {
@@ -825,18 +881,35 @@ function voiceCleanup() {
       </el-main>
 
       <el-footer v-if="activeConv" class="chat-footer">
+        <!-- [040] pending 多文件预览队列：粘贴 / 选附件追加到这里，点发送才依次上传 -->
+        <div v-if="pendingFiles.length" class="pending-list">
+          <div v-for="(it, idx) in pendingFiles" :key="idx" class="pending-chip">
+            <img v-if="it.isImage" :src="it.blobUrl" class="thumb" />
+            <span v-else class="file-icon">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+              </svg>
+            </span>
+            <span class="meta">
+              <span class="name">{{ it.file.name || (it.isImage ? '图片' : '文件') }}</span>
+              <span class="size">{{ fmtBytes(it.file.size || 0) }}</span>
+            </span>
+            <button class="remove-btn" title="移除" @click="removePendingFile(it)">×</button>
+          </div>
+        </div>
         <el-input
           v-model="draft"
           type="textarea"
           :rows="3"
           resize="none"
-          placeholder="回车发送，Shift+回车换行，粘贴可上传图片/文件"
+          placeholder="回车发送，Shift+回车换行，粘贴可上传图片/文件（可多张）"
           @keydown.enter.exact.prevent="sendText"
           @paste.native="onPasteDraft" />
         <div class="chat-footer-actions">
           <div>
             <el-button :icon="undefined" plain size="small" @click="fileInput.click()">附件 / 图片</el-button>
-            <input ref="fileInput" type="file" style="display:none" @change="pickFile" />
+            <input ref="fileInput" type="file" multiple style="display:none" @change="pickFile" />
           </div>
           <el-button type="primary" :loading="sending" @click="sendText">发送</el-button>
         </div>
@@ -1022,4 +1095,36 @@ function voiceCleanup() {
 .voice-name { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
 .voice-status { font-size: 13px; opacity: .88; margin-bottom: 18px; }
 .voice-actions { display: flex; justify-content: center; gap: 12px; }
+
+/* [040] pending 多文件预览队列 */
+.pending-list {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 6px;
+}
+.pending-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+  padding: 4px 6px; max-width: 220px; min-height: 36px;
+}
+.pending-chip img.thumb {
+  width: 36px; height: 36px; object-fit: cover; border-radius: 5px; flex-shrink: 0;
+}
+.pending-chip .file-icon {
+  width: 30px; height: 30px; border-radius: 5px; background: #eef4ff;
+  color: #2974ff; display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.pending-chip .meta { display: flex; flex-direction: column; min-width: 0; overflow: hidden; flex: 1; }
+.pending-chip .name {
+  font-size: 12px; color: #2c3034; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pending-chip .size { font-size: 10px; color: #9ca3af; margin-top: 1px; }
+.pending-chip .remove-btn {
+  width: 20px; height: 20px; border-radius: 50%; border: 0; cursor: pointer;
+  background: #f3f4f6; color: #6b7280; font-size: 13px; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.pending-chip .remove-btn:hover { background: #fee2e2; color: #dc2626; }
 </style>

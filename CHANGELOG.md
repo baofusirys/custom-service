@@ -4,6 +4,60 @@
 
 ---
 
+## [040] 2026-05-25 01:50 — widget + admin 都支持「同时粘贴/选择多张图片，一次性发送」
+
+**起因 / 需求**
+爷爷反馈：[039] 单文件预览不够用，需要支持**同时粘贴多张图片**（一次 Ctrl+V 可能含多个图，或者多次粘贴累积），一起发送。客服工作台（admin）也要同样支持。
+
+**改了什么**（修改 2 文件，widget + admin 同步对齐）
+
+### widget `widget/public/chat.html`
+- HTML：`<div id="pendingChip">` → `<div id="pendingList">` 多 chip 容器；`<input type="file" id="fileInput" multiple>` 加 multiple
+- CSS：`.pending-chip`（单个）改窄到 `max-width:180px` + `.pending-list` 容器 `flex-wrap` 多 chip 自动换行；`.is-show` 控制显示
+- JS：
+  - `pendingFile = null` → `pendingFiles = []` 数组，每项 `{file, chipEl, blobUrl}`
+  - `setPendingFile` → `addPendingFile`（append 而不是 replace）
+  - `clearPendingFile` → `removePendingFile(item)`（按引用移除）+ `clearAllPending()`（拷贝再遍历防跳元素）
+  - paste 监听：去掉 `break`，遍历所有 file items 全部 add；只要含 file 就 `e.preventDefault()`（防止 file 被当文本粘进 textarea）
+  - `onPickFile`：遍历 `e.target.files` 全部 add（multiple 支持）
+  - `sendText`：先发文本（如果有）→ 再 for await 顺序上传所有 pending 文件（每个一条独立消息，保持时序）→ 清队列
+
+### admin `admin/src/views/Console.vue`
+- `<script setup>`：
+  - `pendingFiles = ref([])` 数组，每项 `{file, blobUrl, isImage}`
+  - `addPendingFile(file)` / `removePendingFile(item)` / `clearAllPending()` / `fmtBytes(n)` 单职责
+  - `onPasteDraft` 遍历所有 file items 全部 add；`hadFile` 标记控制 preventDefault
+  - `pickFile` 改成同步函数遍历 `e.target.files` 全部 add（不再 await uploadAndSendFile）
+  - `sendText` 改 async：先发文本 → `for (const f of files) await uploadAndSendFile(f)` 顺序上传；try/finally 确保 sending 状态复位
+- `<template>`：el-input 上方加 `<div v-if="pendingFiles.length" class="pending-list">` v-for 渲染 chip；`<input multiple>` 加 multiple；占位符更新为"可多张"
+- `<style scoped>`：加 `.pending-list` / `.pending-chip` / `.thumb` / `.file-icon` / `.meta` / `.remove-btn` 完整一套（跟 widget 视觉一致）
+
+**业务流程对比**
+
+| 场景 | 改前（[039]）| 改后（[040]）|
+|---|---|---|
+| 一次 Ctrl+V 含多张图 | 只取第一张（`break`） | 全部 add 到队列 |
+| 连续粘贴 3 次 | 后一张覆盖前一张（单文件） | 队列累积成 3 个 chip |
+| 选附件按钮 | 单选 | multiple 多选 |
+| × 移除 | 清整个 pending | 移除指定 chip，其他保留 |
+| 点发送 | 1 个文本 + 1 个附件 | 1 个文本 + N 个附件依次上传 |
+| admin 客服端 | 未改造（粘即发） | 同 widget 完全对齐 |
+
+**触发场景与边界 + 验证方式**
+
+- **多文件 blob URL 内存回收**：每个 item.blobUrl 独立 `URL.revokeObjectURL`；`clearAllPending` 遍历全部回收防内存泄漏（长会话不爆内存）
+- **顺序上传**：用 `for ... await` 串行而非 `Promise.all` 并行——确保消息时序（避免后端 ts 相同时排序错乱；也避免多文件大并发把服务器带宽打满）
+- **空内容防御**：`if (!text && files.length === 0) return` 防止误触
+- **paste 阻止默认**：仅在剪贴板含至少一个 file 时 `preventDefault`，纯文本粘贴仍走默认 textarea 行为
+- **单文件 chip ellipsis**：max-width 180/220px + name nowrap+ellipsis；多 chip flex-wrap 自动换行不挤
+- **失败提示保留**：uploadAndSendFile 内部 try/catch 仍 renderSys（widget）/ 静默 catch（admin 跟原行为一致）；上传前已 clearAllPending 避免重复点
+- **不影响**：mobile_app 输入逻辑不动；widget/admin 语音通话 / lightbox / 文本聊天不动
+- **验证**：
+  1. widget 访客一次粘 2 张图 → pending 区出现 2 个 chip → 输入「这两张」→ 点发送 → 应该看到 3 条消息（文本 + 图 1 + 图 2）
+  2. admin 客服同步：选附件按钮多选 3 个文件 → pending 区 3 个 chip → 任意 × 移除一个 → 剩 2 个 → 点发送 → 2 条文件消息
+
+---
+
 ## [039] 2026-05-25 01:25 — widget 粘贴/附件改为预览暂存，点发送才上传（不再粘贴即发）
 
 **起因 / 需求**
