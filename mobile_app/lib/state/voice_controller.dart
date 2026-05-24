@@ -117,7 +117,7 @@ class VoiceController extends ChangeNotifier {
       'type': 'voice_reject',
       'to': _callerFrom,
       'ts': DateTime.now().millisecondsSinceEpoch,
-      'extra': {'call_id': _callId},
+      'extra': {'call_id': _callId, 'code': 'rejected', 'duration': 0},
     });
     _end('已拒绝', notify: false);
   }
@@ -224,11 +224,24 @@ class VoiceController extends ChangeNotifier {
   void _end(String reason, {required bool notify}) {
     if (state == VoiceState.idle) return;
     if (notify && _callerFrom != null && _callId != null) {
+      // [034] 与三端对齐：把 reason 映射成后端识别的 code + duration（秒）。
+      // 后端 hub→service.OnVoiceCallFinished 会据此写一条 sys 消息进聊天记录。
+      String code = 'hangup';
+      int duration = 0;
+      if (state == VoiceState.incoming || state == VoiceState.accepting) {
+        code = 'cancel';
+      } else if (state == VoiceState.talking && _startTs != null) {
+        code = 'hangup';
+        duration = DateTime.now().difference(_startTs!).inSeconds;
+      }
+      if (reason.startsWith('连接中断') || reason.startsWith('麦克风失败')) {
+        code = 'failed';
+      }
       sendEnvelope({
         'type': 'voice_end',
         'to': _callerFrom,
         'ts': DateTime.now().millisecondsSinceEpoch,
-        'extra': {'call_id': _callId, 'reason': reason},
+        'extra': {'call_id': _callId, 'code': code, 'duration': duration},
       });
     }
     _cleanup();

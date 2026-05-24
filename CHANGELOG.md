@@ -4,6 +4,65 @@
 
 ---
 
+## [034] 2026-05-24 23:10 — 聊天记录加通话状态系统消息（未接 / 拒绝 / 忙线 / 挂断含时长）
+
+**起因 / 需求**
+爷爷反馈：之前通话挂断了，聊天记录上没有任何痕迹，访客和客服都不知道"刚才是真没人接、还是对方拒绝、还是说完话正常挂的"。要求三端聊天记录都要出系统消息：
+- 「呼叫未接听」
+- 「通话结束（X 分 Y 秒）」
+- 「对方忙线中」
+- 「对方已拒绝」
+
+我又补了 2 种容易漏的：「已取消」（振铃阶段自己挂掉）、「连接失败」（麦克风权限 / WebRTC 协商断裂）。
+
+**改了什么**（修改 5 文件 / 后端 2 + 三端 3）
+
+- `backend/internal/ws/hub.go`
+  - MessageSink 接口新增方法 `OnVoiceCallFinished(visitorID, callID, code string, durSec int)`
+  - `pendingCall` struct 新增 2 个字段：`visitorID`（voice_call 发起人，service 写 sys 消息时找会话用）+ `finished bool`（防双方都挂断时重复写 2 条 sys）
+  - 新增常量 `callTalkingTTL = 30 * time.Minute`（voice_accept 后把 buffer TTL 从 30s 延到 30 分钟，避免长通话时 buffer 过期后 voice_end 找不到 visitorID）
+  - 新增 3 个 helper：`extractCode` / `extractDurationSec` / `extractVisitorID`
+  - `voice_*` switch 全部重构：
+    - `voice_call`：存 buffer 时记录 visitorID
+    - `voice_accept`：延 TTL 到 30min
+    - `voice_end` + `voice_reject`：第一次进入设 finished=true，调用 `sink.OnVoiceCallFinished` 写 sys；第二次（对方也挂断的 echo）直接跳过 + 删 buffer；buffer 过期 fallback 用 `extractVisitorID` 从 envelope From/To 推
+    - 旧客户端没传 code 时 voice_reject 默认 `rejected`、voice_end 默认 `hangup`（向后兼容）
+- `backend/internal/service/service.go`
+  - 新增 `codeToText(code, durSec)`：6 种 code 翻译成中文显示文字，hangup 时按 mm:ss 排版（>1 分钟显示「X 分 Y 秒」，否则「X 秒」）
+  - 新增 `OnVoiceCallFinished` 实现：异步 goroutine（不阻塞 hub 处理后续信令）+ recover panic + 5s timeout context → GetVisitor 拿 site_id → OpenOrGetConversation 找当前 open 会话 → InsertMessage(Sender='sys', SenderRef='voice') → FanoutToConv 广播带 Extra={kind:'voice_finished', code, duration, call_id} 让三端聊天区实时多出一条
+  - 全程 bizLog 详细记录（vid/conv/code/duration），失败也 warn/error 落盘
+- `widget/public/chat.html` `voiceEnd(reason)`
+  - 不再发 `extra.reason`，改发 `extra.code` + `extra.duration`：默认 hangup → ringing/accepting 状态改 cancel → talking 状态算秒数 → 无人接听特判 no_answer、连接中断/协商失败特判 failed、客服拒绝 rejected
+- `admin/src/views/Console.vue` `voiceReject` + `voiceEnd`
+  - voiceReject extra 加 `code:'rejected', duration:0`
+  - voiceEnd 同 widget 逻辑：incoming/accepting → cancel，talking → hangup+duration，连接中断 → failed
+- `mobile_app/lib/state/voice_controller.dart` `reject` + `_end`
+  - 同步三端逻辑，extra 字段统一为 `{call_id, code, duration}`
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+|---|---|---|
+| 访客打过来 30 秒没人接 | 三端聊天记录空白 | 三端都出 sys：「呼叫未接听」 |
+| 客服点拒绝 | 同上空白 | 三端都出 sys：「对方已拒绝」 |
+| 客服在通话中收到第二个来电（自动拒绝） | 同上空白 | 第二个访客的会话出 sys：「对方忙线中」 |
+| 访客打过去振铃中自己反悔挂断 | 同上空白 | 三端 sys：「已取消」 |
+| 接通后聊了 1 分 23 秒挂断 | 同上空白 | 三端 sys：「通话结束（1 分 23 秒）」 |
+| 麦克风权限被拒 / 网络断了 | 同上空白 | 三端 sys：「连接失败」 |
+
+**触发场景与边界 + 验证方式**
+
+- **去重**：双方同时挂断时（visitor 挂 + agent 挂都会发 voice_end），hub.pendingCalls 的 `finished` 标志确保只写 1 条 sys。验证：talking 中两边同时点挂断 → 聊天记录只看到一条「通话结束（X 秒）」。
+- **buffer 过期 fallback**：如果通话超过 30 分钟（callTalkingTTL）后挂断，pendingCall 已被清理，走 `extractVisitorID(env)` 从 envelope From/To 取 visitor → 仍能正确写 sys 消息。
+- **跨节点广播**：FanoutToConv 内部已经走 Redis pub/sub，多实例部署下其他节点的 WSS 连接也能收到。
+- **旧客户端兼容**：[029] 之前的版本只发 `reason` 不发 `code`，hub 检测到空 code 时按 voice_type 默认（reject→rejected / end→hangup）兜底，不至于无 sys 消息。
+- **会话不存在**：访客如果还没建过 conv 就发起通话（极端边界），OpenOrGetConversation 会创建一条新 conv 写入 sys 消息，不会丢失记录。
+- **不影响信令**：OnVoiceCallFinished 走 goroutine + recover，即使 DB 慢/挂也不会卡住 hub 处理下一个 voice_* 包。
+- **日志**：bizLog 在 voice_finished 成功/失败时都打点；失败时 warn 包含 vid，便于后续排查。
+- **验证手测**：6 个 code 都跑一遍 → 三端聊天记录都出现对应中文 + 双端同步 ✓。
+
+---
+
 ## [033] 2026-05-24 22:00 — 三端聊天图片可点击全屏查看器（widget / admin / App）
 
 **起因 / 需求**

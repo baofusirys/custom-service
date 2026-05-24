@@ -588,16 +588,29 @@
 
   function voiceEnd(reason) {
     if (voice.state === 'idle') return;
+    // 根据 state 决定 code + duration：
+    //   ringing/accepting 期间挂断 → cancel (访客主动取消)
+    //   talking 状态挂断 → hangup + duration
+    //   reason 关键词映射：'无人接听'→no_answer, '连接中断/协商失败'→failed
+    var code = 'hangup';
+    var duration = 0;
+    if (voice.state === 'ringing' || voice.state === 'accepting') {
+      code = 'cancel';
+    } else if (voice.state === 'talking' && voice.startTs) {
+      code = 'hangup';
+      duration = Math.floor((Date.now() - voice.startTs) / 1000);
+    }
+    if (reason === '无人接听') code = 'no_answer';
+    else if (reason === '连接中断' || reason === '协商失败') code = 'failed';
+    else if (reason === '客服拒绝了通话') code = 'rejected';
+    var extra = { call_id: voice.callId, code: code, duration: duration };
     if (voice.remoteAgent) {
       ws.send(JSON.stringify({
-        type: 'voice_end', to: voice.remoteAgent, ts: Date.now(),
-        extra: { call_id: voice.callId, reason: reason || '' }
+        type: 'voice_end', to: voice.remoteAgent, ts: Date.now(), extra: extra
       }));
     } else {
-      // 拨号期间没人接，广播给所有 agent 让来电浮窗消失
       ws.send(JSON.stringify({
-        type: 'voice_end', ts: Date.now(),
-        extra: { call_id: voice.callId, reason: reason || '' }
+        type: 'voice_end', ts: Date.now(), extra: extra
       }));
     }
     if (voice.pc) { try { voice.pc.close(); } catch {} voice.pc = null; }

@@ -306,6 +306,101 @@ func (s *Service) pushVisitorMessageAPNs(content, vid string) {
 	)
 }
 
+// codeToText 把通话结束 code 翻译成 sys 消息显示文字
+func codeToText(code string, durSec int) string {
+	switch code {
+	case "no_answer":
+		return "呼叫未接听"
+	case "rejected":
+		return "对方已拒绝"
+	case "busy":
+		return "对方忙线中"
+	case "cancel":
+		return "已取消"
+	case "failed":
+		return "连接失败"
+	case "hangup":
+		mm := durSec / 60
+		ss := durSec % 60
+		if mm > 0 {
+			return fmt.Sprintf("通话结束（%d 分 %d 秒）", mm, ss)
+		}
+		return fmt.Sprintf("通话结束（%d 秒）", ss)
+	default:
+		return "通话已结束"
+	}
+}
+
+// OnVoiceCallFinished 实现 ws.MessageSink 接口：通话终结时写一条 sys 消息到 conv +
+// FanoutToConv 广播给会话所有客户端（访客 + 客服）实时显示。
+// 用 visitor 自己的 site_id 找他的 open conversation。
+func (s *Service) OnVoiceCallFinished(visitorID, callID, code string, durSec int) {
+	if visitorID == "" || code == "" {
+		return
+	}
+	text := codeToText(code, durSec)
+	if text == "" {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.bizLog.Error("voice_finished panic", zap.Any("err", r))
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		// 找访客对应的 site_id（visitors 表）
+		visitor, err := s.store.GetVisitor(ctx, visitorID)
+		if err != nil || visitor == nil {
+			s.bizLog.Warn("voice_finished get_visitor failed",
+				zap.String("vid", visitorID), zap.Error(err))
+			return
+		}
+		// 找访客当前 open 会话
+		conv, err := s.store.OpenOrGetConversation(ctx, visitor.SiteID, visitorID)
+		if err != nil {
+			s.bizLog.Warn("voice_finished open_conv failed",
+				zap.String("vid", visitorID), zap.Error(err))
+			return
+		}
+		msg := &store.Message{
+			ID:        uuid.NewString(),
+			ConvID:    conv.ID,
+			Sender:    "sys",
+			SenderRef: "voice",
+			Content:   text,
+			CreatedAt: time.Now(),
+		}
+		if err := s.store.InsertMessage(ctx, msg); err != nil {
+			s.bizLog.Error("voice_finished insert msg",
+				zap.Error(err), zap.String("conv", conv.ID))
+			return
+		}
+		// 广播给会话内所有客户端，让聊天区实时多出一条
+		if s.hub != nil {
+			env := &ws.Envelope{
+				Type:    "chat",
+				ID:      msg.ID,
+				From:    "sys",
+				ConvID:  conv.ID,
+				Content: text,
+				TS:      ws.NowMS(),
+				Extra: map[string]any{
+					"kind":     "voice_finished",
+					"code":     code,
+					"duration": durSec,
+					"call_id":  callID,
+				},
+			}
+			s.hub.FanoutToConv(ctx, env)
+		}
+		s.bizLog.Info("voice_finished",
+			zap.String("vid", visitorID), zap.String("conv", conv.ID),
+			zap.String("code", code), zap.Int("dur", durSec))
+	}()
+}
+
 // OnVisitorVoiceCall 实现 ws.MessageSink 接口：访客发起语音呼叫时被 hub 回调。
 // 走异步 push（不阻塞 hub 处理后续信令）。
 // 推送策略：让客服 iPhone 锁屏/后台时也能看到来电通知，点击拉起 App 接听。

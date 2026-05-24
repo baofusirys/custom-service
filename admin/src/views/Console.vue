@@ -554,7 +554,7 @@ function voiceReject() {
   if (voiceState.value !== 'incoming') return
   ws?.send({
     type: 'voice_reject', to: voice.callerFrom, ts: Date.now(),
-    extra: { call_id: voice.callId }
+    extra: { call_id: voice.callId, code: 'rejected', duration: 0 }
   })
   voiceEnd('已拒绝', false)
 }
@@ -629,9 +629,19 @@ function voiceOnRemoteEnd(env) {
 function voiceEnd(reason, notifyPeer) {
   if (voiceState.value === 'idle') return
   if (notifyPeer && voice.callerFrom && voice.callId) {
+    // 根据 state 决定 code + duration（跟 widget 端逻辑一致）
+    let code = 'hangup'
+    let duration = 0
+    if (voiceState.value === 'incoming' || voiceState.value === 'accepting') {
+      code = 'cancel'
+    } else if (voiceState.value === 'talking' && voice.startTs) {
+      code = 'hangup'
+      duration = Math.floor((Date.now() - voice.startTs) / 1000)
+    }
+    if (reason === '连接中断') code = 'failed'
     ws?.send({
       type: 'voice_end', to: voice.callerFrom, ts: Date.now(),
-      extra: { call_id: voice.callId, reason: reason }
+      extra: { call_id: voice.callId, code: code, duration: duration }
     })
   }
   voiceCleanup()

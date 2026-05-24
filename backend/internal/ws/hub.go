@@ -101,6 +101,12 @@ type MessageSink interface {
 	// 给客服 iPhone（让锁屏/后台时也能收到通知，点击拉起 App 接听）。
 	// 仅信令转发已经在 fanoutVoice 完成；此回调不影响 WSS 流程，仅用于侧通道推送。
 	OnVisitorVoiceCall(visitorID, callID string)
+
+	// OnVoiceCallFinished 语音通话终结（任何一方挂断 / 拒绝 / 未接 / 失败）时触发：
+	// service 写一条 sys 系统消息到该 visitor 的当前会话 + WSS 广播给会话成员实时显示。
+	// code: no_answer / rejected / busy / cancel / hangup / failed
+	// durSec: 仅 code=hangup 时有意义（通话时长）
+	OnVoiceCallFinished(visitorID, callID, code string, durSec int)
 }
 
 const broadcastChannel = "cs:bcast"
@@ -345,28 +351,65 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			e.From = "agent:" + c.ID
 		}
 		h.fanoutVoice(ctx, e)
-		// voice_call: 存 buffer + 触发 APNs 推送；其它终结类信令删 buffer
+		// voice_* 状态机：
+		//   voice_call: 存 buffer (30s TTL) + 触发 APNs 推送
+		//   voice_accept: 延长 buffer 到 30 分钟（通话期间，agent 重连还能收到旧 call）
+		//   voice_end / voice_reject: 通知 service 写 sys 消息 + finished dedup + 清 buffer
 		switch e.Type {
 		case "voice_call":
 			if c.Kind == KindVisitor {
 				callID := extractCallID(e)
 				if callID != "" {
-					// 存 buffer 让晚到的 agent (推送拉起 App 后) 也能收到
 					h.pendingCalls.Store(callID, &pendingCall{
-						env:     *e, // 值拷贝，避免后续被改
-						expires: time.Now().Add(callBufferTTL),
+						env:       *e,
+						visitorID: c.ID,
+						expires:   time.Now().Add(callBufferTTL),
 					})
-					// 30 秒后自动清掉
+					// 30 秒后未接通 → 自动清理
 					time.AfterFunc(callBufferTTL, func() {
 						h.pendingCalls.Delete(callID)
 					})
 				}
 				h.sink.OnVisitorVoiceCall(c.ID, callID)
 			}
-		case "voice_accept", "voice_reject", "voice_end":
-			// 通话已被接听/拒绝/结束，buffer 不再需要重投给后到的 agent
+		case "voice_accept":
+			// 接听后通话可能很长，buffer TTL 延到 30 分钟，避免 voice_end 来时找不到 visitorID
 			if cid := extractCallID(e); cid != "" {
-				h.pendingCalls.Delete(cid)
+				if v, ok := h.pendingCalls.Load(cid); ok {
+					pc := v.(*pendingCall)
+					pc.expires = time.Now().Add(callTalkingTTL)
+				}
+			}
+		case "voice_end", "voice_reject":
+			// 第一次到达 → 调 service 写 sys 消息；finished=true 后续重复来的跳过
+			if cid := extractCallID(e); cid != "" {
+				var visitorID string
+				if v, ok := h.pendingCalls.Load(cid); ok {
+					pc := v.(*pendingCall)
+					if pc.finished {
+						// 已经被对方挂断/拒绝触发过一次，本次跳过
+						h.pendingCalls.Delete(cid)
+						break
+					}
+					pc.finished = true
+					visitorID = pc.visitorID
+					h.pendingCalls.Delete(cid)
+				} else {
+					// buffer 过期或重启了，fallback 从 envelope 推 visitor
+					visitorID = extractVisitorID(e)
+				}
+				if visitorID != "" {
+					code := extractCode(e)
+					if code == "" {
+						// 客户端没传 code（旧版本兼容）：voice_reject 默认 rejected，voice_end 默认 hangup
+						if e.Type == "voice_reject" {
+							code = "rejected"
+						} else {
+							code = "hangup"
+						}
+					}
+					h.sink.OnVoiceCallFinished(visitorID, cid, code, extractDurationSec(e))
+				}
 			}
 		}
 	default:
@@ -374,13 +417,19 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 	}
 }
 
-// pendingCall 待接听的来电（30 秒 TTL）。env 用值类型避免被后续 handleIncoming 改字段污染。
+// pendingCall 待接听的来电。env 用值类型避免被后续 handleIncoming 改字段污染。
+// visitorID: voice_call 发起者，service 用它找当前 conv 写 sys 消息
+// finished: voice_end/reject 第一次到达时设 true，防止双方挂断时重复写 sys 消息
 type pendingCall struct {
-	env     Envelope
-	expires time.Time
+	env       Envelope
+	visitorID string
+	expires   time.Time
+	finished  bool
 }
 
+// 初始 TTL = 30 秒（等待接听窗口）；voice_accept 后延长到 30 分钟（通话进行中）
 const callBufferTTL = 30 * time.Second
+const callTalkingTTL = 30 * time.Minute
 
 // extractCallID 从 envelope 的 Extra 里取 call_id
 func extractCallID(e *Envelope) string {
@@ -388,6 +437,42 @@ func extractCallID(e *Envelope) string {
 		if v, ok := m["call_id"].(string); ok {
 			return v
 		}
+	}
+	return ""
+}
+
+// extractCode 从 envelope.Extra 取 code（voice_end / voice_reject 用，决定 sys 消息文字）
+func extractCode(e *Envelope) string {
+	if m, ok := e.Extra.(map[string]any); ok {
+		if v, ok := m["code"].(string); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// extractDurationSec 从 envelope.Extra 取 duration 秒数（voice_end hangup 用）
+func extractDurationSec(e *Envelope) int {
+	if m, ok := e.Extra.(map[string]any); ok {
+		if v, ok := m["duration"]; ok {
+			switch x := v.(type) {
+			case float64:
+				return int(x)
+			case int:
+				return x
+			}
+		}
+	}
+	return 0
+}
+
+// extractVisitorID 从 envelope From/To 推涉及的 visitor（fallback 用，buffer 没命中时）
+func extractVisitorID(e *Envelope) string {
+	if strings.HasPrefix(e.From, "visitor:") {
+		return strings.TrimPrefix(e.From, "visitor:")
+	}
+	if strings.HasPrefix(e.To, "visitor:") {
+		return strings.TrimPrefix(e.To, "visitor:")
 	}
 	return ""
 }
