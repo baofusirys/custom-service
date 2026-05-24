@@ -910,6 +910,14 @@
   // 图片 lightbox：点击聊天消息里的图片，全屏黑底大图查看。点 overlay/ESC/× 关闭。
   // 不依赖任何外部库，~30 行手写。
   function openImageLightbox(src) {
+    // [038] 优先让宿主页 loader.js 在整个浏览器视窗里全屏显示（iframe 太小看不清）。
+    // standalone 模式（直接访问 chat.html demo / 没 parent loader.js）才走 iframe 内 fallback
+    if (window.parent && window.parent !== window) {
+      try {
+        window.parent.postMessage({ __cs: 1, type: 'lightbox', src: src }, '*');
+        return;
+      } catch (e) { /* parent 不可达 → fallback */ }
+    }
     var existing = document.getElementById('imgLightbox');
     if (existing) existing.parentNode.removeChild(existing);
     var overlay = document.createElement('div');

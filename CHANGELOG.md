@@ -4,6 +4,43 @@
 
 ---
 
+## [038] 2026-05-25 00:55 — widget 图片查看器升级到宿主页全屏（突破 iframe 大小限制）
+
+**起因 / 需求**
+爷爷反馈：访客 widget 点聊天图片放大查看时，图片只在 380×560 的聊天窗口（iframe）里"全屏"，因为 iframe 本身就是右下角一小块，所以图片小得看不清。
+
+根因：[033] 加的 `openImageLightbox` 用 `position:fixed inset:0` 在 chat.html（iframe 内）创建 overlay。`position:fixed` 的视窗是 iframe 自己的 viewport（380×560），不是整个浏览器窗口。
+
+**改了什么**（修改 2 文件）
+
+- `widget/public/loader.js`：
+  - message listener 新增分支 `if (ev.data.type === 'lightbox')` → 调 `openHostLightbox(src)`
+  - 新增 `openHostLightbox(src)` 函数：在 parent document 直接创建覆盖整个浏览器视窗（92vw × 92vh）的 overlay；z-index 用 `2147483647` 跟 wrap 同级保证在最上层；点 overlay/ESC/× 都关闭；图片本身阻止冒泡（防误关，方便长按保存）
+
+- `widget/public/chat.html` `openImageLightbox(src)`：
+  - 优先尝试 `window.parent.postMessage({__cs:1, type:'lightbox', src:src}, '*')` 让宿主页接管全屏
+  - 仅在 standalone 模式（`window.parent === window`，例如直接访问 `chat.html` 测试时）才 fallback 用 iframe 内的原 lightbox
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 访客在第三方网站打开 widget → 点聊天图片 | 图片只在 380×560 聊天窗口里全屏，缩成小图 | 整个浏览器窗口 92vw×92vh 全屏黑底大图 |
+| 直接访问 chat.html demo 测试 | iframe 内 lightbox | 同上（standalone fallback 保持原逻辑） |
+| admin Web / iPhone App | （另两端有自己的查看器，跟 widget 无关）| 不动 |
+
+**触发场景与边界 + 验证方式**
+
+- **跨域 postMessage**：iframe（maihaocs.icu 域）→ parent（任意客户网站域），跨域 postMessage 浏览器永远允许；用 `__cs:1` 魔法 key 区分 widget 自己的消息
+- **z-index 冲突**：用 `2147483647`（int32 max），跟 widget 的 iframe wrap 同级；后插入的 lightbox overlay 在 DOM 后面，按 stacking context 默认在上层覆盖 iframe
+- **bubble 防误关**：图片本身 `e.stopPropagation()`，点图片不关闭（方便长按保存）；overlay 空白处 / × / ESC 才关
+- **parent 不响应**：try/catch 兜底 + standalone 判定（`window.parent === window`）→ 走 iframe 内原逻辑（最坏情况退化到改前体验）
+- **多次连点**：openHostLightbox 进入前先清掉旧 overlay（同 id 防累积）
+- **不影响**：admin 用 el-image preview-src-list 不动；mobile_app 用 photo_view 不动；widget 文本/语音/通话功能不动
+- **验证**：访客 demo 页发图片 → 客服 admin 回图 → 访客 widget 点图 → 整个浏览器窗口黑底大图（不是聊天窗口里的小框框）
+
+---
+
 ## [037] 2026-05-25 00:40 — App 聊天页标题居中 + 加访客来源/当前页/位置信息条
 
 **起因 / 需求**

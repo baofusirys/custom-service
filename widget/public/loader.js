@@ -130,7 +130,63 @@
         badge.style.display = 'none';
       }
     }
+    // [038] iframe 内点聊天图片 → 在宿主页（整个浏览器视窗）全屏显示
+    // 之前在 iframe 内创建 lightbox 只能在聊天窗口 380x560 区域里显示，看不清
+    if (ev.data.type === 'lightbox' && typeof ev.data.src === 'string') {
+      openHostLightbox(ev.data.src);
+    }
   });
+
+  // ============== [038] 宿主页全屏图片查看器 ==============
+  // iframe 大小固定 380x560，里面 position:fixed 也只能在 iframe viewport 里全屏；
+  // 这里在 parent document 直接创建覆盖整个浏览器视窗的 overlay，看图才看得清
+  function openHostLightbox(src) {
+    var existing = document.getElementById('__cs_host_lightbox__');
+    if (existing && existing.parentNode) existing.parentNode.removeChild(existing);
+    var overlay = document.createElement('div');
+    overlay.id = '__cs_host_lightbox__';
+    overlay.style.cssText = [
+      'position:fixed', 'inset:0',
+      'background:rgba(0,0,0,.92)',
+      // 比 iframe wrap 的 z-index 还要高 +10，确保在最上层
+      'z-index:2147483647',
+      'display:flex', 'align-items:center', 'justify-content:center',
+      'cursor:zoom-out', 'user-select:none',
+      '-webkit-tap-highlight-color:transparent'
+    ].join(';');
+    var imgEl = document.createElement('img');
+    imgEl.src = src;
+    imgEl.alt = '';
+    imgEl.style.cssText = [
+      'max-width:92vw', 'max-height:92vh',
+      'object-fit:contain',
+      'box-shadow:0 8px 40px rgba(0,0,0,.4)',
+      'cursor:default'
+    ].join(';');
+    // 防止点图片本身关闭（用户可能想长按保存）
+    imgEl.onclick = function (e) { e.stopPropagation(); };
+    var closeBtn = document.createElement('span');
+    closeBtn.textContent = '×';
+    closeBtn.style.cssText = [
+      'position:absolute', 'top:24px', 'right:24px',
+      'width:44px', 'height:44px', 'border-radius:50%',
+      'background:rgba(255,255,255,.12)', 'color:#fff',
+      'display:flex', 'align-items:center', 'justify-content:center',
+      'font:24px/1 -apple-system,sans-serif',
+      'cursor:pointer'
+    ].join(';');
+    overlay.appendChild(imgEl);
+    overlay.appendChild(closeBtn);
+    function closeLb() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+    }
+    function onKey(e) { if (e.key === 'Escape') closeLb(); }
+    overlay.onclick = closeLb;
+    closeBtn.onclick = closeLb;
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+  }
 
   function inject() {
     document.body.appendChild(btn);
