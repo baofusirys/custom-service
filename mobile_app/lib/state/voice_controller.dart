@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../api/http_client.dart';
 
 /// 语音通话状态机：跟 admin/src/views/Console.vue 完全对齐。
 ///   - idle：空闲，没在通话
@@ -13,11 +14,25 @@ enum VoiceState { idle, incoming, accepting, talking, ended }
 /// VoiceController 是单例：被 AppState 持有，处理 WSS 来的 voice_* 信令。
 /// 不依赖 BuildContext，UI（voice_call_page.dart）作为 ListenableBuilder 监听刷新。
 class VoiceController extends ChangeNotifier {
-  static const _iceServers = {
+  // ICE 配置默认仅 Google STUN 兜底；accept() 时会调 Api.turnCredential() 刷新加上 TURN，
+  // 让通话在严格 NAT / VPN 下也能走中继 ([035])
+  Map<String, dynamic> _iceServers = const {
     'iceServers': [
       {'urls': 'stun:stun.l.google.com:19302'}
     ]
   };
+
+  // 拉短期 TURN 凭证（24h TTL）。失败保持默认 STUN，调用方不阻塞。
+  Future<void> _refreshIceServers() async {
+    final cred = await Api.turnCredential();
+    if (cred == null) return;
+    final urls = cred['urls'];
+    if (urls is! List || urls.isEmpty) return;
+    final srv = <String, dynamic>{'urls': urls};
+    if (cred['username'] != null) srv['username'] = cred['username'];
+    if (cred['credential'] != null) srv['credential'] = cred['credential'];
+    _iceServers = {'iceServers': [srv]};
+  }
 
   /// AppState 注入：信令发送函数 + 当前 agent ID/昵称（accept 时 broadcast 用）
   void Function(Map<String, dynamic>) sendEnvelope = (_) {};
@@ -85,6 +100,8 @@ class VoiceController extends ChangeNotifier {
   Future<void> accept() async {
     if (state != VoiceState.incoming) return;
     _stopTimer();
+    // 接听前刷一次 TURN 凭证，让 createPeerConnection 用最新 iceServers（含 TURN）
+    await _refreshIceServers();
     try {
       _localStream = await navigator.mediaDevices.getUserMedia({
         'audio': true,

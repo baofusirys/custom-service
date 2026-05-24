@@ -1,0 +1,93 @@
+# ============================================================
+# CoTURN 配置模板 —— entrypoint.sh 用 envsubst 渲染 ${TURN_*} 变量
+# 安全基线参考：https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf
+# 中文注释方便维护，CoTURN 配置语法本身是 key=value
+# ============================================================
+
+# ---- 监听 ----
+listening-port=3478
+tls-listening-port=5349
+listening-ip=0.0.0.0
+# 服务端公网 IP（必须，否则 srflx/relay 给客户端的地址会是内网，打洞失败）
+external-ip=${TURN_EXTERNAL_IP}
+
+# ---- relay 端口范围（49 个 UDP 端口，约支撑 ~50 路并发音频）----
+min-port=49152
+max-port=49200
+
+# ---- 鉴权：短期凭证（REST API style）----
+# 后端 /api/turn-credential 用同一个 secret 计算 HMAC-SHA1 生成 password
+# CoTURN 用 secret 反向校验，校验通过即放行（无需在 CoTURN 侧维护用户表）
+use-auth-secret
+static-auth-secret=${TURN_STATIC_AUTH_SECRET}
+realm=${TURN_REALM}
+
+# ---- TLS 证书（复用 maihaocs.icu Let's Encrypt）----
+# cs_ssl_data 命名卷由 nginx 容器写入；coturn readonly 挂载
+cert=/etc/coturn/certs/cert.pem
+pkey=/etc/coturn/certs/key.pem
+
+# ---- 安全加固：防 SSRF / 防滥用 ----
+# 禁止 TURN client 让我们的服务器去连接内网 / 保留 IP，防内网渗透
+no-loopback-peers
+no-multicast-peers
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.0.0.0-192.0.0.255
+denied-peer-ip=192.0.2.0-192.0.2.255
+denied-peer-ip=192.88.99.0-192.88.99.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=198.18.0.0-198.19.255.255
+denied-peer-ip=198.51.100.0-198.51.100.255
+denied-peer-ip=203.0.113.0-203.0.113.255
+denied-peer-ip=240.0.0.0-255.255.255.255
+denied-peer-ip=::1
+denied-peer-ip=fe80::-fe80::ffff:ffff:ffff:ffff
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# 但要允许 CoTURN 自己连服务器本机的 backend 也是不需要的，CoTURN 只 relay 客户端之间流量
+# 上面的 denied-peer-ip 已经覆盖所有内网，足够
+
+# ---- 配额（防滥用资源耗尽）----
+# 全服务器最多 200 个并发 TURN session
+total-quota=200
+# 单用户最多 10 个并发 session（一个客服设备同时多通话才会触发）
+user-quota=10
+# 每会话最大带宽 0=不限（音频流量天花板很低，不限也安全）
+max-bps=0
+
+# ---- 日志（长效存储到 /srv/cs-data/logs/coturn/）----
+log-file=/var/log/coturn/turn.log
+# simple-log：纯文本，便于 tail/grep；不要 syslog（容器内没 syslog 服务）
+simple-log
+# 不写访问日志的 verbose detail（防日志爆）；只记关键事件
+no-stdout-log
+new-log-timestamp
+new-log-timestamp-format %Y-%m-%dT%H:%M:%S%z
+
+# ---- CLI 远程管理（关闭，避免 5766 端口被扫描）----
+no-cli
+
+# ---- 协议加固 ----
+# fingerprint：插入 ICE 指纹，提升 STUN 消息识别度，避免被中间设备误伤
+fingerprint
+# stale-nonce：600 秒 nonce 过期，防重放
+stale-nonce=600
+# 不启用 mobility（M-flag），减少攻击面
+no-mobility
+
+# ---- 性能 ----
+# 不启用 tcp-relay（除非需要 TURN-over-TCP relay，浪费带宽）
+# 注：3478/tcp 和 5349/tls 监听仍然能收 TURN-TCP allocation，只是不 relay 给 peer 端走 TCP
+# 大多数 WebRTC 客户端都走 UDP relay 即可
+
+# 不设置 cipher-list，使用 OpenSSL 默认（系统会自动选 TLS1.2+ 强加密套件）
+
+# ---- 进程 ----
+# 让 CoTURN 主进程在容器内以非 root 运行（基镜像已经 USER turnserver）
+proc-user=turnserver
+proc-group=turnserver

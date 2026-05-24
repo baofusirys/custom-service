@@ -584,6 +584,42 @@ func defaultIfEmpty(v, def string) string {
 	return v
 }
 
+// TurnCredential 返回 WebRTC 通话所需的 ICE 服务器配置（STUN + TURN）。
+// 三端（widget/admin/mobile_app）在发起通话前调用此接口，把返回的 urls + username + credential
+// 喂给 RTCPeerConnection，让 WebRTC 在 P2P 失败时走 TURN relay（解决 VPN/严格 NAT 场景）。
+//
+// 凭证有效期 24h，HMAC-SHA1 由 service.GenerateTurnCredential 生成；
+// CoTURN 用同一个 TURN_STATIC_AUTH_SECRET 反向校验。
+//
+// 兼容：TURN_REALM 或 TURN_STATIC_AUTH_SECRET 未配置时，仅返回公共 STUN（不影响功能，
+// 只是 P2P 失败时仍会失败），不报错。
+func (h *HTTP) TurnCredential(c *gin.Context) {
+	// userID 仅用于 username 标识（CoTURN 不验，只供日志/审计）
+	// 优先用客服 ID（已登录），否则取 visitor token / IP 作为标识
+	userID := "anon"
+	if aid, ok := c.Get("agent_id"); ok {
+		userID = fmt.Sprintf("agent-%v", aid)
+	} else if vid := c.Query("vid"); vid != "" {
+		userID = "visitor-" + vid
+	} else {
+		userID = "ip-" + security.ClientIP(c)
+	}
+
+	// TURN 未配置时：降级为公共 STUN（保持通话功能，只是无 relay 兜底）
+	if h.cfg.TurnRealm == "" || h.cfg.TurnSecret == "" {
+		c.JSON(http.StatusOK, gin.H{
+			"code": 0,
+			"data": gin.H{
+				"urls": []string{"stun:stun.l.google.com:19302"},
+				"ttl":  0,
+			},
+		})
+		return
+	}
+	cred := service.GenerateTurnCredential(userID, h.cfg.TurnRealm, h.cfg.TurnSecret)
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": cred})
+}
+
 func (h *HTTP) DisableAgent(c *gin.Context) {
 	var body struct {
 		ID     int64 `json:"id"`

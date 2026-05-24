@@ -457,7 +457,25 @@
     startTs: 0,
     timer: null,        // 拨号超时 / 通话计时
   };
+  // ICE_SERVERS：默认值仅作兜底（fetch turn-credential 失败时用）
+  // 每次 voiceStart 都会异步刷新（fetchTurnCredential），有 TURN/STUN 都注入
   var ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+  // 拉后端发的 24h 短期 TURN 凭证 → 更新 ICE_SERVERS。
+  // 注意：失败不抛错，保持原 ICE_SERVERS，让通话至少能尝试 P2P 直连（旧行为）。
+  async function fetchTurnCredential() {
+    try {
+      var url = httpBase + '/api/visitor/turn-credential?vid=' + encodeURIComponent(visitorID || '');
+      var r = await fetch(url);
+      var data = await r.json();
+      if (data.code === 0 && data.data && Array.isArray(data.data.urls) && data.data.urls.length) {
+        var srv = { urls: data.data.urls };
+        if (data.data.username) srv.username = data.data.username;
+        if (data.data.credential) srv.credential = data.data.credential;
+        ICE_SERVERS = [srv];
+      }
+    } catch (e) { /* 静默：保持兜底 STUN */ }
+  }
 
   function voicePanel() { return document.getElementById('voicePanel'); }
   function voiceSetStatus(text, klass) {
@@ -479,6 +497,8 @@
     if (!alive) { renderSys('未连接，无法呼叫'); return; }
     voice.state = 'ringing';
     voice.callId = 'call-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    // 并行：拿麦克风同时刷 TURN 凭证（凭证刷新 ~50ms 不阻塞用户感知）
+    await fetchTurnCredential();
     try {
       voice.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {

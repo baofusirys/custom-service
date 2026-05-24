@@ -34,6 +34,11 @@ type Config struct {
 	// Bootstrap 超管
 	BootstrapUsername string
 	BootstrapPassword string
+
+	// TURN/STUN（CoTURN 短期凭证）
+	// 与 coturn 容器共享同一个 secret，用 HMAC-SHA1 生成 password
+	TurnRealm  string
+	TurnSecret string
 }
 
 type MySQLConfig struct {
@@ -71,6 +76,8 @@ func Load() (*Config, error) {
 		IPBlacklistThreshold: defaultInt(os.Getenv("SECURITY_IP_BLACKLIST_THRESHOLD"), 200),
 		BootstrapUsername:    defaultStr(os.Getenv("ADMIN_BOOTSTRAP_USERNAME"), "admin"),
 		BootstrapPassword:    os.Getenv("ADMIN_BOOTSTRAP_PASSWORD"),
+		TurnRealm:            os.Getenv("TURN_REALM"),
+		TurnSecret:           os.Getenv("TURN_STATIC_AUTH_SECRET"),
 		MySQL: MySQLConfig{
 			Host:     defaultStr(os.Getenv("MYSQL_HOST"), "mysql"),
 			Port:     defaultStr(os.Getenv("MYSQL_PORT"), "3306"),

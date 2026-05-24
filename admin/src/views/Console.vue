@@ -476,7 +476,22 @@ onUnmounted(() => {
 })
 
 // ====== 语音通话（接听端） ======
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
+// 默认仅 STUN 兜底；每次 voiceAccept 都会刷新 fetchTurnCredential
+let ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
+
+// 拉后端 24h 短期 TURN 凭证（与 widget 同源 service.GenerateTurnCredential）
+// 失败保持原 ICE_SERVERS 兜底，不阻塞通话流程
+async function fetchTurnCredential() {
+  try {
+    const r = await http.get('/agent/turn-credential')
+    if (r?.code === 0 && r?.data && Array.isArray(r.data.urls) && r.data.urls.length) {
+      const srv = { urls: r.data.urls }
+      if (r.data.username) srv.username = r.data.username
+      if (r.data.credential) srv.credential = r.data.credential
+      ICE_SERVERS = [srv]
+    }
+  } catch { /* 静默：保持兜底 STUN */ }
+}
 const voiceState = ref('idle')   // idle / incoming / accepting / talking / ended
 const voiceStatusText = ref('')
 const voiceCallerLabel = ref('')
@@ -530,6 +545,8 @@ function voiceOnTaken(env) {
 async function voiceAccept() {
   if (voiceState.value !== 'incoming') return
   if (voice.timer) { clearTimeout(voice.timer); voice.timer = null }
+  // 接听前刷一次 TURN 凭证（~50ms）；失败不阻塞，会用默认 STUN
+  await fetchTurnCredential()
   try {
     voice.localStream = await navigator.mediaDevices.getUserMedia({ audio: true })
   } catch (e) {

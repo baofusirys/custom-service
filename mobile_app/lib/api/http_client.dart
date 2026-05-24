@@ -46,6 +46,20 @@ class Api {
     return Map<String, dynamic>.from(r.data);
   }
 
+  /// 拉 WebRTC TURN/STUN 凭证（24h 短期）。
+  /// 失败返回 null —— 调用方应 fallback 到默认 STUN 让通话至少能尝试 P2P。
+  /// 详见 backend/internal/service/turn.go + turn/README.md（[035]）
+  static Future<Map<String, dynamic>?> turnCredential() async {
+    try {
+      final dio = await _ensure();
+      final r = await dio.get('/agent/turn-credential');
+      if (r.data is Map && r.data['code'] == 0 && r.data['data'] is Map) {
+        return Map<String, dynamic>.from(r.data['data']);
+      }
+    } catch (_) { /* 静默：调用方做 fallback */ }
+    return null;
+  }
+
   /// 用临时 baseUrl 测 health，不污染全局 _dio——服务器配置页用，避免提前
   /// notifyListeners 导致页面 dispose 后 setState 报错。
   static Future<Map<String, dynamic>> healthAt(String baseUrl) async {

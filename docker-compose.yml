@@ -84,6 +84,9 @@ services:
       SECURITY_IP_BLACKLIST_THRESHOLD: ${SECURITY_IP_BLACKLIST_THRESHOLD:-200}
       ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-admin}
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD}
+      # TURN 短期凭证生成所需（与 coturn 容器共享同一个 secret）
+      TURN_REALM: ${TURN_REALM}
+      TURN_STATIC_AUTH_SECRET: ${TURN_STATIC_AUTH_SECRET}
     volumes:
       # 日志和上传都 bind 到仓库外的绝对路径，重启 / 重新上传代码绝不丢
       - ${HOST_DATA_DIR:-/srv/cs-data}/logs/backend:/app/logs
@@ -118,6 +121,29 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
     networks: [cs-net]
+
+  # ============================================================
+  # CoTURN：WebRTC TURN/STUN relay
+  # 用 host 网络模式：UDP relay 端口范围大（49152-49200），走 bridge 性能差且 srflx 会拿到错 IP
+  # 5349 复用 nginx 的 maihaocs.icu Let's Encrypt 证书（cs_ssl_data 命名卷只读挂载）
+  # 引入原因详见 turn/README.md 与 CHANGELOG [035]
+  # ============================================================
+  coturn:
+    build:
+      context: ./turn
+    container_name: cs-coturn
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
+      TURN_REALM: ${TURN_REALM}
+      TURN_STATIC_AUTH_SECRET: ${TURN_STATIC_AUTH_SECRET}
+    volumes:
+      # 复用 nginx 的 Let's Encrypt 证书（只读，安全）
+      - cs_ssl_data:/etc/coturn/ssl-src:ro
+      # 日志长效存储到 /srv/cs-data/logs/coturn/，重启 / deploy 不丢
+      - ${HOST_DATA_DIR:-/srv/cs-data}/logs/coturn:/var/log/coturn
 
   nginx:
     build:

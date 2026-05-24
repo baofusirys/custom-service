@@ -137,6 +137,8 @@ func main() {
 		{
 			visitor.POST("/session", h.VisitorSession)
 			visitor.GET("/settings", h.VisitorPublicSettings)
+			// TURN/STUN 短期凭证（每次通话前 fetch；24h TTL；返回 username/credential/urls）
+			visitor.GET("/turn-credential", h.TurnCredential)
 		}
 
 		// 客服登录
@@ -150,6 +152,8 @@ func main() {
 			ag.POST("/conversations/:id/assign", h.AssignSelf)
 			ag.POST("/conversations/:id/read", h.MarkRead)
 			ag.POST("/conversations/:id/close", h.CloseConv)
+			// TURN/STUN 短期凭证（客服 web/iPhone 通话前 fetch；与 visitor 接口同源 service.GenerateTurnCredential）
+			ag.GET("/turn-credential", h.TurnCredential)
 		}
 
 		// 管理（仅 admin）
