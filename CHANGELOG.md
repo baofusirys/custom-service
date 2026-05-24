@@ -4,6 +4,67 @@
 
 ---
 
+## [042] 2026-05-25 03:00 — 自托管就绪：脱敏生产坐标 / iOS Bundle ID 占位 / 加 LICENSE + INSTALL.md
+
+**起因 / 需求**
+爷爷要把项目推到 GitHub 私有仓库，让别人能完全自托管部署（跟当前生产服务器 `38.76.193.68` / `maihaocs.icu` 完全脱钩）。先做"自托管就绪审计"找出 7 类硬编码 / 缺失项，本回合一次性补齐。
+
+**改了什么**（修改 5 文件 + 新增 2 文件）
+
+### 1. 脱敏生产坐标
+- `LATEST.md`：「当前部署坐标（测试服）」从写死 `38.76.193.68:22 / admin / ***REDACTED*** / /custom-service/ / /srv/cs-data` → 改为「`<你的服务器 IP>` + 引用 `.env`」；删除超管密码明文；"最新代码在哪个目录"段也去掉本地 / 服务器具体路径写法
+- `mobile_app/lib/pages/server_setup_page.dart`：
+  - `_demoUrl` 常量 `https://maihaocs.icu` → `https://your-domain.example.com`
+  - hintText / hintRow 示例从 `maihaocs.icu` / `38.76.193.68` → `cs.yourcompany.com` / `203.0.113.10`（RFC 5737 文档专用 IP 段）
+  - 「一键填入测试服 maihaocs.icu」按钮 → 「一键填入示例地址」
+
+### 2. iOS Bundle ID 占位化
+- `mobile_app/ios/Runner.xcodeproj/project.pbxproj`：
+  - `com.chengmeiran.customservice` → `com.example.customservice`（5 处包括 Runner / RunnerTests Debug/Release/Profile 配置）
+  - `DEVELOPMENT_TEAM = 4ARYS2Z738` → `DEVELOPMENT_TEAM = ""`（3 处）
+  - **副作用**：爷爷以后在 Mac 上 build iPhone 需要 vim 改回真值，或写本地脚本 deploy 后自动改（INSTALL.md 第 4 节有 sed 一行命令）
+
+### 3. `.env.example` 顶部加生成随机密码教程
+- 加 30 秒生成强密码块：Linux/Mac `for k in ...; do echo "$k=$(openssl rand -hex 32)"; done` 一次出全部 5 个 secret；Windows PowerShell 等价命令；提示 DATA_AES_KEY 必须正好 64 hex
+- 提醒「改好的 .env 千万别 git add -f 提交」
+
+### 4. 新增 LICENSE
+- MIT License（爷爷选定），版权年份 2026
+
+### 5. 新增 INSTALL.md（小白教程）
+- 9 章覆盖：项目介绍 → 服务器/域名/git 准备 → SSH 装 Docker 开端口 → 数据目录在仓库外的铁律 → git clone → `.env` 8 项必改 + openssl 生成 → docker compose up 一键启 → 浏览器验证 → widget 嵌入第三方网站一行代码 → iPhone App 自己 build（Bundle ID + Team 修改 sed 命令）→ luckfast 推送可选 → 升级 / 常见 7 个坑 / 数据迁移 / 出问题去哪问
+- 第 7 节"常见坑"覆盖：acme 证书申请不到、TURN 通话失败、忘超管密码（bcrypt SQL 重置）、改完代码怎么部署、数据丢了怎么办
+
+### 6. README.md 引导改进
+- 顶部加显眼一行：「第一次部署？看 INSTALL.md 完整小白教程」
+- 文档索引中 INSTALL.md 加粗排第一
+- "许可"从模糊「自托管使用」→ 明确 `[MIT License](LICENSE) — 免费用、改、商用，保留版权声明即可`
+
+**业务流程对比**
+
+| 角度 | 改前 | 改后 |
+|---|---|---|
+| 推 GitHub 公开 | 🔴 致命阻塞：4 处生产敏感 | 🟢 安全：全脱敏 + LICENSE |
+| 别人 clone 后能用 | 🟡 缺 INSTALL 步骤、iOS Bundle 写死 | 🟢 INSTALL.md 9 章 + iOS Bundle 占位 |
+| 爷爷自己 Mac build iOS | 不用动 | 需 sed 改 Bundle ID + TEAM 回真值（或写本地脚本） |
+| 生产服务器部署 | 不影响（.env 还在远端） | 不影响（.env 从未入 git，远端 .env 保留） |
+
+**触发场景与边界 + 验证方式**
+
+- **`.env` 历史**：`git ls-files .env .env.*` 只返回 `.env.example`；`git log --all --diff-filter=A -- .env` 只看到 [001] 加入了 `.env.example`，没加过真 `.env` → 历史完全干净
+- **本地 `.env` 不删**：爷爷开发还要用；只是 `.gitignore` 已排除（[001] 就排了）
+- **iOS Bundle 占位副作用**：爷爷下次 Mac build 会因 TEAM 空 codesign 失败；INSTALL.md 4.1 节给了 sed 一行命令快速改回；后续可考虑 `.gitignore project.pbxproj` + 模板方案彻底解决（不在本回合范围）
+- **CHANGELOG / docs 内 `maihaocs.icu` 不清**：是项目演进历史的真实记录，不当作示例域名；CoTURN realm 等技术示例在注释里也保留以体现真实部署经验
+- **远端 `/srv/cs-data/.env.prod.bak.*`**：在仓库外，从未进 git，不动
+- **生产部署不受影响**：本回合只改本地仓库，远端 `/custom-service/.env` 是上次部署前从 `/srv/cs-data/.env.prod.bak.038.011544` 恢复的真值，仍然有效
+- **验证**：
+  1. `git status` 应只看到本回合改的 7 个文件 + 新增 2 个（LICENSE / INSTALL.md），无 .env
+  2. `grep -r "maihaocs.icu" --include="*.dart" --include="*.html" --include="*.vue" mobile_app/lib admin/src widget/public` 应只剩 widget loader.js 占位注释 + CHANGELOG / LATEST 历史记录
+  3. INSTALL.md 章节顺序符合小白阅读路径
+  4. LICENSE 是标准 MIT 文本
+
+---
+
 ## [041] 2026-05-25 02:20 — iPhone App 客服端可发图片/文件，对齐 admin web 多文件队列
 
 **起因 / 需求**

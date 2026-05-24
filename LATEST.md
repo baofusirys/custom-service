@@ -1,19 +1,21 @@
-### 当前版本：v0.1.2 · 2026-05-24 23:55
+### 当前版本：v0.1.2 · 2026-05-25
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
 ---
 
-## 当前部署坐标（测试服）
-- 服务器：[12] 零零壹测试服器 / 38.76.193.68:22 / root
-- 远端代码目录：`/custom-service/`
-- 远端数据目录：`/srv/cs-data/{logs,uploads,ssl}`（已 chown 100:101 给容器内 app 用户）
+## 当前部署坐标
+> 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
+
+- 服务器：`<你的服务器 IP>:22 / root`
+- 远端代码目录：`/custom-service/`（或任意目录，与 docker-compose 上下文匹配即可）
+- 远端数据目录：`/srv/cs-data/{logs,uploads,ssl}`（铁律：必须在代码仓库外，详见 [CLAUDE.md 数据安全铁律]）
 - 入口：
-  - 管理后台 http://38.76.193.68/admin/
-  - Widget 演示 http://38.76.193.68/widget/demo.html
-  - 健康检查 http://38.76.193.68/api/health
-- 超管账号：`admin` / `***REDACTED***`（仅测试服，本地 .env 内）
-- 状态：6 容器 Up，3 个 healthy，业务通、安全通、日志通
+  - 管理后台 `https://<你的域名>/admin/`
+  - Widget 演示 `https://<你的域名>/widget/demo.html`
+  - 健康检查 `https://<你的域名>/api/health`
+- 超管账号：首次启动时由 `.env` 的 `ADMIN_BOOTSTRAP_USERNAME` / `ADMIN_BOOTSTRAP_PASSWORD` 创建，**登录后第一件事改密**
+- 状态：`docker compose ps` 应看到 backend / mysql / redis / admin / widget / nginx / coturn 全部 Up；mysql / redis / backend 应为 healthy
 
 ---
 
@@ -21,8 +23,8 @@
 一套企业级、可嵌入任何网页的自托管在线客服系统。访客端是一段 JS（<script src> 引入即用，iframe 隔离，不污染宿主页样式），客服后台是 Vue 3 + Element Plus，后端是 Go + WebSocket，单机即可承载万级并发长连接。
 
 ## 最新代码在哪个目录
-- 绝对路径：`e:\mycode\custom_service\`
-- 服务器上：`/srv/custom-service/`（即整个仓库目录，部署时 rsync/sftp 全量同步到这里）
+- 本地开发：你的本地 git clone 目录
+- 服务器上：`/custom-service/`（或你自己选的目录，部署时 rsync/sftp 全量同步到这里）
 
 ## 过期 / 归档目录
 - 暂无（v0.1.0 是首版）

@@ -17,8 +17,9 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
   bool _testing = false;
   String? _hint;
 
-  // 快速填入测试服（爷爷的服务器，maihaocs.icu 已挂 HTTPS）
-  static const _demoUrl = 'https://maihaocs.icu';
+  // 占位 demo URL；自托管部署后，把这里改成你自己的域名 / IP，方便随手点一下填入
+  // 例如：'https://cs.yourcompany.com' 或 'http://10.0.0.5'
+  static const _demoUrl = 'https://your-domain.example.com';
 
   @override
   void dispose() {
@@ -122,7 +123,7 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
                 autocorrect: false,
                 decoration: const InputDecoration(
                   labelText: '服务器地址',
-                  hintText: '例如：https://maihaocs.icu',
+                  hintText: '例如：https://cs.yourcompany.com',
                   helperText: '必须以 http:// 或 https:// 开头',
                   border: OutlineInputBorder(),
                   prefixIcon: Icon(Icons.link),
@@ -152,8 +153,8 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
                       ],
                     ),
                     const SizedBox(height: 8),
-                    _hintRow('域名 HTTPS', 'https://maihaocs.icu'),
-                    _hintRow('IP 地址', 'http://38.76.193.68'),
+                    _hintRow('域名 HTTPS', 'https://cs.yourcompany.com'),
+                    _hintRow('IP 地址', 'http://203.0.113.10'),
                     _hintRow('带端口', 'http://192.168.1.100:8080'),
                     const SizedBox(height: 6),
                     Text(
@@ -164,10 +165,10 @@ class _ServerSetupPageState extends State<ServerSetupPage> {
                 ),
               ),
               const SizedBox(height: 12),
-              // 一键填入测试服
+              // 一键填入占位 demo（自托管后改 _demoUrl 常量为你自己的服务器域名/IP）
               OutlinedButton.icon(
                 icon: const Icon(Icons.flash_on, size: 16),
-                label: const Text('一键填入测试服 maihaocs.icu'),
+                label: const Text('一键填入示例地址'),
                 onPressed: () {
                   _ctl.text = _demoUrl;
                   _ctl.selection = TextSelection.fromPosition(TextPosition(offset: _ctl.text.length));

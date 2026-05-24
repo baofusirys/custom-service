@@ -2,6 +2,8 @@
 
 > 一行 `<script>` 嵌入任意网页 · WSS 实时通信 · Go + Vue3 + Element Plus · Docker 一键部署
 
+> **第一次部署？看 [INSTALL.md](INSTALL.md) 完整小白教程**（从买服务器到 widget 上线全流程，含 iPhone App build / 推送 / 数据迁移）
+
 ---
 
 ## 项目目标
@@ -36,13 +38,14 @@
    ```
 
 ## 文档索引
+- **`INSTALL.md`** — 小白也能看懂的完整安装指南（**新手从这开始**）
 - `LATEST.md` — 当前版本最新坐标 / 入口 / 关键开关（AI 接手必读）
 - `CHANGELOG.md` — 全部变更日志
 - `docs/INTEGRATION.md` — 集成方怎么把 widget 装到自己网站
-- `docs/DEPLOY.md` — 部署 / 备份 / 升级
+- `docs/DEPLOY.md` — 部署 / 备份 / 升级（精简版，给熟悉 Docker 的人）
 - `docs/ARCHITECTURE.md` — 架构总览 / 消息流转 / 长连接管理
 - `docs/SECURITY.md` — 安全机制 + 自验证脚本
 - 各子模块根目录的 `README.md`
 
 ## 许可
-本项目自托管使用。集成方部署到自己服务器上不受任何限制。
+[MIT License](LICENSE) — 免费用、改、商用，保留版权声明即可。
