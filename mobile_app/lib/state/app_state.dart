@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../api/http_client.dart';
 import '../api/models.dart';
@@ -156,6 +157,45 @@ class AppState extends ChangeNotifier {
       createdAt: now,
     ));
     notifyListeners();
+  }
+
+  /// [041] 客服上传文件并发出 media 消息（图片 / 文件，跟 admin web Console.vue 对齐）。
+  /// 失败返回 false，调用方可用来 toast / 重试。
+  Future<bool> uploadAndSendFile(File file) async {
+    final conv = activeConv;
+    if (conv == null || _ws == null || agent == null) return false;
+    final res = await Api.uploadFile(file, conv.id);
+    if (res == null) return false;
+    final url = res['url']?.toString() ?? '';
+    if (url.isEmpty) return false;
+    final kind = res['kind']?.toString() ?? '';
+    final name = res['name']?.toString() ?? '';
+    final size = (res['size'] is int) ? res['size'] as int : 0;
+    final now = DateTime.now();
+    _ws!.send({
+      'type': 'chat',
+      'conv': conv.id,
+      'content': '',
+      'media': url,
+      'mkind': kind,
+      'mname': name,
+      'msize': size,
+      'ts': now.millisecondsSinceEpoch,
+      'prio': 0,
+    });
+    messages.add(Message(
+      id: 'local-${now.millisecondsSinceEpoch}',
+      convId: conv.id,
+      sender: 'agent',
+      senderRef: agent!.id.toString(),
+      content: '',
+      mediaUrl: url,
+      mediaKind: kind,
+      mediaName: name,
+      createdAt: now,
+    ));
+    notifyListeners();
+    return true;
   }
 
   void _sendRead(String convId) {

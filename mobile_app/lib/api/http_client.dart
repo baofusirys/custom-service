@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:dio/dio.dart';
 import '../config/settings.dart';
 
@@ -71,6 +72,32 @@ class Api {
     ));
     final r = await tmpDio.get('/health');
     return Map<String, dynamic>.from(r.data);
+  }
+
+  // ===== Upload [041] =====
+  /// 客服上传图片 / 文件。POST /api/upload multipart：file + uploader=agent + conv_id
+  /// 后端校验：authorizeUpload 用 Bearer JWT + 校验 conv_id 是当前 agent 能接管的会话
+  /// 后端返回：{id, url, kind, size, name, mime}（无 code 包装）
+  /// 失败返回 null，调用方静默或自己提示
+  static Future<Map<String, dynamic>?> uploadFile(File file, String convId) async {
+    try {
+      final dio = await _ensure();
+      // 文件名兼容 Windows 路径分隔符（Mac/iOS 是 /，但 Path 类一致更稳）
+      final filename = file.path.split(Platform.pathSeparator).last;
+      final fd = FormData.fromMap({
+        'file': await MultipartFile.fromFile(file.path, filename: filename),
+        'uploader': 'agent',
+        'conv_id': convId,
+      });
+      // 显式去掉 application/json 默认头，让 dio 自动按 multipart 拼 Content-Type + boundary
+      final r = await dio.post(
+        '/upload',
+        data: fd,
+        options: Options(headers: {'Content-Type': 'multipart/form-data'}),
+      );
+      if (r.data is Map) return Map<String, dynamic>.from(r.data);
+    } catch (_) { /* 静默 */ }
+    return null;
   }
 
   // ===== Conversations =====

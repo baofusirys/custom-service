@@ -1,4 +1,7 @@
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import '../api/models.dart';
 import '../state/app_state.dart';
@@ -20,6 +23,10 @@ class _ChatPageState extends State<ChatPage> {
   bool _autoScroll = true;
   // 缓存 AppState 引用，避免 dispose 时通过已 deactivated 的 context 查找 ancestor
   AppState? _state;
+  // [041] 待发送文件队列（拍照 / 相册多选 / 文件追加，点发送时依次上传）
+  final List<File> _pending = [];
+  bool _sending = false;
+  final _picker = ImagePicker();
 
   @override
   void didChangeDependencies() {
@@ -42,12 +49,91 @@ class _ChatPageState extends State<ChatPage> {
     _scroll.jumpTo(0);
   }
 
-  void _send() {
-    final t = _input.text;
-    if (t.trim().isEmpty) return;
-    context.read<AppState>().sendChat(t);
-    _input.clear();
+  /// [041] 发送：先发文本（如果有），再依次上传 _pending 队列里的所有附件
+  /// 任一存在就算可发；上传期间禁按发送防重复点
+  Future<void> _send() async {
+    if (_sending) return;
+    final t = _input.text.trim();
+    final files = List<File>.from(_pending);
+    if (t.isEmpty && files.isEmpty) return;
+    final app = context.read<AppState>();
+    setState(() => _sending = true);
+    try {
+      if (t.isNotEmpty) {
+        await app.sendChat(t);
+        _input.clear();
+      }
+      if (files.isNotEmpty) {
+        // 先清 UI 防重复点；失败的不重发，用户可重新选
+        setState(() => _pending.clear());
+        for (final f in files) {
+          final ok = await app.uploadAndSendFile(f);
+          if (!ok && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('上传失败：${f.path.split(Platform.pathSeparator).last}')),
+            );
+          }
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+  }
+
+  /// [041] 弹底部菜单：拍照 / 相册多选 / 任意文件
+  Future<void> _pickAttachment() async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('拍照'),
+              onTap: () => Navigator.pop(ctx, 'camera'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('从相册选（可多选）'),
+              onTap: () => Navigator.pop(ctx, 'gallery'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.insert_drive_file_outlined),
+              title: const Text('选择文件'),
+              onTap: () => Navigator.pop(ctx, 'file'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null) return;
+    try {
+      if (action == 'camera') {
+        final x = await _picker.pickImage(source: ImageSource.camera, imageQuality: 88);
+        if (x != null) setState(() => _pending.add(File(x.path)));
+      } else if (action == 'gallery') {
+        final xs = await _picker.pickMultiImage(imageQuality: 88);
+        if (xs.isNotEmpty) {
+          setState(() => _pending.addAll(xs.map((x) => File(x.path))));
+        }
+      } else if (action == 'file') {
+        final res = await FilePicker.platform.pickFiles(allowMultiple: true, withData: false);
+        if (res != null) {
+          final picked = res.files.where((f) => f.path != null).map((f) => File(f.path!));
+          setState(() => _pending.addAll(picked));
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('选择失败：$e')));
+      }
+    }
+  }
+
+  void _removePending(File f) {
+    setState(() => _pending.remove(f));
   }
 
   @override
@@ -196,27 +282,108 @@ class _ChatPageState extends State<ChatPage> {
       ),
       child: SafeArea(
         top: false,
-        child: Row(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Expanded(
-              child: TextField(
-                controller: _input,
-                minLines: 1,
-                maxLines: 4,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _send(),
-                decoration: const InputDecoration(
-                  hintText: '输入消息',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(20))),
-                  contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  isDense: true,
+            if (_pending.isNotEmpty) _pendingBar(),
+            Row(
+              children: [
+                IconButton(
+                  tooltip: '添加图片 / 文件',
+                  onPressed: _sending ? null : _pickAttachment,
+                  icon: const Icon(Icons.add_circle_outline, size: 28, color: Color(0xFF2974FF)),
                 ),
-              ),
+                Expanded(
+                  child: TextField(
+                    controller: _input,
+                    minLines: 1,
+                    maxLines: 4,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _send(),
+                    decoration: const InputDecoration(
+                      hintText: '输入消息',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(20))),
+                      contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      isDense: true,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: _sending ? null : _send,
+                  child: _sending
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Text('发送'),
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            FilledButton(onPressed: _send, child: const Text('发送')),
           ],
         ),
+      ),
+    );
+  }
+
+  /// [041] 待发送文件 chip 队列：缩略图（图片）/ 文件图标，长按或 × 移除
+  Widget _pendingBar() {
+    return Container(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Wrap(
+        spacing: 6, runSpacing: 6,
+        children: _pending.map(_pendingChip).toList(),
+      ),
+    );
+  }
+
+  Widget _pendingChip(File f) {
+    final name = f.path.split(Platform.pathSeparator).last;
+    final lname = name.toLowerCase();
+    final isImage = lname.endsWith('.jpg') || lname.endsWith('.jpeg') ||
+        lname.endsWith('.png') || lname.endsWith('.gif') ||
+        lname.endsWith('.webp') || lname.endsWith('.heic');
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 200),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      padding: const EdgeInsets.fromLTRB(4, 4, 4, 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (isImage)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: Image.file(f, width: 36, height: 36, fit: BoxFit.cover),
+            )
+          else
+            Container(
+              width: 30, height: 30,
+              decoration: BoxDecoration(
+                color: const Color(0xFFEEF4FF),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: const Icon(Icons.insert_drive_file_outlined, size: 18, color: Color(0xFF2974FF)),
+            ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              name,
+              maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12, color: Color(0xFF2C3034)),
+            ),
+          ),
+          const SizedBox(width: 4),
+          InkWell(
+            onTap: () => _removePending(f),
+            borderRadius: BorderRadius.circular(10),
+            child: const Padding(
+              padding: EdgeInsets.all(2),
+              child: Icon(Icons.close, size: 16, color: Color(0xFF9CA3AF)),
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -4,6 +4,65 @@
 
 ---
 
+## [041] 2026-05-25 02:20 — iPhone App 客服端可发图片/文件，对齐 admin web 多文件队列
+
+**起因 / 需求**
+爷爷反馈：客服 iPhone App 端目前只能发文本，不能发图片和文件。要跟 admin web（[040] 已实现）一样支持：
+- 拍照 + 相册多选 + 任意文件三种来源
+- pending 队列预览
+- 点发送时统一上传（不是即选即发）
+
+**改了什么**（新增 0 文件 / 修改 5 文件，全部 mobile_app 内）
+
+### 1. 依赖 + iOS 权限
+- `mobile_app/pubspec.yaml`：加 `image_picker: ^1.0.7`（拍照 + 相册多选）+ `file_picker: ^8.0.0`（任意文件多选）
+- `mobile_app/ios/Runner/Info.plist`：加 `NSPhotoLibraryUsageDescription`「选择图片发送给访客」+ `NSCameraUsageDescription`「拍照发送给访客」
+
+### 2. HTTP 上传层 `mobile_app/lib/api/http_client.dart`
+- import `dart:io`
+- 新增 `Api.uploadFile(File file, String convId)`：dio multipart POST `/api/upload`，form fields = file/uploader=agent/conv_id；显式设 `Content-Type: multipart/form-data` 让 dio 自动加 boundary；失败静默返 null
+
+### 3. 业务层 `mobile_app/lib/state/app_state.dart`
+- import `dart:io`
+- 新增 `Future<bool> uploadAndSendFile(File file)`：调 `Api.uploadFile` → 拿 `{url, kind, name, size}` → WSS 发 `{type:chat, conv, content:'', media, mkind, mname, msize, ts, prio}`（envelope 字段名跟 admin Console.vue 完全一致）→ 乐观追加 `Message(mediaUrl, mediaKind, mediaName, ...)` 到 `messages` 列表 + notifyListeners；返 true/false 让 UI 提示
+
+### 4. UI 层 `mobile_app/lib/pages/chat_page.dart`
+- import dart:io / file_picker / image_picker
+- State 加 `List<File> _pending` 队列 + `bool _sending` 防重复点 + `_picker = ImagePicker()`
+- 新增 `_pickAttachment()`：showModalBottomSheet → 三选一「拍照 / 相册多选 / 选文件」→ 用 image_picker.pickImage / pickMultiImage / FilePicker.pickFiles 拿 File → addAll 到 `_pending`；try/catch + SnackBar 提示
+- 新增 `_removePending(File)`：从队列移除
+- `_send` 改 async 重构：先发文本（如果有）→ 再 for await 依次 `app.uploadAndSendFile(f)` 串行上传；每个失败弹 SnackBar `上传失败：xxx`；try/finally 复位 `_sending`
+- `_inputBar` 改 Column 布局：上方 `_pendingBar` v-if 显示 chip Wrap（spacing 6 自动换行）；下方 Row 三件套：左边附件按钮（`Icons.add_circle_outline` 蓝色 28）+ 中间输入框 + 右边发送（`_sending` 时显示 CircularProgressIndicator 转圈）
+- 新增 `_pendingChip(File)`：图片用 `Image.file` 36×36 缩略；非图片用文件图标；文件名 ellipsis + × 移除按钮；构成跟 widget/admin 视觉一致（白底圆角灰边 max-width 200）
+
+**业务流程对比**
+
+| 端 | [040] 前 | [041] 后 |
+|---|---|---|
+| iPhone App 客服 | 只能发文本 | 拍照 / 相册多选 / 选文件 → pending 队列 → 发送 |
+| 队列 chip 样式 | 不存在 | 跟 widget/admin 完全一致（36×36 + 文件名 + ×）|
+| 上传过程 UI 反馈 | 不存在 | 发送按钮转圈 + disable 防重复点 |
+| 失败提示 | 不存在 | SnackBar「上传失败：文件名」可重新选 |
+
+**触发场景与边界 + 验证方式**
+
+- **拍照权限**：首次点拍照 iOS 弹原生权限弹窗（NSCameraUsageDescription），拒绝 image_picker 会抛 catch → SnackBar 提示
+- **相册权限**：同上 NSPhotoLibraryUsageDescription
+- **多选**：image_picker.pickMultiImage iOS 14+ 支持原生多选；file_picker allowMultiple:true 支持
+- **串行上传**：`for ... await` 不用 Promise.all，保消息时序（跟 widget/admin 一致；客服 iPhone 蜂窝网经常慢，串行更稳）
+- **空内容防御**：`if (t.isEmpty && files.isEmpty) return`
+- **失败不重发**：上传前 `setState(() => _pending.clear())` UI 先清，失败的让用户重新选（避免静默重试）
+- **mounted 检查**：所有 setState/SnackBar 都 `if (mounted)`，防止 dispose 后调 setState
+- **跟后端兼容**：multipart 字段名 file/uploader=agent/conv_id 跟 admin web 完全一致；后端 authorizeUpload 已校验 agent JWT + conv 归属，无新攻击面
+- **不影响**：widget/admin 不动；mobile_app 语音通话 / 设置页 / 会话列表 / 消息渲染（已支持 media）不动
+
+**iOS 部署需要**：
+- pod install 拉 image_picker_ios + file_picker_ios 子 pod
+- flutter build ios --release 重 build
+- 装机后首次点附件按钮会弹相册/相机权限对话框，"好" 即可
+
+---
+
 ## [040] 2026-05-25 01:50 — widget + admin 都支持「同时粘贴/选择多张图片，一次性发送」
 
 **起因 / 需求**
