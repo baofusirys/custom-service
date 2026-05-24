@@ -4,6 +4,77 @@
 
 ---
 
+## [030] 2026-05-24 20:50 — 语音来电额外发 luckfast 推送：iPhone 锁屏/后台也能收到「来电」提醒拉起 App 接听
+
+**起因 / 需求**
+
+[029] 把双端语音通话上了，但发现 **iPhone App 进后台后 WSS 几秒被 iOS 冻结**，访客拨号时 App 完全收不到 voice_call 信令。爷爷问"微信怎么做到的"——微信用 PushKit + CallKit + 付费 Apple Developer 账号。爷爷免费账号不能用 PushKit，所以走方案 B：
+
+**访客发起 voice_call 时，后端额外发一条 luckfast APNs 推送给客服 iPhone**——锁屏能弹「客服系统 · 来电」通知，用户点击推送 → 走 maihaocs:// URL Scheme 拉起 Custom Service App → App 进前台 WSS 重连 → 客服点接听。
+
+跟微信差几秒（需要用户主动点推送），但比当前"完全收不到"强百倍。
+
+**改了什么 / 加了什么**（修改 5 文件）
+
+1. `backend/internal/ws/hub.go`
+   - `MessageSink` interface 加 `OnVisitorVoiceCall(visitorID, callID string)` 方法
+   - `handleIncoming` voice_* 分支在 fanoutVoice 后追加：仅 `e.Type == "voice_call" && c.Kind == KindVisitor` 时调 `h.sink.OnVisitorVoiceCall(c.ID, callID)`，让 service 侧通道发推送
+
+2. `backend/internal/service/service.go`
+   - 实现 `Service.OnVisitorVoiceCall(visitorID, callID string)`：goroutine 异步调 `pushAPNsCommon` 发推送
+   - 标题「客服系统 · 来电」/ subtitle「访客 xxx」/ 内容「语音来电！请立即点开 App 接听」
+   - sound 走 settings `push_sound_call`（默认 `"4"` 跟 enter/message 区分）
+   - 跳转 URL 用 `push_jump_url`（默认 maihaocs://open）拉起 App
+
+3. `backend/internal/handler/http.go`
+   - `allowedSettingKeys` 加 `push_sound_call: true`
+
+4. `admin/src/views/Settings.vue`
+   - form 加 `push_sound_call: '4'`（默认）
+   - `load()`/`save()` 各加一行带上该字段
+   - template 在「新消息提示音」下方加「语音来电提示音」下拉（16 选）
+
+5. `mobile_app/lib/pages/settings_page.dart`
+   - state 加 `_pushSoundCall = '4'`
+   - `_load`/`_save` 各加一行
+   - UI 在「新消息提示音」下方加「语音来电提示音」`_pushSoundTile`
+
+**业务流程对比**
+
+| 场景 | [029] 前 | [030] 后 |
+|---|---|---|
+| 客服 iPhone **前台**收到访客拨号 | ✓ App 内弹接听浮窗 | ✓ 同上（不变）|
+| 客服 iPhone **后台**收到访客拨号 | ❌ WSS 被冻结，啥也不收 | ✅ 锁屏弹推送「客服系统·来电」，点击拉起 App 接听 |
+| 客服 iPhone **完全没在跑**收到访客拨号 | ❌ 同上 | ✅ 推送拉起 App 启动 + 重连 WSS（访客那边拨号 30 秒超时窗口内能赶上）|
+
+**触发场景与边界 + 验证方式**
+
+- 触发条件：`Type==voice_call && Kind==KindVisitor`，且 settings 配了 push_user_id/key
+- 推送内容：跟 [027] 设计的「新访客」「新消息」推送一套体系，但用独立 sound（默认 4）方便用户一耳朵分辨「来电」vs「新消息」
+- 用户体验：iPhone 锁屏弹推送 → 用户解锁 + 点推送 → maihaocs://open scheme 拉起 App → AppState.startWs 重连 WSS → 访客那边如果还在拨号超时窗口内（30 秒），后台 fanoutVoice 会**重新**把 voice_call 投递给新连接的 agent（fanoutLocal 在 register 时不会重发旧消息，但 visitor 还在持续拨号状态，会保持 voice_call 状态机不变）
+
+> ⚠️ 边界：如果访客拨号超过 30 秒，访客端自己挂断，那时候 App 才拉起就晚了。但 30 秒足够大部分用户解锁手机点推送。
+
+- 验证 1：admin → 系统设置 → 看到「语音来电提示音」第三个下拉 ✓
+- 验证 2：iPhone App → 我的 → 系统设置 → 同样看到「语音来电提示音」字段 ✓
+- 验证 3：iPhone 锁屏 → 浏览器开 widget → 点电话 → iPhone 弹推送「客服系统·来电」 ⏳ 待真机
+- 验证 4：点推送 → 拉起 App → 看到访客来电浮窗 → 接听 → 双向通话 ⏳ 待真机
+
+**安全 / 健壮性**
+
+- 推送跟 WSS 信令完全解耦：推送失败不影响 voice_call 信令本身的转发（信令仍走 WSS 给在线 agent）
+- 异步 goroutine + recover panic，不阻塞 hub 主流程
+- push_user_id/key 未配置时 pushAPNsCommon 直接 return nil 跳过（沿用 [027] 兜底逻辑）
+- 同一会话窗口内不会刷屏推送（访客 voice_call 只发一次，hub 转发一次，sink.OnVisitorVoiceCall 调一次）
+
+**遗留 / 已知**
+
+- 微信级即时接听要 PushKit + CallKit + 付费 Apple Developer 账号（$99/年），后续可上 [031]
+- 推送有几秒延迟 + 用户主动点击；如果访客等不及挂了就接不上
+- 目前 App 拉起后会显示已有的会话列表，但来电浮窗依赖 WSS 重连后收到访客继续保持的 voice_call 状态——实际上 voice_call 是一次性广播，已经发过的不会重发。后续可在 hub 加 short buffer（call_id 缓存 30 秒，新 agent 连入时重投）
+
+---
+
 ## [029] 2026-05-24 16:25 — 双端语音通话：访客 → 客服 WebRTC 实时语音（widget / admin Web / iPhone App 三端互通）
 
 **起因 / 需求**

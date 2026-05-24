@@ -504,6 +504,7 @@ var allowedSettingKeys = map[string]bool{
 	// luckfast 推送音色（"0"-"15" 共 16 种），管理员可在 admin Settings 各场景独立配置
 	"push_sound_enter":   true, // 新访客打开 widget 时播放
 	"push_sound_message": true, // 已有会话中访客发新消息时播放
+	"push_sound_call":    true, // 访客发起语音通话时播放（拉起客服 App 接听）
 	// （可选）覆盖推送点击跳转 URL，默认 maihaocs://open 拉起 App
 	"push_jump_url": true,
 }

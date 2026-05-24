@@ -26,6 +26,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final _pushUserKey = TextEditingController();
   String _pushSoundEnter = '1';
   String _pushSoundMessage = '9';
+  String _pushSoundCall = '4';
   bool _showPushKey = false;
 
   final _soundOptions = listSounds();
@@ -70,6 +71,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _pushUserKey.text = (s['push_user_key'] ?? '').toString();
       _pushSoundEnter = (s['push_sound_enter'] ?? '1').toString();
       _pushSoundMessage = (s['push_sound_message'] ?? '9').toString();
+      _pushSoundCall = (s['push_sound_call'] ?? '4').toString();
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拉取设置失败：$e')));
     }
@@ -90,6 +92,7 @@ class _SettingsPageState extends State<SettingsPage> {
         'push_user_key': _pushUserKey.text.trim(),
         'push_sound_enter': _pushSoundEnter,
         'push_sound_message': _pushSoundMessage,
+        'push_sound_call': _pushSoundCall,
       });
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保存成功')));
     } catch (e) {
@@ -225,6 +228,12 @@ class _SettingsPageState extends State<SettingsPage> {
             hint: '已有会话中访客发消息时 iPhone 推送音',
             value: _pushSoundMessage,
             onChanged: (v) => setState(() => _pushSoundMessage = v),
+          ),
+          _pushSoundTile(
+            title: '语音来电提示音',
+            hint: '访客点电话发起语音通话时 iPhone 推送音（点推送拉起 App 接听）',
+            value: _pushSoundCall,
+            onChanged: (v) => setState(() => _pushSoundCall = v),
           ),
           const SizedBox(height: 24),
         ],

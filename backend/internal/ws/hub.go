@@ -90,6 +90,11 @@ type MessageSink interface {
 	// OnPageNavigation 访客跳转到新页面时触发：异步落库一条 sys 消息 +
 	// 广播 page_navigation 事件给所有在线 agent。
 	OnPageNavigation(visitorID, convID, url, title string)
+
+	// OnVisitorVoiceCall 访客发起语音呼叫时触发：service 用来发 luckfast 推送
+	// 给客服 iPhone（让锁屏/后台时也能收到通知，点击拉起 App 接听）。
+	// 仅信令转发已经在 fanoutVoice 完成；此回调不影响 WSS 流程，仅用于侧通道推送。
+	OnVisitorVoiceCall(visitorID, callID string)
 }
 
 const broadcastChannel = "cs:bcast"
@@ -320,6 +325,16 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			e.From = "agent:" + c.ID
 		}
 		h.fanoutVoice(ctx, e)
+		// 访客发起呼叫时额外触发 APNs 推送（侧通道，让客服 iPhone 锁屏也能弹通知）
+		if e.Type == "voice_call" && c.Kind == KindVisitor {
+			callID := ""
+			if m, ok := e.Extra.(map[string]any); ok {
+				if v, ok := m["call_id"].(string); ok {
+					callID = v
+				}
+			}
+			h.sink.OnVisitorVoiceCall(c.ID, callID)
+		}
 	default:
 		h.bizLog.Warn("unknown ws type", zap.String("type", e.Type), zap.String("conn", c.ConnID))
 	}

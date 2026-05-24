@@ -306,6 +306,26 @@ func (s *Service) pushVisitorMessageAPNs(content, vid string) {
 	)
 }
 
+// OnVisitorVoiceCall 实现 ws.MessageSink 接口：访客发起语音呼叫时被 hub 回调。
+// 走异步 push（不阻塞 hub 处理后续信令）。
+// 推送策略：让客服 iPhone 锁屏/后台时也能看到来电通知，点击拉起 App 接听。
+func (s *Service) OnVisitorVoiceCall(visitorID, callID string) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.bizLog.Error("apns_push_call_panic", zap.Any("err", r))
+			}
+		}()
+		s.pushAPNsCommon(
+			"客服系统 · 来电",
+			"访客 "+shortVid(visitorID),
+			"语音来电！请立即点开 App 接听",
+			"push_sound_call",
+			"4", // 默认提示音 4（跟 enter/message 区分）
+		)
+	}()
+}
+
 // humanizeDuration 把 duration 转人类化字符串（用于 push 显示"首次访问 N 前"）。
 func humanizeDuration(d time.Duration) string {
 	if d < time.Minute {
