@@ -33,6 +33,12 @@ type Hub struct {
 	agents sync.Map
 	byConv sync.Map // convID -> *sync.Map[connID]*Client（一会话多端：访客 + 多客服）
 
+	// pendingCalls: 进行中的语音来电 buffer（30 秒 TTL）。
+	// 解决问题：voice_call 是一次性广播；客服 iPhone 收推送拉起 App 时 WSS 重连后
+	// 会错过旧的 voice_call。register agent 时扫描 buffer，重投未过期的 call。
+	// 收到 voice_accept/reject/end 时删除对应 call_id。
+	pendingCalls sync.Map // map[callID(string)]*pendingCall
+
 	register   chan *Client
 	unregister chan *Client
 	incoming   chan incoming
@@ -162,6 +168,20 @@ func (h *Hub) handleRegister(ctx context.Context, c *Client) {
 		_ = h.sink.OnAgentConnect(ctx, c)
 		h.bizLog.Info("agent connected",
 			zap.String("conn", c.ConnID), zap.String("aid", c.ID))
+		// 重投未过期的 pending voice_call：解决「客服 iPhone 收推送拉起 App 后
+		// WSS 重连，但旧 voice_call 已经过去、App 内看不到来电浮窗」的问题
+		now := time.Now()
+		h.pendingCalls.Range(func(_, v any) bool {
+			pc := v.(*pendingCall)
+			if pc.expires.After(now) {
+				envCopy := pc.env // 值拷贝再取地址发送
+				c.Send(&envCopy)
+				h.bizLog.Info("replay pending voice_call",
+					zap.String("conn", c.ConnID), zap.String("aid", c.ID),
+					zap.String("call_id", extractCallID(&envCopy)))
+			}
+			return true
+		})
 	}
 	c.Send(&Envelope{
 		Type:     "hello",
@@ -325,19 +345,51 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			e.From = "agent:" + c.ID
 		}
 		h.fanoutVoice(ctx, e)
-		// 访客发起呼叫时额外触发 APNs 推送（侧通道，让客服 iPhone 锁屏也能弹通知）
-		if e.Type == "voice_call" && c.Kind == KindVisitor {
-			callID := ""
-			if m, ok := e.Extra.(map[string]any); ok {
-				if v, ok := m["call_id"].(string); ok {
-					callID = v
+		// voice_call: 存 buffer + 触发 APNs 推送；其它终结类信令删 buffer
+		switch e.Type {
+		case "voice_call":
+			if c.Kind == KindVisitor {
+				callID := extractCallID(e)
+				if callID != "" {
+					// 存 buffer 让晚到的 agent (推送拉起 App 后) 也能收到
+					h.pendingCalls.Store(callID, &pendingCall{
+						env:     *e, // 值拷贝，避免后续被改
+						expires: time.Now().Add(callBufferTTL),
+					})
+					// 30 秒后自动清掉
+					time.AfterFunc(callBufferTTL, func() {
+						h.pendingCalls.Delete(callID)
+					})
 				}
+				h.sink.OnVisitorVoiceCall(c.ID, callID)
 			}
-			h.sink.OnVisitorVoiceCall(c.ID, callID)
+		case "voice_accept", "voice_reject", "voice_end":
+			// 通话已被接听/拒绝/结束，buffer 不再需要重投给后到的 agent
+			if cid := extractCallID(e); cid != "" {
+				h.pendingCalls.Delete(cid)
+			}
 		}
 	default:
 		h.bizLog.Warn("unknown ws type", zap.String("type", e.Type), zap.String("conn", c.ConnID))
 	}
+}
+
+// pendingCall 待接听的来电（30 秒 TTL）。env 用值类型避免被后续 handleIncoming 改字段污染。
+type pendingCall struct {
+	env     Envelope
+	expires time.Time
+}
+
+const callBufferTTL = 30 * time.Second
+
+// extractCallID 从 envelope 的 Extra 里取 call_id
+func extractCallID(e *Envelope) string {
+	if m, ok := e.Extra.(map[string]any); ok {
+		if v, ok := m["call_id"].(string); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // fanoutVoice 语音通话信令路由：根据 To 字段精确转发；To 为空时广播给所有 agent
