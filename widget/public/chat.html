@@ -269,6 +269,37 @@
     background: #f3f4f6; border-radius: 10px; padding: 8px 10px;
     transition: background .15s, box-shadow .15s;
   }
+  /* [039] 粘贴/选附件后的预览：先放这里，点发送才真正上传 */
+  .pending-chip {
+    display: none; align-items: center; gap: 8px;
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+    padding: 6px 8px 6px 6px; margin-bottom: 6px;
+    max-width: 100%; min-height: 36px;
+  }
+  .pending-chip.is-show { display: inline-flex; }
+  .pending-chip img.thumb {
+    width: 40px; height: 40px; object-fit: cover; border-radius: 6px; flex-shrink: 0;
+  }
+  .pending-chip .file-icon {
+    width: 32px; height: 32px; border-radius: 6px; background: #eef4ff;
+    color: #2974ff; display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .pending-chip .meta {
+    flex: 1; min-width: 0; overflow: hidden;
+  }
+  .pending-chip .name {
+    font-size: 12px; color: #2c3034; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .pending-chip .size { font-size: 11px; color: #9ca3af; margin-top: 1px; }
+  .pending-chip .remove-btn {
+    width: 22px; height: 22px; border-radius: 50%; border: 0; cursor: pointer;
+    background: #f3f4f6; color: #6b7280; font-size: 14px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .pending-chip .remove-btn:hover { background: #fee2e2; color: #dc2626; }
   .input-wrap:focus-within {
     background: #fff;
     box-shadow: 0 0 0 2px rgba(74,144,255,.2);
@@ -335,6 +366,8 @@
 
     <footer>
       <div class="input-wrap">
+        <!-- [039] 粘贴 / 选附件后的预览 chip：默认隐藏，setPendingFile 时显示 -->
+        <div id="pendingChip" class="pending-chip"></div>
         <textarea id="input" placeholder="输入消息，回车发送，Shift+回车换行"></textarea>
       </div>
       <div class="actions">
@@ -1136,17 +1169,85 @@
     ws.onerror = function () { try { ws.close(); } catch {} };
   }
 
-  function sendText() {
+  // [039] 待发送文件（来自粘贴 / 附件按钮），点发送时才真正上传
+  // 单文件场景：连续粘贴/选会覆盖前一个；够用
+  var pendingFile = null;
+  var pendingChipEl = document.getElementById('pendingChip');
+
+  function fmtBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(1) + ' MB';
+  }
+
+  function setPendingFile(file) {
+    if (!file) return;
+    pendingFile = file;
+    pendingChipEl.innerHTML = '';
+    var isImage = (file.type || '').indexOf('image/') === 0;
+    if (isImage) {
+      var img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = URL.createObjectURL(file);
+      // 防内存泄漏：chip 移除时回收 blob URL
+      img.dataset.blobUrl = img.src;
+      pendingChipEl.appendChild(img);
+    } else {
+      var ic = document.createElement('span');
+      ic.className = 'file-icon';
+      ic.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+      pendingChipEl.appendChild(ic);
+    }
+    var meta = document.createElement('span');
+    meta.className = 'meta';
+    var name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = file.name || (isImage ? '图片' : '文件');
+    var size = document.createElement('div');
+    size.className = 'size';
+    size.textContent = fmtBytes(file.size || 0);
+    meta.appendChild(name);
+    meta.appendChild(size);
+    pendingChipEl.appendChild(meta);
+    var rm = document.createElement('button');
+    rm.className = 'remove-btn';
+    rm.title = '移除';
+    rm.textContent = '×';
+    rm.onclick = clearPendingFile;
+    pendingChipEl.appendChild(rm);
+    pendingChipEl.classList.add('is-show');
+  }
+
+  function clearPendingFile() {
+    // 回收图片 blob URL（防内存泄漏）
+    var thumb = pendingChipEl.querySelector('img.thumb');
+    if (thumb && thumb.dataset.blobUrl) {
+      try { URL.revokeObjectURL(thumb.dataset.blobUrl); } catch (e) {}
+    }
+    pendingFile = null;
+    pendingChipEl.innerHTML = '';
+    pendingChipEl.classList.remove('is-show');
+  }
+
+  // [039] 发送：先发文本（如果有），再发待发送文件（如果有）。任一存在就算成功发送，清输入。
+  async function sendText() {
     var text = inputEl.value.trim();
-    if (!text) return;
+    var file = pendingFile;
+    if (!text && !file) return;
     if (!alive) { setStatus('未连接', false); return; }
-    ws.send(JSON.stringify({ type: 'chat', conv: convID, content: text, ts: Date.now(), prio: 0 }));
-    var m = { sender: 'visitor', content: text, created_at: new Date().toISOString() };
-    render(m); persistMsg(m);
-    // 新消息发出：清除旧的「已读」角标（这条消息还没被读）
-    setReadIndicator(false);
-    inputEl.value = '';
-    inputEl.style.height = 'auto';
+    if (text) {
+      ws.send(JSON.stringify({ type: 'chat', conv: convID, content: text, ts: Date.now(), prio: 0 }));
+      var m = { sender: 'visitor', content: text, created_at: new Date().toISOString() };
+      render(m); persistMsg(m);
+      setReadIndicator(false);
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+    }
+    if (file) {
+      // 先清 UI（避免重复点击）；上传失败的话会由 uploadAndSendFile 内部 renderSys
+      clearPendingFile();
+      await uploadAndSendFile(file);
+    }
   }
 
   // 公共上传函数，文件选择和粘贴两个入口共用
@@ -1181,13 +1282,14 @@
     }
   }
 
-  async function onPickFile(e) {
+  // [039] 选附件：放到 pending 预览，等用户点发送
+  function onPickFile(e) {
     var file = e.target.files && e.target.files[0];
-    await uploadAndSendFile(file);
+    if (file) setPendingFile(file);
     e.target.value = '';
   }
 
-  // 输入框监听 paste：剪贴板里有 file（图片截图 / 文件复制）→ 直接上传发出
+  // [039] 粘贴：剪贴板里有 file（图片截图 / 文件复制）→ 放到 pending 预览，不立即发送
   // 普通文本粘贴不拦截，仍走默认 textarea 行为
   inputEl.addEventListener('paste', function (e) {
     var items = e.clipboardData && e.clipboardData.items;
@@ -1196,7 +1298,7 @@
       if (items[i].kind === 'file') {
         e.preventDefault();
         var f = items[i].getAsFile();
-        if (f) uploadAndSendFile(f);
+        if (f) setPendingFile(f);
         break;
       }
     }

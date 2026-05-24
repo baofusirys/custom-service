@@ -4,6 +4,45 @@
 
 ---
 
+## [039] 2026-05-25 01:25 — widget 粘贴/附件改为预览暂存，点发送才上传（不再粘贴即发）
+
+**起因 / 需求**
+爷爷反馈：访客 widget 在输入框粘贴图片/文件时，现在是粘贴即立刻上传发送，没机会反悔 / 没机会再补充文字。改成 IM 标准行为：**粘贴后先放到输入框上方预览，用户确认后点发送才真正上传发送**。
+
+**改了什么**（修改 1 文件 widget/public/chat.html）
+
+- HTML：`.input-wrap` 内 textarea 上方新增 `<div id="pendingChip" class="pending-chip">` 预览容器
+- CSS：新增 `.pending-chip` 样式（白底圆角，灰边框，40×40 缩略图 / 文件图标 + 文件名 + 大小 + × 移除按钮；`.is-show` 类控制显示）
+- JS：
+  - 新增模块级 `pendingFile` 变量 + `pendingChipEl` 引用
+  - 新增 `fmtBytes(n)` 格式化文件大小（B / KB / MB）
+  - 新增 `setPendingFile(file)`：渲染预览 chip（图片用 URL.createObjectURL blob 缩略图 + dataset.blobUrl 标记便于回收；非图片用文件图标）；显示 chip
+  - 新增 `clearPendingFile()`：回收图片 blob URL 防内存泄漏 + 清 DOM + 隐藏 chip
+  - `sendText()` 重构：先发文本（如果有）→ 再发 pending file（如果有）；任一存在就算"有内容可发"；上传前先清 UI 防止用户重复点
+  - `onPickFile`（附件按钮）从 `await uploadAndSendFile(file)` 改为 `setPendingFile(file)`
+  - paste 监听从 `uploadAndSendFile(f)` 改为 `setPendingFile(f)`
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 访客截屏后 Ctrl+V | 立刻上传发送，没机会反悔 | 输入框上方出现 40×40 缩略图 chip + 文件名 + 大小 + × 按钮，可补充文字一起发，点发送才上传 |
+| 访客点附件按钮选文件 | 同上立即发 | 同上预览 |
+| × 按钮 | 不存在 | 单击移除 pending；如果点错了或想换附件直接覆盖（再粘一次） |
+| 点发送 / 回车 | 只发文本 | 先发文本（如果有）→ 再上传 pending（如果有）；二者都没就 noop |
+
+**触发场景与边界 + 验证方式**
+
+- **内存安全**：图片 chip 用 `URL.createObjectURL(file)` 生成 blob URL，清除时 `URL.revokeObjectURL(url)` 回收防内存泄漏
+- **覆盖式单文件**：连续粘贴 / 选附件会覆盖前一个 pending（够用）；不做多文件队列以保持 UI 简单
+- **失败提示保留**：`uploadAndSendFile` 内部 try/catch 仍然 renderSys 失败提示；调用前已 `clearPendingFile` 避免用户重复点（失败后用户可重新粘贴）
+- **空内容防御**：sendText 入口 `if (!text && !file) return;` 防止误触
+- **不影响**：admin / mobile_app 的输入逻辑不动；widget 的语音通话 / 图片 lightbox / 文本聊天功能不动
+- **文本粘贴**：纯文本粘贴不拦截（`items[i].kind === 'file'` 才进入），保留原 textarea 行为
+- **验证**：访客 widget 截屏 + Ctrl+V → 出现缩略图 chip → 输入框输入「这是截图」→ 点发送 → 应该先发文本「这是截图」再发图片，两条消息
+
+---
+
 ## [038] 2026-05-25 00:55 — widget 图片查看器升级到宿主页全屏（突破 iframe 大小限制）
 
 **起因 / 需求**
