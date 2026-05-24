@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../api/models.dart';
+import '../pages/image_viewer_page.dart';
 
 class MessageBubble extends StatelessWidget {
   final Message msg;
@@ -77,15 +78,19 @@ class MessageBubble extends StatelessWidget {
   Widget _content() {
     final hasMedia = msg.mediaUrl.isNotEmpty;
     if (hasMedia && msg.mediaKind == 'image') {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Image.network(
-          backendUrl + msg.mediaUrl,
-          width: 220,
-          fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => Text(msg.mediaName, style: _textStyle()),
+      return Builder(builder: (ctx) => GestureDetector(
+        // 点击图片 → 全屏图片查看器 (photo_view: 双指缩放 / 拖动 / 双击放大)
+        onTap: () => ImageViewerPage.open(ctx, backendUrl + msg.mediaUrl),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.network(
+            backendUrl + msg.mediaUrl,
+            width: 220,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => Text(msg.mediaName, style: _textStyle()),
+          ),
         ),
-      );
+      ));
     }
     if (hasMedia) {
       return Row(

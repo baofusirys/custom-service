@@ -145,6 +145,32 @@
   .msg-line.mine .bubble-copy:hover { background: rgba(255,255,255,.32); color: #fff; }
   .bubble-copy--done { background: #10b981 !important; color: #fff !important; opacity: 1 !important; }
 
+  /* ====== 图片 lightbox（点聊天消息里的图片全屏放大查看） ====== */
+  .img-lightbox {
+    position: fixed; inset: 0; z-index: 99999;
+    background: rgba(0,0,0,.88);
+    display: flex; align-items: center; justify-content: center;
+    cursor: zoom-out;
+    animation: img-lightbox-fade .15s ease-out;
+  }
+  @keyframes img-lightbox-fade { from { opacity: 0; } to { opacity: 1; } }
+  .img-lightbox img {
+    max-width: 92vw; max-height: 92vh;
+    object-fit: contain; cursor: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    border-radius: 4px;
+  }
+  .img-lightbox-close {
+    position: absolute; top: 12px; right: 20px;
+    color: #fff; font-size: 36px; line-height: 1;
+    cursor: pointer; user-select: none;
+    width: 40px; height: 40px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 50%; background: rgba(255,255,255,.12);
+    transition: background .15s;
+  }
+  .img-lightbox-close:hover { background: rgba(255,255,255,.24); }
+
   /* ====== 语音通话浮窗 ====== */
   .voice-panel {
     position: absolute; inset: 0;
@@ -774,7 +800,7 @@
       var img = document.createElement('img');
       img.className = 'img-msg';
       img.src = httpBase + mediaURL;
-      img.onclick = function () { window.open(httpBase + mediaURL, '_blank'); };
+      img.onclick = function () { openImageLightbox(httpBase + mediaURL); };
       b.appendChild(img);
     } else if (mediaURL) {
       var a = document.createElement('a');
@@ -818,6 +844,35 @@
       b.appendChild(cp);
     }
     return b;
+  }
+
+  // 图片 lightbox：点击聊天消息里的图片，全屏黑底大图查看。点 overlay/ESC/× 关闭。
+  // 不依赖任何外部库，~30 行手写。
+  function openImageLightbox(src) {
+    var existing = document.getElementById('imgLightbox');
+    if (existing) existing.parentNode.removeChild(existing);
+    var overlay = document.createElement('div');
+    overlay.id = 'imgLightbox';
+    overlay.className = 'img-lightbox';
+    var imgEl = document.createElement('img');
+    imgEl.src = src;
+    imgEl.alt = '';
+    var closeBtn = document.createElement('span');
+    closeBtn.className = 'img-lightbox-close';
+    closeBtn.textContent = '×';
+    overlay.appendChild(imgEl);
+    overlay.appendChild(closeBtn);
+    document.body.appendChild(overlay);
+    function close() {
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      document.removeEventListener('keydown', onKey);
+    }
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    overlay.onclick = close;
+    // 防止点图片本身关闭（用户可能想长按保存）
+    imgEl.onclick = function (e) { e.stopPropagation(); };
+    closeBtn.onclick = close;
+    document.addEventListener('keydown', onKey);
   }
 
   // 复制到剪贴板：优先 Clipboard API，老浏览器 fallback execCommand

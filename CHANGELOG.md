@@ -4,6 +4,49 @@
 
 ---
 
+## [033] 2026-05-24 22:00 — 三端聊天图片可点击全屏查看器（widget / admin / App）
+
+**起因 / 需求**
+之前点聊天里的图片直接 window.open 新标签打开原图，体验粗糙。爷爷要个成熟的图片查看器，三端通用。
+
+**改了什么**（新增 1 文件 + 修改 4 文件）
+
+- `widget/public/chat.html`
+  - 图片点击从 `window.open` 改 `openImageLightbox(src)`
+  - 新增 `openImageLightbox(src)` 函数：全屏黑色 overlay + 中央放大图片 + 右上角 × 关闭按钮；overlay 点击 / ESC / × 都关闭；图片本身阻止冒泡（防误关，方便长按保存）
+  - 新增 `.img-lightbox` / `.img-lightbox-close` CSS：position:fixed inset:0 z:99999 + 92vw/vh 上限 + 淡入动画
+  - 纯 30 行手写，不依赖任何外部库
+
+- `admin/src/views/Console.vue`
+  - 图片消息从 `<img class="bubble-img">` 改成 `<el-image :preview-src-list="[url]" preview-teleported hide-on-click-modal>`
+  - 用 Element Plus 内置的图片预览器：支持缩放、旋转、上一张/下一张、键盘操作
+
+- `mobile_app/pubspec.yaml`：加 `photo_view: ^0.15.0`
+
+- `mobile_app/lib/pages/image_viewer_page.dart` **新增**
+  - PhotoView 组件：双指缩放 / 拖动 / 双击放大（minScale=contained, maxScale=covered*3）
+  - 透明 Scaffold + 半透明黑底 barrierColor
+  - 右上角 × 关闭按钮
+  - 静态 `open(context, url)` 方法封装路由 push
+
+- `mobile_app/lib/widgets/message_bubble.dart`
+  - 图片消息外加 GestureDetector.onTap → `ImageViewerPage.open(ctx, fullUrl)`
+  - import image_viewer_page
+
+**业务流程**
+
+| 端 | 体验 |
+|---|---|
+| widget 访客 | 点聊天图片 → 全屏黑底大图 → 双指/双击不缩放（纯展示）+ 长按可保存原图 |
+| admin Web 客服 | 点聊天图片 → Element Plus 标准预览：缩放、旋转、键盘← → 切换、ESC 关 |
+| iPhone App | 点聊天图片 → 全屏 + 双指缩放 + 拖动 + 双击放大；右上角 × 关闭 |
+
+**验证**
+- 访客发图片 → 三端都能看到、能点开全屏 ✓
+- iOS App 加 photo_view 依赖（~200KB 增量，比 webrtc 小很多）
+
+---
+
 ## [032] 2026-05-24 21:40 — iPhone 通话中免提/听筒切换按钮
 
 **起因 / 需求**

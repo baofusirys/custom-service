@@ -754,7 +754,16 @@ function voiceCleanup() {
                   :class="{ 'bubble--mine': isMineGroup(g) }"
                   :title="fmtAbs(m.created_at)">
                   <template v-if="mediaURL(m)">
-                    <img v-if="mediaKind(m) === 'image'" :src="mediaURL(m)" class="bubble-img" />
+                    <el-image
+                      v-if="mediaKind(m) === 'image'"
+                      :src="mediaURL(m)"
+                      :preview-src-list="[mediaURL(m)]"
+                      :initial-index="0"
+                      preview-teleported
+                      hide-on-click-modal
+                      fit="cover"
+                      class="bubble-img"
+                    />
                     <a v-else :href="mediaURL(m)" target="_blank" class="bubble-file">
                       <el-icon><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/></svg></el-icon>
                       <span>{{ mediaName(m) }}</span>

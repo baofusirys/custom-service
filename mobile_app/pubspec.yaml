@@ -27,6 +27,8 @@ dependencies:
   # WebRTC：双端语音通话（visitor 拨号、agent/App 接听）
   # 大依赖 ~50MB iOS framework，但只在通话时占用麦克风+音频
   flutter_webrtc: ^0.11.7
+  # 图片查看器（聊天记录里的图片点开 → 全屏 + 缩放 + 拖动）
+  photo_view: ^0.15.0
   # 本地通知（[022] 再加，需要 Android core library desugaring）
   # flutter_local_notifications: ^17.0.0
   # 推送（[022] 再加）
