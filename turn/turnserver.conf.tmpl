@@ -28,10 +28,10 @@ cert=/etc/coturn/certs/cert.pem
 pkey=/etc/coturn/certs/key.pem
 
 # ---- 安全加固：防 SSRF / 防滥用 ----
-# 禁止 TURN client 让我们的服务器去连接内网 / 保留 IP，防内网渗透
-no-loopback-peers
-no-multicast-peers
+# 禁止 TURN client 让我们的服务器去连接内网 / 保留 IP / 多播，防内网渗透
+# (no-loopback-peers / no-multicast-peers 在 4.6 已废弃，统一用 denied-peer-ip 黑名单)
 denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=224.0.0.0-239.255.255.255
 denied-peer-ip=10.0.0.0-10.255.255.255
 denied-peer-ip=100.64.0.0-100.127.255.255
 denied-peer-ip=127.0.0.0-127.255.255.255
@@ -77,8 +77,7 @@ no-cli
 fingerprint
 # stale-nonce：600 秒 nonce 过期，防重放
 stale-nonce=600
-# 不启用 mobility（M-flag），减少攻击面
-no-mobility
+# (mobility 默认就是关的，4.6 已无 no-mobility 配置项)
 
 # ---- 性能 ----
 # 不启用 tcp-relay（除非需要 TURN-over-TCP relay，浪费带宽）
@@ -88,6 +87,5 @@ no-mobility
 # 不设置 cipher-list，使用 OpenSSL 默认（系统会自动选 TLS1.2+ 强加密套件）
 
 # ---- 进程 ----
-# 让 CoTURN 主进程在容器内以非 root 运行（基镜像已经 USER turnserver）
-proc-user=turnserver
-proc-group=turnserver
+# 容器 USER 已经在 Dockerfile 处理（coturn/coturn:4.6 基镜像默认非 root），
+# 不在 conf 里指定 proc-user 避免镜像内无该 user 时 fail 启动
