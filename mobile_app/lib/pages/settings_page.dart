@@ -21,7 +21,21 @@ class _SettingsPageState extends State<SettingsPage> {
       text: '您好，欢迎光临！请问有什么可以帮您？');
   final _widgetTitle = TextEditingController(text: '在线客服');
 
+  // luckfast APNs 推送（跟 Web admin Settings 完全同步的 4 个字段）
+  final _pushUserId = TextEditingController();
+  final _pushUserKey = TextEditingController();
+  String _pushSoundEnter = '1';
+  String _pushSoundMessage = '9';
+  bool _showPushKey = false;
+
   final _soundOptions = listSounds();
+  // luckfast 推送提示音：0-15 共 16 种
+  final _pushSoundOptions = List<Map<String, String>>.generate(16, (i) {
+    return {
+      'value': '$i',
+      'label': i == 0 ? '0 - 默认' : '$i - 提示音 $i',
+    };
+  });
 
   @override
   void initState() {
@@ -33,6 +47,8 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _greetingText.dispose();
     _widgetTitle.dispose();
+    _pushUserId.dispose();
+    _pushUserKey.dispose();
     super.dispose();
   }
 
@@ -50,6 +66,10 @@ class _SettingsPageState extends State<SettingsPage> {
       if (s['widget_title'] != null && s['widget_title'].toString().isNotEmpty) {
         _widgetTitle.text = s['widget_title'].toString();
       }
+      _pushUserId.text = (s['push_user_id'] ?? '').toString();
+      _pushUserKey.text = (s['push_user_key'] ?? '').toString();
+      _pushSoundEnter = (s['push_sound_enter'] ?? '1').toString();
+      _pushSoundMessage = (s['push_sound_message'] ?? '9').toString();
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('拉取设置失败：$e')));
     }
@@ -66,6 +86,10 @@ class _SettingsPageState extends State<SettingsPage> {
         'greeting_enabled': _greetingEnabled ? 'true' : 'false',
         'greeting_text': _greetingText.text,
         'widget_title': _widgetTitle.text,
+        'push_user_id': _pushUserId.text.trim(),
+        'push_user_key': _pushUserKey.text.trim(),
+        'push_sound_enter': _pushSoundEnter,
+        'push_sound_message': _pushSoundMessage,
       });
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保存成功')));
     } catch (e) {
@@ -161,7 +185,83 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
           ),
+          _section('iPhone APNs 推送（可选）'),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: TextField(
+              controller: _pushUserId,
+              maxLength: 64,
+              decoration: const InputDecoration(
+                labelText: 'Push User ID',
+                helperText: '「消息推送助手」App 获取，两项都填才启用推送',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+            child: TextField(
+              controller: _pushUserKey,
+              maxLength: 64,
+              obscureText: !_showPushKey,
+              decoration: InputDecoration(
+                labelText: 'Push User Key',
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: Icon(_showPushKey ? Icons.visibility_off : Icons.visibility),
+                  onPressed: () => setState(() => _showPushKey = !_showPushKey),
+                ),
+              ),
+            ),
+          ),
+          _pushSoundTile(
+            title: '新访客提示音',
+            hint: '新访客打开 widget 时 iPhone 推送音（0-15 共 16 种）',
+            value: _pushSoundEnter,
+            onChanged: (v) => setState(() => _pushSoundEnter = v),
+          ),
+          _pushSoundTile(
+            title: '新消息提示音',
+            hint: '已有会话中访客发消息时 iPhone 推送音',
+            value: _pushSoundMessage,
+            onChanged: (v) => setState(() => _pushSoundMessage = v),
+          ),
           const SizedBox(height: 24),
+        ],
+      ),
+    );
+  }
+
+  Widget _pushSoundTile({
+    required String title,
+    required String hint,
+    required String value,
+    required ValueChanged<String> onChanged,
+  }) {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          Text(hint, style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+          const SizedBox(height: 8),
+          DropdownButtonFormField<String>(
+            initialValue: value,
+            isDense: true,
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            ),
+            items: _pushSoundOptions.map((o) =>
+              DropdownMenuItem<String>(value: o['value'], child: Text(o['label']!))
+            ).toList(),
+            onChanged: (v) {
+              if (v != null) onChanged(v);
+            },
+          ),
         ],
       ),
     );

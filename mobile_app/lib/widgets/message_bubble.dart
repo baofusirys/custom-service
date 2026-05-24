@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../api/models.dart';
 
@@ -23,23 +24,28 @@ class MessageBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
-          Container(
-            constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.74),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-            decoration: BoxDecoration(
-              color: isMine
-                  ? const Color(0xFF2974FF)
-                  : (isSys ? const Color(0xFFF3F4F6) : Colors.white),
-              borderRadius: BorderRadius.only(
-                topLeft: const Radius.circular(16),
-                topRight: const Radius.circular(16),
-                bottomLeft: Radius.circular(isMine ? 16 : 4),
-                bottomRight: Radius.circular(isMine ? 4 : 16),
+          // 长按消息气泡 → 复制内容到剪贴板 + SnackBar 提示「已复制」
+          // 文本消息复制 content；文件/图片消息复制完整 URL
+          GestureDetector(
+            onLongPress: () => _copyMessage(context),
+            child: Container(
+              constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.74),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: isMine
+                    ? const Color(0xFF2974FF)
+                    : (isSys ? const Color(0xFFF3F4F6) : Colors.white),
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(16),
+                  topRight: const Radius.circular(16),
+                  bottomLeft: Radius.circular(isMine ? 16 : 4),
+                  bottomRight: Radius.circular(isMine ? 4 : 16),
+                ),
+                border: isMine ? null : Border.all(color: const Color(0xFFE5E7EB)),
+                boxShadow: const [BoxShadow(color: Color(0x0A0F172A), blurRadius: 2, offset: Offset(0, 1))],
               ),
-              border: isMine ? null : Border.all(color: const Color(0xFFE5E7EB)),
-              boxShadow: const [BoxShadow(color: Color(0x0A0F172A), blurRadius: 2, offset: Offset(0, 1))],
+              child: _content(),
             ),
-            child: _content(),
           ),
           if (showRead)
             Padding(
@@ -47,6 +53,23 @@ class MessageBubble extends StatelessWidget {
               child: Text('已读', style: TextStyle(fontSize: 11, color: Colors.grey[600])),
             ),
         ],
+      ),
+    );
+  }
+
+  // 长按复制：文本优先，文件/图片复制完整 URL 方便用户在浏览器粘贴打开
+  void _copyMessage(BuildContext context) {
+    String text = msg.content;
+    if (text.isEmpty && msg.mediaUrl.isNotEmpty) {
+      text = backendUrl + msg.mediaUrl;
+    }
+    if (text.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('已复制'),
+        duration: Duration(milliseconds: 1000),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }

@@ -4,6 +4,86 @@
 
 ---
 
+## [028] 2026-05-24 15:40 — 三件套小优化：访客端粘贴文件/图片 + App 端设置同步 Web + 三端消息复制按钮
+
+**起因 / 需求**
+
+爷爷一次提 4 件：
+1. 访客端输入框支持粘贴文件/图片（截图粘贴常用）
+2. App 端系统设置跟 Web 客服工作台同步——之前 App 缺 [027] 加的 4 个 push 字段
+3. 三端消息气泡都加复制图标（一键复制消息内容）
+4. 双端语音通话（WebRTC + 信令）—— **工作量大，留 [029] 单独做**
+
+本次 [028] 完成前 3 件。
+
+**改了什么 / 加了什么**（修改 4 文件）
+
+### #1 三端输入框粘贴文件/图片
+- `widget/public/chat.html`
+  - 抽出公共 `uploadAndSendFile(file)` 函数（原 `onPickFile` 逻辑复用）
+  - 给 `<textarea id="input">` 绑 `paste` 事件：剪贴板 `kind==='file'` → `preventDefault` + `getAsFile()` → 上传；纯文本不拦截
+- `admin/src/views/Console.vue`
+  - 同样抽出 `uploadAndSendFile(file)`、新增 `onPasteDraft(e)` 函数
+  - `el-input` textarea 加 `@paste.native="onPasteDraft"`，placeholder 也提示"粘贴可上传图片/文件"
+
+### #2 mobile_app Settings 跟 Web 同步 4 个 push 字段
+- `mobile_app/lib/pages/settings_page.dart`
+  - 加 controller：`_pushUserId` / `_pushUserKey`、state：`_pushSoundEnter` / `_pushSoundMessage` / `_showPushKey`
+  - 加 `_pushSoundOptions`：0-15 共 16 种选项（跟 admin Web 完全一致）
+  - `_load()` 拉这 4 个字段；`_save()` 一起发回 settings；`dispose()` 释放 controller
+  - UI 加新区段「iPhone APNs 推送（可选）」：Push User ID 输入框 + Push User Key 输入框（带密文/明文切换图标按钮）+ 新访客提示音下拉 + 新消息提示音下拉
+  - 新增 helper `_pushSoundTile()` 跟现有 `_soundTile` 风格统一
+
+### #3 三端消息气泡复制按钮
+- `admin/src/views/Console.vue`
+  - 模板：每个 `.bubble` 加 `<span class="bubble-copy">` 含 SVG 复制图标
+  - 函数：`copyMessage(m)` 优先用 `navigator.clipboard.writeText`，老浏览器 fallback `document.execCommand('copy')`，复制后 `ElMessage.success('已复制')`
+  - 样式：`.bubble-copy` 绝对定位右上角，opacity 0 → hover 气泡时显示；mine 气泡用半透明白色，theirs 用半透明深色
+- `widget/public/chat.html`
+  - `buildBubble()` 内部追加 `bubble-copy` span（带 SVG 图标）+ onclick 调 `copyToClipboard(text, anchorEl)`
+  - 加 `copyToClipboard()` 函数：同上的 Clipboard API + execCommand fallback；复制成功后短暂绿色高亮 1.2s
+  - 样式：`.bubble-copy` hover 显示 + active 显示（移动端 touch 友好）+ `.bubble-copy--done` 绿色反馈
+- `mobile_app/lib/widgets/message_bubble.dart`
+  - import `package:flutter/services.dart` 用 Clipboard
+  - 用 `GestureDetector(onLongPress: ...)` 包裹 Container 气泡
+  - 新增 `_copyMessage(context)`：文本优先，文件/图片复制完整 URL；`Clipboard.setData` + `ScaffoldMessenger.showSnackBar('已复制', 1s)`
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+|---|---|---|
+| 访客 / 客服在输入框 Ctrl+V 粘贴截图 | 啥也没发生 | **自动上传 + 发出图片消息** |
+| App 端管理员想配 push 凭据 | 必须开浏览器进 admin Web | **App 系统设置页直接填**（跟 Web 实时双向同步）|
+| 用户想复制对方发来的内容 | Web 端要选中+Ctrl+C；App 端没办法（消息气泡不能选中） | **三端都有一键复制**：Web hover 显示按钮；App 长按弹"已复制"提示 |
+
+**触发场景与边界 + 验证方式**
+
+- 粘贴触发：剪贴板 `items` 含 `kind==='file'` 才上传；纯文本粘贴正常进文本框
+- 粘贴上传走 `/api/upload`（跟附件按钮同一通道），后端限流和大小限制都生效（max 25MB / BACKEND_MAX_UPLOAD_MB）
+- 复制按钮：文本消息复制 `content`；文件/图片消息复制**完整 URL**（含 https://maihaocs.icu 前缀，方便粘贴到浏览器打开）
+- Clipboard API 需要 HTTPS 上下文，我们 maihaocs.icu 已 HTTPS；老浏览器 fallback execCommand
+- App 长按手势：原本没有别的长按处理，新增的 `onLongPress` 不冲突
+- 验证 1：访客 widget 输入框 Ctrl+V 粘贴截图 → 应自动上传 ✓
+- 验证 2：admin 输入框粘贴 → 同上
+- 验证 3：App 系统设置页底部应看到「iPhone APNs 推送」分组（4 个字段） ✓
+- 验证 4：admin/widget 消息气泡 hover → 右上角出现复制图标，点击「已复制」反馈 ✓
+- 验证 5：App 长按消息气泡 → 底部 SnackBar 弹「已复制」
+
+**安全 / 健壮性**
+
+- 粘贴的文件直接走 `/api/upload`：服务端类型/大小校验已就位，没绕过任何安全机制
+- copyMessage 拿到的文本不再二次处理（避免 XSS 注入到剪贴板没意义，剪贴板是字符串）
+- App 长按 `_copyMessage` 加空字符串 guard，无内容直接 return
+- Clipboard API 失败时浏览器端 fallback 不影响业务
+
+**遗留 / 已知**
+
+- #4 双端语音通话 WebRTC 留 [029]：信令协议 + 访客端拨号 + admin/App 接听 + iOS 麦克风权限 + STUN 配置；工作量约半天到一天
+- 复制按钮在窄屏 admin 移动端可能跟消息时间 tooltip 重叠，后续可调位置
+- App 长按复制如果 widget tree 里别处也有 onLongPress 可能冲突；目前只在 ChatPage 内使用 MessageBubble，没问题
+
+---
+
 ## [027] 2026-05-24 15:00 — luckfast APNs 中转推送集成 + 点推送拉起 App + 真新访客/老客户回访区分
 
 **起因 / 需求**

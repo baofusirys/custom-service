@@ -132,10 +132,9 @@ function sendText() {
   nextTick(scrollToBottom)
 }
 
-async function pickFile(e) {
-  if (!activeConv.value) return
-  const file = e.target.files?.[0]
-  if (!file) return
+// 公共上传函数，附件按钮和粘贴事件共用
+async function uploadAndSendFile(file) {
+  if (!activeConv.value || !file) return
   const fd = new FormData()
   fd.append('file', file)
   fd.append('uploader', 'agent')
@@ -157,7 +156,49 @@ async function pickFile(e) {
     })
     nextTick(scrollToBottom)
   } catch {}
+}
+
+async function pickFile(e) {
+  const file = e.target.files?.[0]
+  await uploadAndSendFile(file)
   e.target.value = ''
+}
+
+// 复制消息内容到剪贴板：文本消息复制 m.content；文件/图片消息复制 URL
+function copyMessage(m) {
+  const text = m.content || (m.media_url?.String || m.media_url || '')
+  if (!text) return
+  const writeText = (s) => {
+    if (navigator.clipboard?.writeText) {
+      return navigator.clipboard.writeText(s)
+    }
+    // 老浏览器 fallback：临时 textarea + execCommand
+    const ta = document.createElement('textarea')
+    ta.value = s; ta.style.position = 'fixed'; ta.style.left = '-9999px'
+    document.body.appendChild(ta); ta.select()
+    try { document.execCommand('copy') } catch {}
+    document.body.removeChild(ta)
+    return Promise.resolve()
+  }
+  writeText(text).then(() => {
+    ElMessage.success({ message: '已复制', duration: 1500, offset: 60 })
+  }).catch(() => {
+    ElMessage.warning({ message: '复制失败', duration: 1500 })
+  })
+}
+
+// 输入框粘贴：剪贴板含 file（截图 / 复制的文件）→ 直接上传发出；纯文本不拦截
+function onPasteDraft(e) {
+  const items = e.clipboardData?.items
+  if (!items) return
+  for (const it of items) {
+    if (it.kind === 'file') {
+      e.preventDefault()
+      const f = it.getAsFile()
+      if (f) uploadAndSendFile(f)
+      break
+    }
+  }
 }
 
 function scrollToBottom() {
@@ -532,6 +573,15 @@ onUnmounted(() => {
                     </a>
                   </template>
                   <span v-if="m.content" class="bubble-text">{{ m.content }}</span>
+                  <!-- 复制按钮：文本消息显示。点击复制消息内容到剪贴板 -->
+                  <span
+                    v-if="m.content || mediaURL(m)"
+                    class="bubble-copy"
+                    :class="{ 'bubble-copy--mine': isMineGroup(g) }"
+                    title="复制"
+                    @click.stop="copyMessage(m)">
+                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  </span>
                 </div>
                 <!-- 已读角标：仅在「自己最新那条消息已被对方读了」时显示 -->
                 <div
@@ -551,8 +601,9 @@ onUnmounted(() => {
           type="textarea"
           :rows="3"
           resize="none"
-          placeholder="回车发送，Shift+回车换行"
-          @keydown.enter.exact.prevent="sendText" />
+          placeholder="回车发送，Shift+回车换行，粘贴可上传图片/文件"
+          @keydown.enter.exact.prevent="sendText"
+          @paste.native="onPasteDraft" />
         <div class="chat-footer-actions">
           <div>
             <el-button :icon="undefined" plain size="small" @click="fileInput.click()">附件 / 图片</el-button>
@@ -611,12 +662,27 @@ onUnmounted(() => {
 .msg-stack-name { font-size: 12px; color: #909399; padding: 0 4px; }
 
 .bubble {
+  position: relative;
   padding: 10px 14px; border-radius: 8px;
   background: #fff; border: 1px solid #e6e6e6; color: #303133;
   word-break: break-word; white-space: pre-wrap; line-height: 1.5;
   font-size: 14px; box-shadow: 0 1px 2px rgba(0,0,0,.03);
 }
 .bubble--mine { background: #409EFF; color: #fff; border-color: #409EFF; }
+/* 复制按钮：默认隐藏，hover 气泡时出现 */
+.bubble-copy {
+  position: absolute; top: 6px; right: 6px;
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 4px;
+  opacity: 0; transition: opacity .15s, background .15s;
+  cursor: pointer;
+  color: #909399; background: rgba(255,255,255,.85);
+}
+.bubble:hover .bubble-copy { opacity: 1; }
+.bubble-copy:hover { background: rgba(0,0,0,.06); color: #409EFF; }
+.bubble-copy--mine { color: #fff; background: rgba(255,255,255,.18); }
+.bubble-copy--mine:hover { background: rgba(255,255,255,.32); color: #fff; }
 .bubble-text { display: block; }
 .bubble-img { max-width: 240px; max-height: 240px; border-radius: 4px; display: block; cursor: pointer; }
 .bubble-file {
