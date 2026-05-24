@@ -385,12 +385,8 @@
   closeBtn.onclick = function () { parent.postMessage({ __cs: 1, type: 'close' }, '*'); };
   fileBtn.onclick = function () { fileInput.click(); };
   fileInput.onchange = onPickFile;
-  // 语音通话按钮 + 挂断按钮 + 远端 audio 绑定
-  var voiceBtn = document.getElementById('voiceBtn');
-  var voiceHangBtn = document.getElementById('voiceHangBtn');
-  voice.remoteAudio = document.getElementById('voiceRemoteAudio');
-  if (voiceBtn) voiceBtn.onclick = function () { voiceStart(); };
-  if (voiceHangBtn) voiceHangBtn.onclick = function () { voiceEnd('您挂断了'); };
+  // 语音通话按钮 / 挂断按钮 / 远端 audio 绑定 —— 放到 voice 模块定义之后，
+  // 见 wireVoiceButtons()，调用时机在 voice 模块声明结束后
   sendBtn.onclick = sendText;
   inputEl.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
@@ -591,6 +587,15 @@
       case 'voice_end':    voiceOnEnd(env); break;
     }
   };
+
+  // 按钮绑定 + DOM 引用（必须在 var voice = {...} 之后，否则 hoist 后 voice 是 undefined）
+  (function wireVoiceButtons() {
+    var voiceBtn = document.getElementById('voiceBtn');
+    var voiceHangBtn = document.getElementById('voiceHangBtn');
+    voice.remoteAudio = document.getElementById('voiceRemoteAudio');
+    if (voiceBtn) voiceBtn.onclick = function () { voiceStart(); };
+    if (voiceHangBtn) voiceHangBtn.onclick = function () { voiceEnd('您挂断了'); };
+  })();
 
   // ====== 通知声音（真实录制 WAV 文件） ======
   // 访客端只听 visitor 系列 3 种音色，加 none。文件在 widget/public/sounds/，
