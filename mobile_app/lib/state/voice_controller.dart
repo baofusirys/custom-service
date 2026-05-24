@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../api/http_client.dart';
+import '../api/sound.dart' show playRingLoop, stopRingLoop;
 
 /// 语音通话状态机：跟 admin/src/views/Console.vue 完全对齐。
 ///   - idle：空闲，没在通话
@@ -82,6 +83,9 @@ class VoiceController extends ChangeNotifier {
     callerLabel = vid.length >= 6 ? '访客 ${vid.substring(0, 6)}' : '访客';
     state = VoiceState.incoming;
     statusText = '语音来电…';
+    // [036] 来电铃声循环；accept / reject / _end / _cleanup 任何路径都会停
+    // App 在前台：直接触发；App 在后台：APNs 推送拉起 App 后 buffer 重投 voice_call 再触发
+    playRingLoop();
     _resetTimer(const Duration(seconds: 30), () {
       if (state == VoiceState.incoming) _end('未接听', notify: false);
     });
@@ -100,6 +104,7 @@ class VoiceController extends ChangeNotifier {
   Future<void> accept() async {
     if (state != VoiceState.incoming) return;
     _stopTimer();
+    stopRingLoop();  // [036] 接听立刻停铃声（accept 路径不进 _cleanup）
     // 接听前刷一次 TURN 凭证，让 createPeerConnection 用最新 iceServers（含 TURN）
     await _refreshIceServers();
     try {
@@ -274,6 +279,7 @@ class VoiceController extends ChangeNotifier {
   }
 
   void _cleanup() {
+    stopRingLoop();  // [036] 统一停铃声：reject / _end / dispose 都进这里
     _pc?.close();
     _pc = null;
     _localStream?.getTracks().forEach((t) => t.stop());

@@ -6,7 +6,7 @@ import relativeTime from 'dayjs/plugin/relativeTime'
 import 'dayjs/locale/zh-cn'
 import http from '../api/http'
 import { AgentWS } from '../api/ws'
-import { playSound, unlockAudio } from '../api/sound'
+import { playSound, unlockAudio, playRingLoop, stopRingLoop } from '../api/sound'
 import { useSession } from '../store/session'
 
 dayjs.extend(relativeTime)
@@ -526,7 +526,8 @@ function voiceOnIncoming(env) {
   voiceCallerLabel.value = conv?.identifier || '访客 ' + vid.slice(0, 6)
   voiceState.value = 'incoming'
   voiceStatusText.value = '语音来电…'
-  playSound(agentSound.value)  // 来电响一下
+  // [036] 来电铃声循环播放，accept/reject/voiceEnd 都会进 voiceCleanup → stopRingLoop
+  playRingLoop()
   // 30 秒未接听自动错过
   if (voice.timer) clearTimeout(voice.timer)
   voice.timer = setTimeout(() => {
@@ -545,6 +546,8 @@ function voiceOnTaken(env) {
 async function voiceAccept() {
   if (voiceState.value !== 'incoming') return
   if (voice.timer) { clearTimeout(voice.timer); voice.timer = null }
+  // [036] 接听后停铃声；voiceCleanup 不会在 accept 路径触发（state 走 accepting→talking 直到挂断）
+  stopRingLoop()
   // 接听前刷一次 TURN 凭证（~50ms）；失败不阻塞，会用默认 STUN
   await fetchTurnCredential()
   try {
@@ -670,6 +673,8 @@ function voiceEnd(reason, notifyPeer) {
 }
 
 function voiceCleanup() {
+  // [036] 统一停来电铃声（任何挂断 / 接听 / 被别的客服抢接 路径都会进这里）
+  stopRingLoop()
   if (voice.pc) { try { voice.pc.close() } catch {} voice.pc = null }
   if (voice.localStream) {
     voice.localStream.getTracks().forEach(t => t.stop())

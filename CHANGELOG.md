@@ -4,6 +4,71 @@
 
 ---
 
+## [036] 2026-05-25 00:25 — 三端语音来电统一循环铃声 voice-ring.mp3 + 下线 push_sound_call 设置
+
+**起因 / 需求**
+爷爷反馈：「app 端在应用内收到语音来电没有提示音」+「想把可配置的语音来电提示音设置去掉，三端统一用一个固定铃声」+「四个场景循环播放：admin web 收到来电 / iPhone 前台收到来电 / iPhone 推送拉起后进入来电界面 / widget 访客拨号等待」。
+
+**改了什么**（新增 1 资源 × 3 端 + 修改 8 文件）
+
+### 1. 资源同步
+- 源文件：`音频内容/语音来电声音.mp3`（爷爷提供）
+- 复制为 `voice-ring.mp3` 到三端：
+  - `admin/public/sounds/voice-ring.mp3`
+  - `widget/public/sounds/voice-ring.mp3`
+  - `mobile_app/assets/sounds/voice-ring.mp3`
+- 文件名用英文 voice-ring：避免中文路径在 URL 编码 / iOS bundle / asset key 上的兼容性风险
+- pubspec.yaml 已有 `assets/sounds/` 整目录声明，自动包含
+
+### 2. 下线 push_sound_call 设置（仅这一项，别的设置不动）
+- `backend/internal/handler/http.go`：`allowedSettingKeys` 删除 `push_sound_call`（保留注释说明已下线）；APNs 推送音色固定为 `service.go` pushAPNsCommon 内部默认值 "4"
+- `admin/src/views/Settings.vue`：form 初始化 / load / save / 模板 4 处删除 push_sound_call
+- `mobile_app/lib/pages/settings_page.dart`：删除 `_pushSoundCall` 字段、load/save 引用、UI 列表项
+
+### 3. 三端来电循环铃声集成
+
+| 端 | 资源加载 | 触发时机 | 停止时机 |
+|---|---|---|---|
+| admin web | `admin/src/api/sound.js` 新增 `playRingLoop()` / `stopRingLoop()`，HTMLAudioElement.loop=true | `Console.vue` `voiceOnIncoming` | `voiceAccept` 一开始 + `voiceCleanup`（cover voiceEnd/Reject/Taken/RemoteEnd 所有路径） |
+| widget 访客 | `chat.html` 内联 `var _ringAudio = new Audio('sounds/voice-ring.mp3'); _ringAudio.loop = true` | `voiceStart`（state=ringing 拨号中） | `voiceOnAccept` 一开始 + `voiceEnd`（cover 拒绝/超时/连接失败/挂断） |
+| mobile_app | `lib/api/sound.dart` 新增 `playRingLoop()` / `stopRingLoop()`，audioplayers ReleaseMode.loop | `voice_controller.dart` `_onIncoming` | `accept` 一开始 + `_cleanup`（cover reject/_end/dispose/_onTaken 所有路径） |
+
+### 4. iPhone 推送拉起场景（重点）
+爷爷的需求场景"在 App 外语音来电了，收到推送，点推送拉起 App 进入来电界面也要响"——已自动覆盖：
+1. App 在后台 → `voice_call` 信令到 hub → APNs 推送（luckfast 系统音色 4 响一下）
+2. 用户点推送 → maihaocs:// URL Scheme 拉起 App
+3. App 启动 → WSS 重连 → register 后 hub 把 30s 内的 `pendingCalls` buffer 重投（[030-fix] 已实现）
+4. App 收到 voice_call → `_onIncoming` 触发 → 状态 incoming + `playRingLoop()` 循环播
+5. App 显示来电界面 + 铃声响 → 用户接听 / 拒绝 → 停铃声
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| widget 访客拨号等待 | 无声音 | voice-ring.mp3 循环响 |
+| admin 客服收到来电 | playSound(agentSound)，普通消息音色，只响一下 | voice-ring.mp3 循环响 |
+| iPhone 前台收到来电 | 无 App 内声音（只有 APNs 推送音可能在锁屏响） | voice-ring.mp3 循环响 |
+| iPhone 推送拉起后进入来电界面 | 同上无声音 | voice-ring.mp3 循环响（_onIncoming 二次触发） |
+| 接通 / 拒绝 / 挂断 | （没铃声可停） | 任何路径都停铃声 |
+| admin Settings 「语音来电提示音」下拉框 | 16 种 luckfast 推送音色选择 | 删除（功能下线，统一用 voice-ring.mp3） |
+
+**触发场景与边界 + 验证方式**
+
+- **autoplay 限制**：浏览器要求音频必须用户手势触发。widget 在首次 click 解锁所有 audio（包括 voice-ring）；admin 在用户进入聊天界面时调 `unlockAudio()`。如果客服把后台开着但从未点击页面，第一次来电铃声可能被拦——但 voice_call 必然先有用户交互（启动 admin）才能进入聊天，实际无问题
+- **循环不停问题**：所有可能的"通话结束"路径都覆盖了 stopRingLoop：admin 走 `voiceCleanup`（统一收尾），widget 走 `voiceEnd`，mobile_app 走 `_cleanup`，单独在 accept 也调一次（accept 不进 cleanup）
+- **iOS audio session**：mobile_app 用 `_ensureAudioContext()` 已配 `AVAudioSessionCategory.playback`（静音键也能响）；ringPlayer 用 `ReleaseMode.loop` 系统级循环不耗 dart 端轮询
+- **资源未加载**：sound.js / chat.html / sound.dart 都用 preload + 容错（catch 静默），即使 voice-ring.mp3 加载失败也不会抛错阻塞业务
+- **APNs 推送音色降级**：backend service.go pushAPNsCommon 还会查 `push_sound_call` setting（已被 admin 写入禁用，DB 永远空），最终走 default "4"——保持 APNs 锁屏来电通知音不变
+- **验证**：
+  1. widget 访客点电话按钮 → 听到拨号铃声循环响
+  2. admin 客服收到来电浮窗 → 听到铃声循环响 → 点接听 → 立刻停
+  3. iPhone App 前台收到来电 → 听到铃声循环响 → 点接听 → 立刻停
+  4. iPhone 锁屏收到 APNs 推送（系统音）→ 点推送拉 App → 进入来电界面 → 听到铃声循环响
+  5. admin Settings 页面不再显示「语音来电提示音」下拉框
+  6. mobile_app 设置页不再显示「语音来电提示音」选项
+
+---
+
 ## [035] 2026-05-24 23:55 — 引入 CoTURN：WebRTC TURN/STUN relay，解决 VPN/严格 NAT 下通话不通问题
 
 **起因 / 需求**

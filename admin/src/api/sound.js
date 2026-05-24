@@ -68,3 +68,30 @@ export function playSound(name) {
 export function listSounds() {
   return Object.entries(SOUND_DEFS).map(([k, v]) => ({ value: k, label: v.label }))
 }
+
+// ============= 语音来电铃声（循环播放）[036] =============
+// 跟普通 playSound 分离：来电要循环播直到接通/拒绝；普通消息提示音只响一下
+// 文件：admin/public/sounds/voice-ring.mp3（与三端统一）
+let _ringAudio = null
+function _ensureRing() {
+  if (_ringAudio) return _ringAudio
+  _ringAudio = new Audio(SOUNDS_BASE + 'voice-ring.mp3')
+  _ringAudio.loop = true
+  _ringAudio.preload = 'auto'
+  _ringAudio.volume = 1.0
+  return _ringAudio
+}
+
+export function playRingLoop() {
+  const a = _ensureRing()
+  try {
+    a.currentTime = 0
+    const p = a.play()
+    if (p && p.catch) p.catch(() => { /* autoplay 被拦，需要用户先交互；不影响后续 */ })
+  } catch { /* 静默 */ }
+}
+
+export function stopRingLoop() {
+  if (!_ringAudio) return
+  try { _ringAudio.pause(); _ringAudio.currentTime = 0 } catch {}
+}

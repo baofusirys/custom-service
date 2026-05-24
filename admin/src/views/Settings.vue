@@ -18,10 +18,10 @@ const form = ref({
   // 两项都填才启用；留空即禁用，不影响其它功能
   push_user_id: '',
   push_user_key: '',
-  // 三种推送场景独立的提示音（luckfast 0-15 共 16 种）
+  // 两种推送场景独立的提示音（luckfast 0-15 共 16 种）
+  // 注：语音来电推送音色已下线 [036]，三端 App/web 内统一播 voice-ring.mp3 循环
   push_sound_enter: '1',    // 新访客打开 widget
-  push_sound_message: '9',  // 已有会话中访客发新消息
-  push_sound_call: '4'      // 访客发起语音通话（拉起 App 接听）
+  push_sound_message: '9'   // 已有会话中访客发新消息
 })
 
 // luckfast 推送提示音：0-15 共 16 种（具体音色需要在 iPhone 上听）
@@ -48,7 +48,6 @@ async function load() {
     form.value.push_user_key = d.push_user_key || ''
     form.value.push_sound_enter = d.push_sound_enter || '1'
     form.value.push_sound_message = d.push_sound_message || '9'
-    form.value.push_sound_call = d.push_sound_call || '4'
   } finally {
     loading.value = false
   }
@@ -68,8 +67,7 @@ async function save() {
       push_user_id: (form.value.push_user_id || '').trim(),
       push_user_key: (form.value.push_user_key || '').trim(),
       push_sound_enter: form.value.push_sound_enter || '1',
-      push_sound_message: form.value.push_sound_message || '9',
-      push_sound_call: form.value.push_sound_call || '4'
+      push_sound_message: form.value.push_sound_message || '9'
     }
     await http.post('/admin/settings', payload)
     ElMessage.success('保存成功')
@@ -168,13 +166,6 @@ onMounted(load)
           <el-option v-for="s in pushSoundOptions" :key="s.value" :value="s.value" :label="s.label" />
         </el-select>
         <div class="form-tip">已有会话中访客发新消息时，iPhone 推送用的提示音</div>
-      </el-form-item>
-
-      <el-form-item label="语音来电提示音">
-        <el-select v-model="form.push_sound_call" style="width:200px">
-          <el-option v-for="s in pushSoundOptions" :key="s.value" :value="s.value" :label="s.label" />
-        </el-select>
-        <div class="form-tip">访客点击「电话」按钮发起语音通话时，iPhone 推送用的提示音（点推送拉起 App 接听）</div>
       </el-form-item>
 
       <el-form-item>

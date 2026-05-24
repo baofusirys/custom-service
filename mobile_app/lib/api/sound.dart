@@ -88,3 +88,36 @@ Future<void> playSound(String name) async {
 List<Map<String, String>> listSounds() {
   return _sounds.entries.map((e) => {'value': e.key, 'label': e.value.label}).toList();
 }
+
+// ============= 语音来电铃声（循环播放）[036] =============
+// 跟普通 playSound 分离：来电要循环播直到接通/拒绝/超时；普通消息提示音只响一下
+// 资源：assets/sounds/voice-ring.mp3（与 admin/widget 统一）
+//
+// iOS 行为：voice_call_page 进入前台时 _onIncoming 触发 → 播放循环
+//           App 在后台时 voice_call 信令到达 hub→APNs 通知系统响（系统音色 4）
+//           用户点推送拉 App 起来 → WSS 重连 → buffer 重投 voice_call → _onIncoming 触发 → 播放循环
+AudioPlayer? _ringPlayer;
+
+Future<void> playRingLoop() async {
+  await _ensureAudioContext();
+  // 先停旧的（防御性：如果业务上重复调 play）
+  await stopRingLoop();
+  final p = AudioPlayer();
+  _ringPlayer = p;
+  try {
+    await p.setReleaseMode(ReleaseMode.loop);
+    await p.setVolume(1.0);
+    await p.play(AssetSource('sounds/voice-ring.mp3'));
+  } catch (_) {
+    try { await p.dispose(); } catch (_) {}
+    if (identical(_ringPlayer, p)) _ringPlayer = null;
+  }
+}
+
+Future<void> stopRingLoop() async {
+  final p = _ringPlayer;
+  if (p == null) return;
+  _ringPlayer = null;
+  try { await p.stop(); } catch (_) {}
+  try { await p.dispose(); } catch (_) {}
+}

@@ -507,6 +507,8 @@
       return;
     }
     voiceSetStatus('拨号中…等待客服接听');
+    // [036] 拨号等待铃声循环；voiceOnAccept/voiceEnd 任意一个进来都会停
+    playRingLoop();
     ws.send(JSON.stringify({
       type: 'voice_call', ts: Date.now(),
       extra: { call_id: voice.callId }
@@ -550,6 +552,7 @@
     var cid = env.extra && env.extra.call_id;
     if (cid !== voice.callId) return;
     if (voice.timer) { clearTimeout(voice.timer); voice.timer = null; }
+    stopRingLoop();  // [036] 接通了立刻停等待铃声
     voice.remoteAgent = env.from;  // "agent:xxx"
     voice.state = 'accepting';
     voiceSetStatus('正在建立通话…');
@@ -608,6 +611,7 @@
 
   function voiceEnd(reason) {
     if (voice.state === 'idle') return;
+    stopRingLoop();  // [036] 任何挂断路径都停铃声（拒绝/超时/连接失败/正常挂断）
     // 根据 state 决定 code + duration：
     //   ringing/accepting 期间挂断 → cancel (访客主动取消)
     //   talking 状态挂断 → hangup + duration
@@ -702,6 +706,23 @@
       if (p && p.catch) p.catch(function () {});
     } catch (e) {}
   }
+  // ====== 语音拨号等待铃声（循环）[036] ======
+  // 访客拨号时（state=ringing）播放，循环；voiceOnAccept / voiceEnd 都停
+  var _ringAudio = new Audio('sounds/voice-ring.mp3');
+  _ringAudio.loop = true;
+  _ringAudio.preload = 'auto';
+  _ringAudio.volume = 1.0;
+  function playRingLoop() {
+    try {
+      _ringAudio.currentTime = 0;
+      var p = _ringAudio.play();
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
+  }
+  function stopRingLoop() {
+    try { _ringAudio.pause(); _ringAudio.currentTime = 0; } catch (e) {}
+  }
+
   // 浏览器要求音频必须用户手势触发；用户在聊天框第一次点击时解锁所有 Audio
   document.addEventListener('click', function () {
     Object.keys(soundCache).forEach(function (k) {
@@ -714,6 +735,13 @@
         else a.volume = 1.0;
       } catch (e) { a.volume = 1.0; }
     });
+    // [036] 顺便解锁来电铃声（同样需要用户手势）
+    try {
+      _ringAudio.volume = 0;
+      var rp = _ringAudio.play();
+      if (rp && rp.then) rp.then(function () { _ringAudio.pause(); _ringAudio.currentTime = 0; _ringAudio.volume = 1.0; })
+                          .catch(function () { _ringAudio.volume = 1.0; });
+    } catch (e) { _ringAudio.volume = 1.0; }
   }, { once: true, capture: true });
 
   // ====== 时间格式化 ======
