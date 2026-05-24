@@ -88,14 +88,34 @@ class VoiceCallOverlay extends StatelessWidget {
         ],
       );
     }
-    // accepting / talking 状态：只显示挂断按钮
-    return Center(
-      child: _CircleButton(
-        color: const Color(0xFFEF4444),
-        icon: Icons.call_end,
-        onTap: voice.hangup,
-        label: '挂断',
-      ),
+    // accepting 状态：只显示挂断按钮（还没建好通话不能切免提）
+    if (!isTalking) {
+      return Center(
+        child: _CircleButton(
+          color: const Color(0xFFEF4444),
+          icon: Icons.call_end,
+          onTap: voice.hangup,
+          label: '挂断',
+        ),
+      );
+    }
+    // talking 状态：免提切换 + 挂断
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceAround,
+      children: [
+        _CircleButton(
+          color: voice.speakerOn ? const Color(0xFFFBBF24) : const Color(0xFF475569),
+          icon: voice.speakerOn ? Icons.volume_up : Icons.hearing,
+          onTap: voice.toggleSpeaker,
+          label: voice.speakerOn ? '免提' : '听筒',
+        ),
+        _CircleButton(
+          color: const Color(0xFFEF4444),
+          icon: Icons.call_end,
+          onTap: voice.hangup,
+          label: '挂断',
+        ),
+      ],
     );
   }
 }

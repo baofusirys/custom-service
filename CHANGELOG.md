@@ -4,6 +4,34 @@
 
 ---
 
+## [032] 2026-05-24 21:40 — iPhone 通话中免提/听筒切换按钮
+
+**起因 / 需求**
+爷爷反馈：iPhone 通话时只能贴着听筒听对方，要能切免提（外放扬声器）方便放桌上交流。
+
+**改了什么**（修改 2 文件）
+- `mobile_app/lib/state/voice_controller.dart`：
+  - state 加 `bool speakerOn = false`（默认听筒，私密）
+  - 新增 `Future<void> toggleSpeaker()`：talking 状态生效，调 `Helper.setSpeakerphoneOn(next)` 切音频路由，flip state + notifyListeners
+  - `_cleanup()` 末尾复位 `speakerOn = false` + `setSpeakerphoneOn(false)`，让下次通话从听筒（私密）开始
+- `mobile_app/lib/widgets/voice_call_overlay.dart`：
+  - accepting 状态保持单挂断按钮（通话还没建好不能切）
+  - talking 状态显示两个按钮：左边「免提/听筒」（黄色 volume_up / 灰色 hearing 图标，标签随状态切换）+ 右边「挂断」（红色 call_end）
+
+**业务流程**
+通话接通后：
+- 默认听筒模式（贴耳听）
+- 点黄色喇叭按钮 → 切外放扬声器（按钮变高亮黄、标签「免提」）
+- 再点 → 切回听筒（按钮变灰、标签「听筒」）
+- 挂断后 cleanup 自动复位，下次通话回听筒
+
+**触发场景与边界**
+- 仅 iPhone App 才有此切换（Web 端 admin/widget 走电脑外接设备，没有"听筒模式"概念，不需要）
+- iOS/Android 都靠 `flutter_webrtc` Helper.setSpeakerphoneOn 切；部分老设备可能不支持，静默失败不影响通话
+- 接听 / accepting 阶段不显示切换按钮（避免误操作）
+
+---
+
 ## [031] 2026-05-24 21:30 — 访客 widget 电话按钮加可配置提示文字「直接呼叫客服」
 
 **起因 / 需求**

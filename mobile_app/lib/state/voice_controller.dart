@@ -27,6 +27,8 @@ class VoiceController extends ChangeNotifier {
   VoiceState state = VoiceState.idle;
   String statusText = '';
   String callerLabel = '';
+  // 通话中扬声器是否开（true=外放扬声器，false=听筒）。默认听筒（更私密）。
+  bool speakerOn = false;
   String? _callId;
   String? _callerFrom; // "visitor:vid"
   RTCPeerConnection? _pc;
@@ -205,6 +207,20 @@ class VoiceController extends ChangeNotifier {
     _end('您挂断了', notify: true);
   }
 
+  /// 切换免提（扬声器）/ 听筒。仅 talking 状态生效。
+  /// iOS/Android 都靠 flutter_webrtc 的 Helper.setSpeakerphoneOn 切音频路由。
+  Future<void> toggleSpeaker() async {
+    if (state != VoiceState.talking) return;
+    final next = !speakerOn;
+    try {
+      await Helper.setSpeakerphoneOn(next);
+      speakerOn = next;
+      notifyListeners();
+    } catch (_) {
+      // 部分设备不支持，静默
+    }
+  }
+
   void _end(String reason, {required bool notify}) {
     if (state == VoiceState.idle) return;
     if (notify && _callerFrom != null && _callId != null) {
@@ -236,6 +252,11 @@ class VoiceController extends ChangeNotifier {
     _stopTimer();
     _callId = null;
     _callerFrom = null;
+    // 复位扬声器状态，让下次通话重新从听筒（私密模式）开始
+    if (speakerOn) {
+      try { Helper.setSpeakerphoneOn(false); } catch (_) {}
+      speakerOn = false;
+    }
   }
 
   void _resetTimer(Duration d, void Function() onDone, {bool repeat = false, void Function()? onTick}) {
