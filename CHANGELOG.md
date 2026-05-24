@@ -4,6 +4,29 @@
 
 ---
 
+## [031] 2026-05-24 21:30 — 访客 widget 电话按钮加可配置提示文字「直接呼叫客服」
+
+**起因 / 需求**
+爷爷反馈：widget 输入框的电话图标按钮只是一个图标，访客看不懂这是干啥的。要在按钮旁加文字标签（像微信"语音通话"按钮），且文字可在 admin/App 客服工作台改。
+
+**改了什么**（修改 4 文件）
+
+- `widget/public/chat.html`：voiceBtn 改成 `.voice-btn-pill` 圆角药丸样式（图标 + 文字横排），加 `<span id="voiceBtnHint">直接呼叫客服</span>`；loadPublicSettings 拉到 `voice_call_hint` 后赋值给 span text + button title
+- `backend/internal/handler/http.go`：allowedSettingKeys 加 `voice_call_hint`；VisitorPublicSettings 返回 `voice_call_hint`（公开给访客 widget 读，默认「直接呼叫客服」）
+- `admin/src/views/Settings.vue`：form 加 `voice_call_hint`，load/save/UI 各加输入框（maxlength 20）
+- `mobile_app/lib/pages/settings_page.dart`：加 `_voiceCallHint` controller，load/save/dispose/UI 都补
+
+**业务流程**
+
+管理员在 admin / App 系统设置「语音按钮提示」输入框改文字 → 保存 → 访客刷新 widget 看到新提示文字（pill 按钮：📞 直接呼叫客服）
+
+**验证**
+- admin 设置「语音按钮提示」字段可见可保存
+- App「语音按钮提示」字段同步可见可保存
+- 访客 widget 电话按钮变成图标 + 「直接呼叫客服」横排药丸样式
+
+---
+
 ## [030] 2026-05-24 20:50 — 语音来电额外发 luckfast 推送：iPhone 锁屏/后台也能收到「来电」提醒拉起 App 接听
 
 **起因 / 需求**

@@ -265,6 +265,18 @@
     transition: background .15s, color .15s;
   }
   .icon-btn:hover { background: #f3f4f6; color: #2974ff; }
+  /* 语音按钮 pill 样式（图标 + 文字横排），区别于纯图标按钮 */
+  .voice-btn-pill {
+    height: 32px; padding: 0 10px 0 8px;
+    border-radius: 16px; border: 0; cursor: pointer;
+    background: #eef4ff; color: #2974ff;
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; line-height: 1; font-weight: 500;
+    margin-left: 6px;
+    transition: background .15s, color .15s;
+  }
+  .voice-btn-pill:hover { background: #dbeafe; }
+  .voice-btn-hint { white-space: nowrap; }
   .send-btn {
     border: 0; cursor: pointer; height: 32px; padding: 0 16px;
     border-radius: 8px; font: inherit; font-size: 13px; font-weight: 500;
@@ -307,10 +319,11 @@
             </svg>
           </button>
           <input type="file" id="fileInput" style="display:none">
-          <button class="icon-btn" id="voiceBtn" title="语音通话">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <button class="voice-btn-pill" id="voiceBtn" title="语音通话">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
             </svg>
+            <span class="voice-btn-hint" id="voiceBtnHint">直接呼叫客服</span>
           </button>
         </div>
         <button class="send-btn" id="sendBtn">发送</button>
@@ -875,6 +888,13 @@
         if (data.data.widget_title) {
           var titleEl = document.querySelector('header .header-title');
           if (titleEl) titleEl.textContent = data.data.widget_title;
+        }
+        // 语音按钮提示文字（管理员在 admin Settings 里配置）
+        if (data.data.voice_call_hint) {
+          var voiceHintEl = document.getElementById('voiceBtnHint');
+          if (voiceHintEl) voiceHintEl.textContent = data.data.voice_call_hint;
+          var voiceBtnEl = document.getElementById('voiceBtn');
+          if (voiceBtnEl) voiceBtnEl.title = data.data.voice_call_hint;
         }
       }
     } catch {}

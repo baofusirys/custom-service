@@ -505,6 +505,8 @@ var allowedSettingKeys = map[string]bool{
 	"push_sound_enter":   true, // 新访客打开 widget 时播放
 	"push_sound_message": true, // 已有会话中访客发新消息时播放
 	"push_sound_call":    true, // 访客发起语音通话时播放（拉起客服 App 接听）
+	// 访客 widget 电话按钮旁的提示文字（公开给访客 widget 读）
+	"voice_call_hint": true,
 	// （可选）覆盖推送点击跳转 URL，默认 maihaocs://open 拉起 App
 	"push_jump_url": true,
 }
@@ -563,13 +565,14 @@ func (h *HTTP) UpdateSettings(c *gin.Context) {
 func (h *HTTP) VisitorPublicSettings(c *gin.Context) {
 	ctx := c.Request.Context()
 	m, _ := h.svc.Store().GetSettingsMap(ctx, []string{
-		"visitor_notify_sound", "widget_title",
+		"visitor_notify_sound", "widget_title", "voice_call_hint",
 	})
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"notify_sound": defaultIfEmpty(m["visitor_notify_sound"], "visitor1"),
-			"widget_title": defaultIfEmpty(m["widget_title"], "在线客服"),
+			"notify_sound":    defaultIfEmpty(m["visitor_notify_sound"], "visitor1"),
+			"widget_title":    defaultIfEmpty(m["widget_title"], "在线客服"),
+			"voice_call_hint": defaultIfEmpty(m["voice_call_hint"], "直接呼叫客服"),
 		},
 	})
 }

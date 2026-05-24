@@ -20,6 +20,7 @@ class _SettingsPageState extends State<SettingsPage> {
   final _greetingText = TextEditingController(
       text: '您好，欢迎光临！请问有什么可以帮您？');
   final _widgetTitle = TextEditingController(text: '在线客服');
+  final _voiceCallHint = TextEditingController(text: '直接呼叫客服');
 
   // luckfast APNs 推送（跟 Web admin Settings 完全同步的 4 个字段）
   final _pushUserId = TextEditingController();
@@ -48,6 +49,7 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     _greetingText.dispose();
     _widgetTitle.dispose();
+    _voiceCallHint.dispose();
     _pushUserId.dispose();
     _pushUserKey.dispose();
     super.dispose();
@@ -66,6 +68,9 @@ class _SettingsPageState extends State<SettingsPage> {
       }
       if (s['widget_title'] != null && s['widget_title'].toString().isNotEmpty) {
         _widgetTitle.text = s['widget_title'].toString();
+      }
+      if (s['voice_call_hint'] != null && s['voice_call_hint'].toString().isNotEmpty) {
+        _voiceCallHint.text = s['voice_call_hint'].toString();
       }
       _pushUserId.text = (s['push_user_id'] ?? '').toString();
       _pushUserKey.text = (s['push_user_key'] ?? '').toString();
@@ -88,6 +93,7 @@ class _SettingsPageState extends State<SettingsPage> {
         'greeting_enabled': _greetingEnabled ? 'true' : 'false',
         'greeting_text': _greetingText.text,
         'widget_title': _widgetTitle.text,
+        'voice_call_hint': _voiceCallHint.text,
         'push_user_id': _pushUserId.text.trim(),
         'push_user_key': _pushUserKey.text.trim(),
         'push_sound_enter': _pushSoundEnter,
@@ -177,13 +183,25 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           _section('显示'),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
             child: TextField(
               controller: _widgetTitle,
               maxLength: 50,
               decoration: const InputDecoration(
                 labelText: 'Widget 标题',
                 helperText: '访客端聊天窗口顶部显示',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+            child: TextField(
+              controller: _voiceCallHint,
+              maxLength: 20,
+              decoration: const InputDecoration(
+                labelText: '语音按钮提示',
+                helperText: '访客 widget 电话按钮旁的小字（指引访客点击）',
                 border: OutlineInputBorder(),
               ),
             ),

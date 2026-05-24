@@ -13,6 +13,7 @@ const form = ref({
   greeting_enabled: true,
   greeting_text: '您好，欢迎光临！请问有什么可以帮您？',
   widget_title: '在线客服',
+  voice_call_hint: '直接呼叫客服',
   // luckfast APNs 推送：访客发消息时后端调 messagepush.luckfast.com 推到客服 iPhone
   // 两项都填才启用；留空即禁用，不影响其它功能
   push_user_id: '',
@@ -42,6 +43,7 @@ async function load() {
     form.value.greeting_enabled = d.greeting_enabled !== 'false'
     form.value.greeting_text = d.greeting_text || form.value.greeting_text
     form.value.widget_title = d.widget_title || form.value.widget_title
+    form.value.voice_call_hint = d.voice_call_hint || '直接呼叫客服'
     form.value.push_user_id = d.push_user_id || ''
     form.value.push_user_key = d.push_user_key || ''
     form.value.push_sound_enter = d.push_sound_enter || '1'
@@ -62,6 +64,7 @@ async function save() {
       greeting_enabled: form.value.greeting_enabled ? 'true' : 'false',
       greeting_text: form.value.greeting_text || '',
       widget_title: form.value.widget_title || '在线客服',
+      voice_call_hint: form.value.voice_call_hint || '直接呼叫客服',
       push_user_id: (form.value.push_user_id || '').trim(),
       push_user_key: (form.value.push_user_key || '').trim(),
       push_sound_enter: form.value.push_sound_enter || '1',
@@ -130,6 +133,11 @@ onMounted(load)
       <el-form-item label="Widget 标题">
         <el-input v-model="form.widget_title" maxlength="50" style="width:300px" placeholder="在线客服" />
         <div class="form-tip">访客端聊天窗口顶部显示的标题</div>
+      </el-form-item>
+
+      <el-form-item label="语音按钮提示">
+        <el-input v-model="form.voice_call_hint" maxlength="20" style="width:300px" placeholder="直接呼叫客服" />
+        <div class="form-tip">访客端 widget 电话按钮旁边显示的小字（指引访客点击呼叫）</div>
       </el-form-item>
 
       <el-divider content-position="left">iPhone APNs 推送（可选）</el-divider>
