@@ -52,5 +52,21 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- 注册 maihaocs:// URL Scheme：让点击 luckfast 推送时能拉起本 App。
+	     luckfast 推送的 url 参数会调 iOS open(URL)，命中此 scheme → 启动 App。
+	     免费 Apple ID 也支持（Universal Links 才需付费账号）。 -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.chengmeiran.customservice</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>maihaocs</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

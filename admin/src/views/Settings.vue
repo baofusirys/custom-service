@@ -12,8 +12,21 @@ const form = ref({
   notify_visitor_enter: true,
   greeting_enabled: true,
   greeting_text: '您好，欢迎光临！请问有什么可以帮您？',
-  widget_title: '在线客服'
+  widget_title: '在线客服',
+  // luckfast APNs 推送：访客发消息时后端调 messagepush.luckfast.com 推到客服 iPhone
+  // 两项都填才启用；留空即禁用，不影响其它功能
+  push_user_id: '',
+  push_user_key: '',
+  // 两种推送场景独立的提示音（luckfast 0-15 共 16 种）
+  push_sound_enter: '1',   // 新访客打开 widget
+  push_sound_message: '9'  // 已有会话中访客发新消息
 })
+
+// luckfast 推送提示音：0-15 共 16 种（具体音色需要在 iPhone 上听）
+const pushSoundOptions = Array.from({ length: 16 }, (_, i) => ({
+  value: String(i),
+  label: i === 0 ? '0 - 默认' : `${i} - 提示音 ${i}`
+}))
 
 const soundOptions = listSounds()
 
@@ -28,6 +41,10 @@ async function load() {
     form.value.greeting_enabled = d.greeting_enabled !== 'false'
     form.value.greeting_text = d.greeting_text || form.value.greeting_text
     form.value.widget_title = d.widget_title || form.value.widget_title
+    form.value.push_user_id = d.push_user_id || ''
+    form.value.push_user_key = d.push_user_key || ''
+    form.value.push_sound_enter = d.push_sound_enter || '1'
+    form.value.push_sound_message = d.push_sound_message || '9'
   } finally {
     loading.value = false
   }
@@ -42,7 +59,11 @@ async function save() {
       notify_visitor_enter: form.value.notify_visitor_enter ? 'true' : 'false',
       greeting_enabled: form.value.greeting_enabled ? 'true' : 'false',
       greeting_text: form.value.greeting_text || '',
-      widget_title: form.value.widget_title || '在线客服'
+      widget_title: form.value.widget_title || '在线客服',
+      push_user_id: (form.value.push_user_id || '').trim(),
+      push_user_key: (form.value.push_user_key || '').trim(),
+      push_sound_enter: form.value.push_sound_enter || '1',
+      push_sound_message: form.value.push_sound_message || '9'
     }
     await http.post('/admin/settings', payload)
     ElMessage.success('保存成功')
@@ -106,6 +127,36 @@ onMounted(load)
       <el-form-item label="Widget 标题">
         <el-input v-model="form.widget_title" maxlength="50" style="width:300px" placeholder="在线客服" />
         <div class="form-tip">访客端聊天窗口顶部显示的标题</div>
+      </el-form-item>
+
+      <el-divider content-position="left">iPhone APNs 推送（可选）</el-divider>
+
+      <el-form-item label="Push User ID">
+        <el-input v-model="form.push_user_id" maxlength="64" style="width:300px" placeholder="例如 2oKFBed8lWS" clearable />
+        <div class="form-tip">
+          从「消息推送助手」App (App Store 搜)拿到的 User ID。<br/>
+          访客发消息时，后端会调 messagepush.luckfast.com 给你 iPhone 推送（锁屏也能收到）。<br/>
+          <strong>两项都填才启用，留空则禁用推送。</strong>
+        </div>
+      </el-form-item>
+
+      <el-form-item label="Push User Key">
+        <el-input v-model="form.push_user_key" maxlength="64" style="width:300px" placeholder="例如 3633b2c515edee98e7bf06c792e67912" clearable show-password />
+        <div class="form-tip">同上，从「消息推送助手」App 的设置页拿到。</div>
+      </el-form-item>
+
+      <el-form-item label="新访客提示音">
+        <el-select v-model="form.push_sound_enter" style="width:200px">
+          <el-option v-for="s in pushSoundOptions" :key="s.value" :value="s.value" :label="s.label" />
+        </el-select>
+        <div class="form-tip">新访客打开 widget 时，iPhone 推送用的提示音（luckfast 0-15 共 16 种，每个声音不同，请自己听效果）</div>
+      </el-form-item>
+
+      <el-form-item label="新消息提示音">
+        <el-select v-model="form.push_sound_message" style="width:200px">
+          <el-option v-for="s in pushSoundOptions" :key="s.value" :value="s.value" :label="s.label" />
+        </el-select>
+        <div class="form-tip">已有会话中访客发新消息时，iPhone 推送用的提示音</div>
       </el-form-item>
 
       <el-form-item>

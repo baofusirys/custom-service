@@ -96,9 +96,12 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50001, "msg": "保存访客失败"})
 		return
 	}
-	// 60 分钟无活动则关闭旧会话 + 开新会话，让访客重新触发问候 + 提示音
-	// 旧会话只是 status=closed，消息历史保留在 messages 表，客服「历史记录」页可查
-	conv, isNew, err := h.svc.Store().EnsureFreshConversation(c.Request.Context(), v.SiteID, v.ID, 60)
+	// 30 分钟无活动则关闭旧会话 + 开新会话，让访客重新触发问候 + 提示音 + APNs 推送。
+	// 真新访客 (first_seen=now) 完全不受影响——本来就没旧会话，直接 isNew=true。
+	// 老访客回访：30 分钟阈值更敏感（之前 60 分钟），老客户半小时内反复打开 widget 不会
+	// 骚扰；超过 30 分钟才算"重新进入"触发新会话 + 推送「老客户回访」。
+	// 旧会话只是 status=closed，消息历史保留在 messages 表，客服「历史记录」页可查。
+	conv, isNew, err := h.svc.Store().EnsureFreshConversation(c.Request.Context(), v.SiteID, v.ID, 30)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50002, "msg": "创建会话失败"})
 		return
@@ -494,6 +497,15 @@ var allowedSettingKeys = map[string]bool{
 	"greeting_enabled":     true,
 	"greeting_text":        true,
 	"widget_title":         true,
+	// luckfast APNs 推送：访客发消息时后端调 messagepush.luckfast.com 推到客服 iPhone
+	// 两项都填才启用；留空则禁用推送（不报错，不影响其它功能）
+	"push_user_id":  true,
+	"push_user_key": true,
+	// luckfast 推送音色（"0"-"15" 共 16 种），管理员可在 admin Settings 各场景独立配置
+	"push_sound_enter":   true, // 新访客打开 widget 时播放
+	"push_sound_message": true, // 已有会话中访客发新消息时播放
+	// （可选）覆盖推送点击跳转 URL，默认 maihaocs://open 拉起 App
+	"push_jump_url": true,
 }
 
 // GetSettings 拉所有可见 setting（仅管理员可读全部）
@@ -555,7 +567,7 @@ func (h *HTTP) VisitorPublicSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"notify_sound": defaultIfEmpty(m["visitor_notify_sound"], "classic"),
+			"notify_sound": defaultIfEmpty(m["visitor_notify_sound"], "visitor1"),
 			"widget_title": defaultIfEmpty(m["widget_title"], "在线客服"),
 		},
 	})

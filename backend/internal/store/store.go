@@ -101,6 +101,25 @@ ON DUPLICATE KEY UPDATE
 	return err
 }
 
+// GetVisitor 按 ID 读取访客。主要用于拿数据库里真实的 first_seen（UpsertVisitor
+// 的 ON DUPLICATE KEY UPDATE 不更新 first_seen，所以调用方传的 v.FirstSeen 是 now，
+// 不可靠；要判断"真新 vs 回访"必须重新查 DB）。
+func (s *Store) GetVisitor(ctx context.Context, id string) (*Visitor, error) {
+	if id == "" {
+		return nil, sql.ErrNoRows
+	}
+	v := &Visitor{ID: id}
+	err := s.db.QueryRowContext(ctx, `
+SELECT site_id, ip_cipher, ua, country, city, referer, last_page, first_seen, last_seen, identifier
+FROM visitors WHERE id=?`, id).Scan(
+		&v.SiteID, &v.IPCipher, &v.UA, &v.Country, &v.City, &v.Referer, &v.LastPage,
+		&v.FirstSeen, &v.LastSeen, &v.Identifier)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
 // ============ Conversation ============
 
 // EnsureConversation 拿到（或新建）一个 open 会话，并返回是否新建。

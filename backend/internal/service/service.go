@@ -3,11 +3,13 @@ package service
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/custom-service/backend/internal/push"
 	"github.com/custom-service/backend/internal/security"
 	"github.com/custom-service/backend/internal/store"
 	"github.com/custom-service/backend/internal/ws"
@@ -23,7 +25,8 @@ type Service struct {
 	auditLog *zap.Logger
 	limiter  *security.RateLimiter
 	visMsgPM int
-	hub      *ws.Hub // 由 main.go 创建 Hub 后通过 SetHub 注入（解决 Hub<->Service 循环依赖）
+	hub      *ws.Hub      // 由 main.go 创建 Hub 后通过 SetHub 注入（解决 Hub<->Service 循环依赖）
+	push     *push.Client // luckfast APNs 推送客户端，全局单例
 }
 
 func New(st *store.Store, cipher *security.Cipher, biz, sec, audit *zap.Logger, lim *security.RateLimiter, visMsgPM int) *Service {
@@ -35,6 +38,7 @@ func New(st *store.Store, cipher *security.Cipher, biz, sec, audit *zap.Logger, 
 		auditLog: audit,
 		limiter:  lim,
 		visMsgPM: visMsgPM,
+		push:     push.NewClient(biz),
 	}
 }
 
@@ -226,7 +230,94 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 			s.bizLog.Error("persist insert msg err",
 				zap.Error(err), zap.String("id", snap.ID), zap.String("conv", convID))
 		}
+		// 仅访客消息触发 APNs 推送（让客服 iPhone 锁屏时也能收到）
+		if sender == "visitor" {
+			preview := buildPushPreview(&snap)
+			if preview != "" {
+				go s.pushVisitorMessageAPNs(preview, clientID)
+			}
+		}
 	}()
+}
+
+// buildPushPreview 从 envelope 构造推送内容预览（文本优先；图片/文件用占位符）
+func buildPushPreview(e *ws.Envelope) string {
+	if e.Content != "" {
+		return e.Content
+	}
+	if e.MediaKind == "image" {
+		return "[图片]"
+	}
+	if e.MediaURL != "" {
+		return "[文件]"
+	}
+	return ""
+}
+
+// shortVid 截访客 ID 前 8 位做副标题展示（完整 UUID 太长）
+func shortVid(vid string) string {
+	if len(vid) <= 8 {
+		return vid
+	}
+	return vid[:8]
+}
+
+// pushAPNsCommon 是两种推送场景的公共部分：检查配置 + 调 luckfast。
+// scene 表示场景（用于读对应的 sound 设置），sound 直接给 push。
+func (s *Service) pushAPNsCommon(title, subtitle, message, soundSettingKey, defaultSound string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.bizLog.Error("apns_push_panic", zap.Any("err", r))
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	uid := s.SettingStr(ctx, "push_user_id", "")
+	key := s.SettingStr(ctx, "push_user_key", "")
+	if uid == "" || key == "" {
+		return // 未配置，禁用推送
+	}
+	sound := s.SettingStr(ctx, soundSettingKey, defaultSound)
+	err := s.push.Send(ctx, push.Options{
+		UserID:   uid,
+		UserKey:  key,
+		Title:    title,
+		Subtitle: subtitle,
+		Message:  message,
+		Sound:    sound,
+		// 默认 maihaocs:// URL Scheme，让 iOS 点击推送时拉起 Custom Service App。
+		// 管理员可在 admin Settings 通过 push_jump_url 覆盖。
+		JumpURL: s.SettingStr(ctx, "push_jump_url", "maihaocs://open"),
+	})
+	if err != nil {
+		s.bizLog.Warn("apns_push_failed",
+			zap.Error(err), zap.String("title", title), zap.String("preview", subtitle))
+	}
+}
+
+// pushVisitorMessageAPNs 访客发新消息时触发，sound 走 push_sound_message。
+func (s *Service) pushVisitorMessageAPNs(content, vid string) {
+	s.pushAPNsCommon(
+		"客服系统 · 新消息",
+		"访客 "+shortVid(vid),
+		content,
+		"push_sound_message",
+		"9", // 默认提示音
+	)
+}
+
+// humanizeDuration 把 duration 转人类化字符串（用于 push 显示"首次访问 N 前"）。
+func humanizeDuration(d time.Duration) string {
+	if d < time.Minute {
+		return "刚刚"
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%d 小时", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d 天", int(d.Hours()/24))
 }
 
 // ============ HTTP 业务方法（暴露给 handler） ============
@@ -316,6 +407,32 @@ func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversatio
 			})
 			s.bizLog.Info("visitor_enter notified",
 				zap.String("vid", visitor.ID), zap.String("conv", conv.ID))
+			// 同时给 iPhone APNs 推送（如果配置了 push_user_id/key），客服可在锁屏看到。
+			// 关键：handler 传过来的 visitor.FirstSeen 总是 now（UpsertVisitor 的 SQL
+			// 不更新 first_seen，但 Go 对象里的 FirstSeen 还是 now），所以这里必须
+			// 重新 GetVisitor 拿 DB 里真实 first_seen，才能区分"真新 vs 老回访"。
+			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.bizLog.Error("apns_push_enter_panic", zap.Any("err", r))
+					}
+				}()
+				pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer pcancel()
+				var pushTitle, pushMsg string
+				if real, err := s.store.GetVisitor(pctx, visitor.ID); err == nil && real != nil &&
+					time.Since(real.FirstSeen) > 10*time.Second {
+					// 老客户回访：首次访问时间在 10 秒前 = 之前来过
+					pushTitle = "客服系统 · 老客户回访"
+					pushMsg = fmt.Sprintf("%s 又来了，首次访问 %s前",
+						identifier, humanizeDuration(time.Since(real.FirstSeen)))
+				} else {
+					// 真新访客：first_seen 在 10 秒内 = 数据库刚为他生成记录
+					pushTitle = "客服系统 · 新访客"
+					pushMsg = "有新访客打开了客服窗口，快去看看吧"
+				}
+				s.pushAPNsCommon(pushTitle, identifier, pushMsg, "push_sound_enter", "1")
+			}()
 		}
 
 		// 2) 自动问候

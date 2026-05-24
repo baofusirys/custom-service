@@ -4,72 +4,123 @@
 
 ---
 
-## [026] 2026-05-24 08:50 — 通知音色彻底重做：废弃 11 种程序合成 → 改用 6 个真实录音 WAV（三端统一）
+## [027] 2026-05-24 15:00 — luckfast APNs 中转推送集成 + 点推送拉起 App + 真新访客/老客户回访区分
 
 **起因 / 需求**
 
-爷爷反馈三端（admin / widget / iPhone App）的程序合成音色一律「声音太小」：
-- iOS 上深度调试发现 audioplayers 5.2.1 在 iOS 26.5 上 BytesSource 直接 silent fail
-- 升级到 audioplayers 6.4.0 后又遇到「AVPlayerItem.Status.failed err=-12860」—— 6.x 默认临时文件后缀 `.mp3`，AVPlayer 拿 WAV 当 mp3 解码失败
-- 加 `mimeType: 'audio/wav'` 后能响但音量偏小（PCM 合成幅度只有 0.3~0.5）
-- 把 vol 拉到 0.95 仍然不够大
+爷爷找到 messagepush.luckfast.com 这个国内免费 APNs 中转服务（用户下载他们的「消息推送助手」App + 拿 User ID/Key → 任何后端调他们 HTTP API 就能推到该 iPhone）。完美绕开「免费 Apple ID 不能签 APNs Key」的限制。需求：
+1. 后端集成 luckfast 推送，访客消息 / 新访客进入两种事件都能推
+2. 点击推送能拉起我们 Custom Service App（不只是默认的 Safari 跳 web）
+3. 访客进入 / 新消息 两种推送独立提示音（luckfast 支持 16 种音效）
+4. 区分「真新访客（第一次来）」和「老客户回访（之前来过）」推送内容不同
+5. 会话超时门槛 60 分钟 → 30 分钟，老访客回访更敏感
 
-爷爷直接给了 6 个真实录制的 WAV 文件，决定**全部废弃程序合成**，三端统一用真实录音。
+**改了什么 / 加了什么**（新增 1 文件 / 修改 7 文件）
 
-**改了什么 / 加了什么 / 删了什么**
+### A. 后端 luckfast 推送模块
+- `backend/internal/push/luckfast.go` **新增**
+  - `Client` 复用 http.Client + 8s timeout
+  - `Options{UserID,UserKey,Title,Subtitle,Message,JumpURL,Sound}`
+  - POST /send/<UserID>/<UserKey> + form-urlencoded（避免 GET URL 超长）
+  - 长度截断：title 50 / subtitle 50 / message 500
+  - UserID/UserKey 空时返回 nil 视作禁用（不报错）
+  - 返回 JSON 字符串包含 "code":0 才算成功
 
-新增（15 文件 + 3 目录 + 1 SQL）：
-- 三端 sounds 目录各放对应 WAV：
-  - `mobile_app/assets/sounds/`：agent1/2/3 + visitor1/2/3 共 6 个（Flutter 全部用）
-  - `admin/public/sounds/`：同上 6 个（admin 管理员要给客服+访客都设置）
-  - `widget/public/sounds/`：visitor1/2/3 共 3 个（访客只听访客端音色）
-- `backend/migrations/004_sound_upgrade.sql` 把数据库残留的旧合成音色 key（chime / classic / ding / soft / alert / bell / doorbell / trill / fanfare / chord）UPDATE 成 agent1 / visitor1
+### B. service.go 推送触发
+- 新增 `Service.push *push.Client` 字段 + 构造器注入
+- 新增 `pushAPNsCommon` 通用调用（读 push_user_id/push_user_key/push_sound_xxx settings）
+- 新增 `pushVisitorMessageAPNs(content, vid)` 走 push_sound_message（默认 9）
+- 新增 `humanizeDuration` helper：刚刚 / N 分钟 / N 小时 / N 天
+- 新增 `shortVid` 截 vid 前 8 位作 subtitle 显示
+- `PersistMessageAsync` 末尾加 `if sender=="visitor"` 异步 push 触发
+- `OnVisitorEnter` 第 1 步通知客服后异步执行：**GetVisitor 重读真实 first_seen**（handler 传的 v.FirstSeen 不可靠），判断 `time.Since(real.FirstSeen) > 10s` 决定走「真新访客」或「老客户回访」推送，两者标题/内容不同
 
-修改：
-- `admin/src/api/sound.js` 完全重写：HTMLAudioElement 预加载 + `unlockAudio()` 首次手势解锁 autoplay policy + 500ms 防抖；用 `import.meta.env.BASE_URL` 动态拼路径兼容 vite 开发/生产
-- `widget/public/chat.html` 删除 122 行合成代码（tone/seq/layered + AudioContext），换成 3 行 `new Audio(url)` 预加载 + click 解锁；旧 key fallback 到 visitor1
-- `mobile_app/lib/api/sound.dart` 完全重写：用 `AssetSource('sounds/xxx.wav')` 加载本地 asset；保留 AudioContext playback / 静音键也响、500ms 防抖、每次 new player 避免 state machine bug、`setVolume(1.0)` 显式拉满；旧 key fallback 到 agent1
-- `mobile_app/pubspec.yaml` audioplayers 升级 5.2.1 → 6.6.0、新增 `assets: - assets/sounds/`
-- 4 处硬编码默认音色 key 全部 sed 替换：`'chime'` → `'agent1'`、`'classic'` → `'visitor1'`（admin/src/views/Settings.vue、admin/src/views/Console.vue、mobile_app/lib/state/app_state.dart、mobile_app/lib/pages/settings_page.dart）
-- `.gitignore` 加 `音频内容/`（爷爷原始 WAV，已分发到三端，不必入库）
+### C. store.go 加 GetVisitor
+- 新增 `Store.GetVisitor(ctx, id)` —— 单独读取访客，主要给 OnVisitorEnter 拿真实 first_seen 用
+- 必须新加：UpsertVisitor 的 SQL 走 `ON DUPLICATE KEY UPDATE` 故意**不更新 first_seen**，但 handler 调用方传的 `v.FirstSeen` 总是被赋值 now，导致 push 判断无法区分真新/回访
+
+### D. handler/http.go 配置 + 30min 门槛
+- `allowedSettingKeys` 加 `push_user_id`、`push_user_key`、`push_sound_enter`、`push_sound_message`、`push_jump_url`
+- `EnsureFreshConversation(...60)` 改为 `30` —— **会话超时从 60 分钟 → 30 分钟**：真新访客（没旧会话）不受影响；老访客回访更敏感
+- `VisitorPublicSettings` 默认 sound fallback `"classic"` → `"visitor1"`（兼容老数据库）
+
+### E. admin Settings.vue 配置 UI
+- 加 `push_user_id` / `push_user_key` 输入框（密码框 show-password）
+- 加 `push_sound_enter` / `push_sound_message` 下拉（16 选：0 默认 + 1-15 提示音）
+- form 字段 + load + save 三处都补上新字段
+
+### F. iOS / Android URL Scheme 注册
+- `mobile_app/ios/Runner/Info.plist` 加 `CFBundleURLTypes` 注册 scheme=`maihaocs`
+- `mobile_app/android/app/src/main/AndroidManifest.xml` 加 intent-filter `android:scheme="maihaocs"`
+- 后端 push `JumpURL` 默认 `maihaocs://open` —— iOS 点击推送时由 luckfast 调 `UIApplication.open(URL)` → iOS 解析 scheme → 拉起 Custom Service App
+- 免费 Apple ID 完全支持（Universal Links 才要付费账号）
 
 **业务流程对比**
 
-| 场景 | 改动前 | 改动后 |
+| 事件 | 改动前 | 改动后 |
 |---|---|---|
-| 三端可选音色 | 11 种合成（classic/chime/ding/...）| 7 种真实（工作台 1/2/3 + 访客端 1/2/3 + 静音） |
-| iOS App 试听 | iOS 26.5 audioplayers 5.2.1 silent fail；升 6.x 后 AVPlayer err=-12860；加 mimeType 后能响但太小 | 真实录音 + AssetSource + AVPlayer 正常播放，**音量大** |
-| admin Web | Web Audio API oscillator 合成 + 浏览器音量衰减，明显偏小 | 真实录音 HTMLAudioElement + 系统满音量 |
-| widget 访客端 | 同上 | 同上 |
-| 老数据库已设音色 | 仍是 chime/classic 等旧 key，前端 dropdown 找不到对应 option | migration 004 自动 UPDATE 成 agent1/visitor1 |
+| 访客发消息，客服 iPhone 锁屏 | 收不到（没 APNs） | **收到推送**「客服系统·新消息 / 访客 xxx / 消息内容」 |
+| 真新访客打开 widget | 客服 web 上有弹窗 + 播声，但 iPhone 锁屏没动静 | **iPhone 收到推送**「客服系统·新访客 / 有新访客打开了客服窗口」 |
+| 老客户 35 分钟后回访 | 60min 门槛内复用旧会话，啥都不推 | **iPhone 推送**「客服系统·老客户回访 / xxx 又来了，首次访问 N 时间前」（30min 门槛触发） |
+| 同一访客 30 分钟内来回开关 widget | 复用会话不推 | 同上（30min 门槛保护，避免骚扰） |
+| 点击 iPhone 推送 | 默认打开 Safari 跳 admin web | 拉起 Custom Service App |
+| 配置 | 改 .env + 重启容器 | admin Settings 网页填，零重启 |
 
 **触发场景与边界 + 验证方式**
 
-触发：
-- 客服收到访客消息 → 三端均播 agent_notify_sound（默认 agent1）
-- 访客收到客服消息 → widget 播 visitor_notify_sound（默认 visitor1）
-- 用户在设置页点试听 → 立即播
-- 500ms 内重复同名音色防抖
-
-边界：
-- 浏览器 autoplay policy：用户首次点击页面后才能解锁 Audio
-- iOS audioplayers 6.x：必须传 `mimeType: 'audio/wav'`（虽然 AssetSource 内部自动识别扩展名，但保留 sound.dart 的 fallback 注释提醒）
-- 老数据库 (002 已 applied)：004 是新增 migration，会自动应用一次性强制 UPDATE
-- WAV 文件 280KB ~ 360KB 每个，三端总体积增加约 5MB（admin 1.6MB + widget 800KB + iOS App 1.7MB）
-
-验证（已实测）：
-1. `curl -sI https://maihaocs.icu/admin/sounds/agent1.wav` → 200
-2. `curl -sI https://maihaocs.icu/widget/sounds/visitor1.wav` → 200
-3. 数据库 `SELECT key_name, value FROM settings WHERE key_name LIKE '%sound%'` → agent_notify_sound=agent1 / visitor_notify_sound=visitor1
-4. iPhone App build → 19.6MB → 21.4MB（多了 1.8MB 就是 6 个 WAV 嵌入的体积）
-5. iPhone App 试听 → 真实录音、音量大
+- 触发条件：`push_user_id` 和 `push_user_key` 都填非空才推；任一为空跳过（不报错）
+- 推送源头 1：`PersistMessageAsync` 内 `if sender=="visitor"` 后异步 goroutine
+- 推送源头 2：`OnVisitorEnter` 内 `if SettingBool(notify_visitor_enter, true)` 后异步 goroutine
+- 失败处理：网络/luckfast 错误只 `bizLog.Warn`，不影响业务（goroutine 内 recover panic）
+- 区分新老：`time.Since(realVisitor.FirstSeen) > 10*time.Second` —— first_seen 在 10 秒内 = 真新访客；之前的就算老回访
+- 会话超时：30 分钟无活动（看 conversations.updated_at），关闭旧 conv + 开新 conv，触发 OnVisitorEnter
+- 验证 1：admin → 系统设置 → 看到「Push User ID/Key + 新访客/新消息提示音」5 个字段 ✓
+- 验证 2：iPhone 锁屏 + 隐身窗口开 widget → 锁屏弹「客服系统·新访客」推送 ✓（已实测）
+- 验证 3：点击推送 → 拉起 Custom Service App ✓（已实测）
+- 验证 4：发消息 → 收「客服系统·新消息」推送，sound 跟「新访客」不同
+- 验证 5：30+ 分钟后回访 → 收「客服系统·老客户回访 / 首次访问 N 前」推送
 
 **安全 / 健壮性**
 
-- 三端 sound 模块都有 try/catch 静默失败兜底（音频失败不影响业务）
-- 旧 key fallback：admin/widget/App 都有 fallback 到默认音色，老用户数据库值仍能用
-- migration 004 用 `SET time_zone='+08:00'` 保证 updated_at 是北京时间
-- 不偷懒：4 个文件硬编码 key 全部 sed 替换 + 新建 migration 而非改老 migration（保护 schema_migrations checksum）
+- push_user_id/key 走 settings 表（数据库存储）不入 .env / 不入仓库；admin Settings UI 用 `show-password` 隐码显示
+- luckfast 接口走 HTTPS；title/subtitle/message 服务端截断防 payload 超长
+- 推送失败 fallback：GetVisitor 失败 / 网络挂 / luckfast 拒绝 → 都只记 log，不影响主业务流
+- 所有 push goroutine 都 `defer recover` 防止 panic 撞挂主进程
+- 旧数据库的 `chime/classic` 等旧音色 key 已在 [026] migration 004 升级；前端额外加 fallback 防 race condition
+
+**遗留 / 已知**
+
+- luckfast 是第三方免费服务，如果对方挂了 / 转付费 / 限流，推送会失效。后续可加多通道兜底（让管理员选 luckfast 或其他第三方推送）。
+- 推送在 iPhone 上显示的 App 图标和名字是「消息推送助手」（luckfast 自己的 App），不是我们 Custom Service App。点击推送跳转过来才会拉起我们 App。要真正显示自家 App 推送，必须爷爷买正式 Apple Developer 账号 + 配 .p8 Key + 自己实现 APNs（参考 [025] 遗留）。
+- 16 种音效编号 0-15 在 admin UI 只用编号 + 通用名（"提示音 1"），具体音色得爷爷自己在 iPhone 上听试。
+
+---
+
+## [026] 2026-05-24 13:52 — 通知音色重做：废弃 11 种程序合成 → 6 个真实录音 WAV 三端统一（CHANGELOG 补登）
+
+> 注：本条对应 git commit `5af2867`。该次 commit 已落盘但 CHANGELOG.md 漏写，本次 [027] 一并补登。
+
+**起因 / 需求**
+程序合成音色三端都太小：iOS audioplayers 5.x silent fail / 6.x AVPlayer err=-12860 / 加 mimeType 后能响但偏小 / vol 拉到 0.95 仍不够。爷爷给 6 个真实录音 WAV（3 客服端 + 3 访客端），全部废弃合成方案。
+
+**三端文件分发**
+- `mobile_app/assets/sounds/`：6 个（agent1/2/3 + visitor1/2/3）
+- `admin/public/sounds/`：6 个
+- `widget/public/sounds/`：3 个（只 visitor1/2/3，访客端只听访客音色）
+
+**改了什么**（新增 3 + 修改 8）
+- `admin/src/api/sound.js` 完全重写：HTMLAudioElement + 预加载 + 首次手势 unlockAudio + 500ms 防抖；用 `import.meta.env.BASE_URL` 动态拼 sounds 路径
+- `widget/public/chat.html` 删 122 行合成代码，换 `new Audio('sounds/xxx.wav')` + click 解锁；旧 key fallback `visitor1`
+- `mobile_app/lib/api/sound.dart` 完全重写：`AssetSource('sounds/xxx.wav')` + AudioContext playback + setVolume(1.0)；旧 key fallback `agent1`
+- `mobile_app/pubspec.yaml`：audioplayers `5.2.1` → `6.6.0`；加 `assets/sounds/`
+- 4 处硬编码 sed 批量替换 `'chime'`→`'agent1'`、`'classic'`→`'visitor1'`（Settings.vue / Console.vue / app_state.dart / settings_page.dart）
+- `backend/migrations/004_sound_upgrade.sql` **新增**：数据库残留 `chime/classic/...` 10 个旧 key UPDATE 成 `agent1/visitor1`
+- `.gitignore` 加 `音频内容/` 排除爷爷原始文件
+
+**验证**
+- `https://maihaocs.icu/admin/sounds/agent1.wav` → 200 ✓
+- 数据库 `settings.agent_notify_sound=agent1, visitor_notify_sound=visitor1`（migration 004 执行）✓
+- 三端试听都响亮 ✓
 
 ---
 
