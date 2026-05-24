@@ -338,6 +338,12 @@ onMounted(async () => {
         return
       }
 
+      // 语音通话信令分发
+      if (env.type && env.type.indexOf('voice_') === 0) {
+        handleVoiceSignal(env)
+        return
+      }
+
       const myId = String(session.agent?.id)
 
       // 已读事件
@@ -464,7 +470,189 @@ onUnmounted(() => {
   ws?.stop()
   clearInterval(convsTimer)
   if (convsDebounce) clearTimeout(convsDebounce)
+  if (voice.timer) { clearTimeout(voice.timer); clearInterval(voice.timer) }
+  if (voice.pc) { try { voice.pc.close() } catch {} }
+  if (voice.localStream) voice.localStream.getTracks().forEach(t => t.stop())
 })
+
+// ====== 语音通话（接听端） ======
+const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
+const voiceState = ref('idle')   // idle / incoming / accepting / talking / ended
+const voiceStatusText = ref('')
+const voiceCallerLabel = ref('')
+const voiceRemoteAudioRef = ref(null)
+const voice = {
+  callId: null,
+  callerFrom: null,  // "visitor:vid"
+  pc: null,
+  localStream: null,
+  startTs: 0,
+  timer: null,
+}
+
+function handleVoiceSignal(env) {
+  switch (env.type) {
+    case 'voice_call':   return voiceOnIncoming(env)
+    case 'voice_taken':  return voiceOnTaken(env)
+    case 'voice_offer':  return voiceOnOffer(env)
+    case 'voice_ice':    return voiceOnIce(env)
+    case 'voice_end':    return voiceOnRemoteEnd(env)
+    // accept/reject/answer 是接听端主动发出的，不会回到自己（除非多客服环境同账号其它端，可忽略）
+  }
+}
+
+function voiceOnIncoming(env) {
+  if (voiceState.value !== 'idle' && voiceState.value !== 'ended') return  // 忙线
+  voice.callId = env.extra?.call_id
+  voice.callerFrom = env.from   // "visitor:vid"
+  const vid = (env.from || '').split(':')[1] || ''
+  // 在会话列表里找名字
+  const conv = convs.value.find(c => c.visitor_id === vid)
+  voiceCallerLabel.value = conv?.identifier || '访客 ' + vid.slice(0, 6)
+  voiceState.value = 'incoming'
+  voiceStatusText.value = '语音来电…'
+  playSound(agentSound.value)  // 来电响一下
+  // 30 秒未接听自动错过
+  if (voice.timer) clearTimeout(voice.timer)
+  voice.timer = setTimeout(() => {
+    if (voiceState.value === 'incoming') voiceEnd('未接听', false)
+  }, 30000)
+}
+
+function voiceOnTaken(env) {
+  if (voiceState.value !== 'incoming') return
+  if (env.extra?.call_id !== voice.callId) return
+  // 别的客服接了，撤销我的来电浮窗
+  voiceCleanup()
+  voiceState.value = 'idle'
+}
+
+async function voiceAccept() {
+  if (voiceState.value !== 'incoming') return
+  if (voice.timer) { clearTimeout(voice.timer); voice.timer = null }
+  try {
+    voice.localStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+  } catch (e) {
+    ElMessage.error('麦克风访问失败：' + (e.message || e))
+    voiceEnd('麦克风失败', false)
+    return
+  }
+  voiceState.value = 'accepting'
+  voiceStatusText.value = '已接听，等待对方建立通话…'
+  // 通知访客接听 + 广播给其他 agent 撤窗
+  ws?.send({
+    type: 'voice_accept', to: voice.callerFrom, ts: Date.now(),
+    extra: { call_id: voice.callId, agent_id: String(session.agent?.id), agent_name: session.agent?.nickname || '' }
+  })
+  ws?.send({
+    type: 'voice_taken', ts: Date.now(),
+    extra: { call_id: voice.callId }
+  })
+}
+
+function voiceReject() {
+  if (voiceState.value !== 'incoming') return
+  ws?.send({
+    type: 'voice_reject', to: voice.callerFrom, ts: Date.now(),
+    extra: { call_id: voice.callId }
+  })
+  voiceEnd('已拒绝', false)
+}
+
+function createPCAgent() {
+  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS })
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate && voice.callerFrom) {
+      ws?.send({
+        type: 'voice_ice', to: voice.callerFrom, ts: Date.now(),
+        extra: {
+          call_id: voice.callId,
+          candidate: ev.candidate.candidate,
+          sdpMid: ev.candidate.sdpMid,
+          sdpMLineIndex: ev.candidate.sdpMLineIndex
+        }
+      })
+    }
+  }
+  pc.ontrack = (ev) => {
+    if (voiceRemoteAudioRef.value && ev.streams[0]) {
+      voiceRemoteAudioRef.value.srcObject = ev.streams[0]
+    }
+  }
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      voiceEnd('连接中断', true)
+    }
+  }
+  return pc
+}
+
+async function voiceOnOffer(env) {
+  if (voiceState.value !== 'accepting') return
+  if (env.extra?.call_id !== voice.callId) return
+  voice.pc = createPCAgent()
+  voice.localStream.getTracks().forEach(t => voice.pc.addTrack(t, voice.localStream))
+  await voice.pc.setRemoteDescription({ type: 'offer', sdp: env.extra.sdp })
+  const answer = await voice.pc.createAnswer()
+  await voice.pc.setLocalDescription(answer)
+  ws?.send({
+    type: 'voice_answer', to: voice.callerFrom, ts: Date.now(),
+    extra: { call_id: voice.callId, sdp: answer.sdp }
+  })
+  voiceState.value = 'talking'
+  voice.startTs = Date.now()
+  voice.timer = setInterval(() => {
+    if (voiceState.value !== 'talking') return
+    const sec = Math.floor((Date.now() - voice.startTs) / 1000)
+    const mm = String(Math.floor(sec / 60)).padStart(2, '0')
+    const ss = String(sec % 60).padStart(2, '0')
+    voiceStatusText.value = '通话中 ' + mm + ':' + ss
+  }, 1000)
+}
+
+async function voiceOnIce(env) {
+  if (!voice.pc || !env.extra) return
+  try {
+    await voice.pc.addIceCandidate({
+      candidate: env.extra.candidate,
+      sdpMid: env.extra.sdpMid,
+      sdpMLineIndex: env.extra.sdpMLineIndex
+    })
+  } catch {}
+}
+
+function voiceOnRemoteEnd(env) {
+  if (voiceState.value === 'idle') return
+  voiceEnd('对方已挂断', true)
+}
+
+function voiceEnd(reason, notifyPeer) {
+  if (voiceState.value === 'idle') return
+  if (notifyPeer && voice.callerFrom && voice.callId) {
+    ws?.send({
+      type: 'voice_end', to: voice.callerFrom, ts: Date.now(),
+      extra: { call_id: voice.callId, reason: reason }
+    })
+  }
+  voiceCleanup()
+  voiceState.value = 'ended'
+  voiceStatusText.value = reason
+  setTimeout(() => {
+    if (voiceState.value === 'ended') voiceState.value = 'idle'
+  }, 2500)
+}
+
+function voiceCleanup() {
+  if (voice.pc) { try { voice.pc.close() } catch {} voice.pc = null }
+  if (voice.localStream) {
+    voice.localStream.getTracks().forEach(t => t.stop())
+    voice.localStream = null
+  }
+  if (voice.timer) { clearTimeout(voice.timer); clearInterval(voice.timer); voice.timer = null }
+  if (voiceRemoteAudioRef.value) voiceRemoteAudioRef.value.srcObject = null
+  voice.callId = null
+  voice.callerFrom = null
+}
 </script>
 
 <template>
@@ -613,6 +801,29 @@ onUnmounted(() => {
         </div>
       </el-footer>
     </el-container>
+
+    <!-- 语音通话浮窗（来电 / 通话中 / 结束） -->
+    <div v-if="voiceState !== 'idle'" class="voice-overlay" :class="`voice-overlay--${voiceState}`">
+      <div class="voice-card">
+        <div class="voice-icon-wrap">
+          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+          </svg>
+        </div>
+        <div class="voice-name">{{ voiceCallerLabel || '访客' }}</div>
+        <div class="voice-status">{{ voiceStatusText }}</div>
+        <div class="voice-actions">
+          <template v-if="voiceState === 'incoming'">
+            <el-button type="danger" @click="voiceReject">拒绝</el-button>
+            <el-button type="success" @click="voiceAccept">接听</el-button>
+          </template>
+          <template v-else-if="voiceState === 'accepting' || voiceState === 'talking'">
+            <el-button type="danger" @click="voiceEnd('您挂断了', true)">挂断</el-button>
+          </template>
+        </div>
+        <audio ref="voiceRemoteAudioRef" autoplay style="display:none"></audio>
+      </div>
+    </div>
   </el-container>
 </template>
 
@@ -722,4 +933,52 @@ onUnmounted(() => {
 .page-banner-label { color: #c2410c; flex-shrink: 0; }
 .page-banner-link { color: #c2410c; text-decoration: underline; }
 .page-banner-link:hover { color: #9a3412; }
+
+/* ====== 语音通话浮窗 ====== */
+.voice-overlay {
+  position: fixed; top: 20px; right: 20px;
+  z-index: 9999;
+  animation: voice-slide-in .25s ease-out;
+}
+@keyframes voice-slide-in {
+  from { transform: translateX(20px); opacity: 0; }
+  to   { transform: translateX(0); opacity: 1; }
+}
+.voice-card {
+  width: 300px;
+  background: #fff; border-radius: 12px;
+  padding: 22px 20px 18px;
+  box-shadow: 0 10px 32px rgba(0,0,0,.18);
+  border: 1px solid #e5e7eb;
+  text-align: center;
+}
+.voice-overlay--incoming .voice-card {
+  background: linear-gradient(160deg, #1e3a8a 0%, #2974ff 100%); color: #fff;
+  border-color: transparent;
+}
+.voice-overlay--talking .voice-card {
+  background: linear-gradient(160deg, #064e3b 0%, #10b981 100%); color: #fff;
+  border-color: transparent;
+}
+.voice-overlay--accepting .voice-card {
+  background: linear-gradient(160deg, #1e3a8a 0%, #2974ff 100%); color: #fff;
+  border-color: transparent;
+}
+.voice-icon-wrap {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: rgba(255,255,255,.22);
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 12px;
+  color: #fff;
+}
+.voice-overlay--incoming .voice-icon-wrap {
+  animation: voice-pulse 1.4s ease-in-out infinite;
+}
+@keyframes voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,.4); }
+  50%      { box-shadow: 0 0 0 14px rgba(255,255,255,0); }
+}
+.voice-name { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+.voice-status { font-size: 13px; opacity: .88; margin-bottom: 18px; }
+.voice-actions { display: flex; justify-content: center; gap: 12px; }
 </style>

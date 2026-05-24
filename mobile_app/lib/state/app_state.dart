@@ -4,6 +4,7 @@ import '../api/models.dart';
 import '../api/sound.dart' as snd;
 import '../api/ws_client.dart';
 import '../config/settings.dart';
+import 'voice_controller.dart';
 
 /// 全局应用状态。负责：
 ///   - 维护当前 agent / token / backendUrl
@@ -29,6 +30,9 @@ class AppState extends ChangeNotifier {
   String? myConnId;
   // 客服端通知音色（admin 才能拉到完整设置，普通客服 fallback 默认）
   String agentSound = 'agent1';
+
+  // ===== Voice 通话控制器（全局单例，UI 用 ListenableBuilder 监听） =====
+  final VoiceController voice = VoiceController();
 
   Future<void> loadAgentSound() async {
     if (agent?.role != 'admin') return;
@@ -174,6 +178,10 @@ class AppState extends ChangeNotifier {
       onEnvelope: _onEnvelope,
     );
     _ws!.start();
+    // 注入信令发送 + agent 身份到 VoiceController
+    voice.sendEnvelope = (m) => _ws?.send(m);
+    voice.agentId = agent?.id.toString() ?? '';
+    voice.agentNickname = agent?.nickname ?? '';
   }
 
   void stopWs() {
@@ -185,6 +193,11 @@ class AppState extends ChangeNotifier {
   void _onEnvelope(Map<String, dynamic> env) {
     final type = env['type']?.toString();
     if (type == 'pong') return;
+    // 语音通话信令统一分发到 VoiceController（独立状态机，不污染 AppState）
+    if (type != null && type.startsWith('voice_')) {
+      voice.handleSignal(env);
+      return;
+    }
     if (type == 'hello') {
       // 记住自己 connID（多端去重必需）
       final extra = env['extra'];

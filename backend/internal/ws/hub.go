@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -305,8 +306,65 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 	case "typing":
 		// 仅转发，不落库
 		h.FanoutToConv(ctx, e)
+	case "voice_call", "voice_accept", "voice_reject", "voice_taken",
+		"voice_offer", "voice_answer", "voice_ice", "voice_end":
+		// 语音通话信令：纯信令，后端无状态转发，不落库
+		//   - voice_call (To 空): 访客发起 → 广播给所有 agent (来电浮窗)
+		//   - voice_accept/reject (To=visitor:xx): agent 接听/拒绝 → 直推 visitor
+		//   - voice_offer/answer/ice: WebRTC SDP/ICE 信令 → 根据 To 字段点对点转发
+		//   - voice_end (To=对方): 任何一方挂断
+		// 业务侧（service.go）目前不参与 voice 流程；P2P 音频流由 WebRTC 直连，不过后端
+		if c.Kind == KindVisitor {
+			e.From = "visitor:" + c.ID
+		} else {
+			e.From = "agent:" + c.ID
+		}
+		h.fanoutVoice(ctx, e)
 	default:
 		h.bizLog.Warn("unknown ws type", zap.String("type", e.Type), zap.String("conn", c.ConnID))
+	}
+}
+
+// fanoutVoice 语音通话信令路由：根据 To 字段精确转发；To 为空时广播给所有 agent
+// (voice_call 场景，让所有客服都收到来电弹窗)。同时 Redis 跨节点广播。
+func (h *Hub) fanoutVoice(ctx context.Context, e *Envelope) {
+	e.Node = h.cfg.NodeID
+	e.Priority = 0
+	h.fanoutVoiceLocal(e)
+	if h.rdb != nil {
+		_ = h.rdb.Publish(ctx, h.pub, mustJSON(e)).Err()
+	}
+}
+
+// fanoutVoiceLocal 只在本节点投递（被 fanoutFromRedis 跨节点回环时也复用此函数）
+func (h *Hub) fanoutVoiceLocal(e *Envelope) {
+	if e.To == "" {
+		// voice_call: 广播给所有 agent 的所有连接
+		h.agents.Range(func(_, v any) bool {
+			v.(*sync.Map).Range(func(_, cv any) bool {
+				cv.(*Client).Send(e)
+				return true
+			})
+			return true
+		})
+		return
+	}
+	if strings.HasPrefix(e.To, "visitor:") {
+		vid := strings.TrimPrefix(e.To, "visitor:")
+		if v, ok := h.visitors.Load(vid); ok {
+			v.(*Client).Send(e)
+		}
+		return
+	}
+	if strings.HasPrefix(e.To, "agent:") {
+		aid := strings.TrimPrefix(e.To, "agent:")
+		if m, ok := h.agents.Load(aid); ok {
+			m.(*sync.Map).Range(func(_, cv any) bool {
+				cv.(*Client).Send(e)
+				return true
+			})
+		}
+		return
 	}
 }
 
@@ -379,7 +437,12 @@ func (h *Hub) fanoutFromRedis(ctx context.Context) {
 			if e.Node == h.cfg.NodeID {
 				continue
 			}
-			h.fanoutLocal(&e)
+			// voice_* 走专用路由（按 To 字段精确转发），其它（chat/read/typing 等）按 ConvID
+			if strings.HasPrefix(e.Type, "voice_") {
+				h.fanoutVoiceLocal(&e)
+			} else {
+				h.fanoutLocal(&e)
+			}
 		}
 	}
 }

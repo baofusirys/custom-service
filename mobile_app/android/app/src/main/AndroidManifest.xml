@@ -1,6 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- 网络权限：访问后端 HTTP/WSS 必须 -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 语音通话：flutter_webrtc 需要 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.BLUETOOTH"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
     <application
         android:label="客服工作台"
         android:name="${applicationName}"

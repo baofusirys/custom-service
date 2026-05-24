@@ -52,6 +52,9 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<!-- 语音通话：访客拨电话进来时，客服 App 接听需要麦克风权限 -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>语音通话需要使用麦克风</string>
 	<!-- 注册 maihaocs:// URL Scheme：让点击 luckfast 推送时能拉起本 App。
 	     luckfast 推送的 url 参数会调 iOS open(URL)，命中此 scheme → 启动 App。
 	     免费 Apple ID 也支持（Universal Links 才需付费账号）。 -->

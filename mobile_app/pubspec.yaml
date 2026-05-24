@@ -24,6 +24,9 @@ dependencies:
   # 音频：播放程序合成的 WAV 字节流（无外部文件，跟 Web 端 11 种音色一致）
   # 6.x：修复了 iOS 17+ 的 BytesSource 兼容问题，5.2.1 在 iOS 26 上 silent fail
   audioplayers: ^6.6.0
+  # WebRTC：双端语音通话（visitor 拨号、agent/App 接听）
+  # 大依赖 ~50MB iOS framework，但只在通话时占用麦克风+音频
+  flutter_webrtc: ^0.11.7
   # 本地通知（[022] 再加，需要 Android core library desugaring）
   # flutter_local_notifications: ^17.0.0
   # 推送（[022] 再加）

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../state/app_state.dart';
+import '../widgets/voice_call_overlay.dart';
 import 'conversations_page.dart';
 import 'me_page.dart';
 
@@ -33,11 +34,17 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(
-        index: _tab,
-        children: const [
-          ConversationsPage(),
-          MePage(),
+      // Stack 让 VoiceCallOverlay 浮在所有页面之上（idle 时自动 SizedBox 不占位）
+      body: Stack(
+        children: [
+          IndexedStack(
+            index: _tab,
+            children: const [
+              ConversationsPage(),
+              MePage(),
+            ],
+          ),
+          const VoiceCallOverlay(),
         ],
       ),
       bottomNavigationBar: NavigationBar(

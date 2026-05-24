@@ -4,6 +4,129 @@
 
 ---
 
+## [029] 2026-05-24 16:25 — 双端语音通话：访客 → 客服 WebRTC 实时语音（widget / admin Web / iPhone App 三端互通）
+
+**起因 / 需求**
+
+爷爷 [028] 提出的 4 件需求最后一件——访客端能给客服打语音电话，**App + Web 客服工作台都能接听**，第一个接的占用，其它客服收到撤销。所有信令走现有 WSS（不引入额外推送服务），音频走 WebRTC P2P 直连。
+
+**架构 / 信令协议**
+
+WSS 加 7 个语音信令 type（后端纯转发、无状态、不入库）：
+
+| type | 方向 | To 字段 | 用途 |
+|---|---|---|---|
+| `voice_call` | visitor → 所有 agent | 空（广播） | 来电，agent 端弹来电浮窗 |
+| `voice_accept` | accepting agent → visitor | `visitor:vid` | 通知 visitor "已接听，发 offer 吧" |
+| `voice_taken` | accepting agent → 所有其它 agent | 空（广播） | 让其它 agent 撤销来电浮窗 |
+| `voice_reject` | agent → visitor | `visitor:vid` | 客服拒接 |
+| `voice_offer` | visitor → accepting agent | `agent:aid` | WebRTC SDP offer |
+| `voice_answer` | agent → visitor | `visitor:vid` | WebRTC SDP answer |
+| `voice_ice` | 双向 | 对端 | ICE candidate 交换 |
+| `voice_end` | 双向 | 对端 | 任何一方挂断 |
+
+WebRTC ICE: 用免费 Google STUN `stun:stun.l.google.com:19302`。
+
+**改了什么 / 加了什么**（新增 2 文件 / 修改 8 文件）
+
+### A. 后端信令路由（1 文件）
+- `backend/internal/ws/hub.go`
+  - `handleIncoming` switch 加 voice_* 7 个 type case（共用同一处理逻辑，盖 From 后转 fanoutVoice）
+  - 新增 `fanoutVoice(ctx, e)`：本节点投递 + Redis 跨节点 publish
+  - 新增 `fanoutVoiceLocal(e)`：根据 To 字段精确转发
+    - `To==""`：广播给所有 agent 的所有连接（voice_call 场景）
+    - `To=="visitor:xxx"`：精确转给指定 visitor 客户端
+    - `To=="agent:xxx"`：转给指定 agent 的所有连接（多端同步用）
+  - `fanoutFromRedis` 加 voice_ 前缀判断，跨节点也走 fanoutVoiceLocal
+  - import 加 strings
+
+### B. widget 访客端拨号（1 文件）
+- `widget/public/chat.html`
+  - HTML：加 `voiceBtn` 电话按钮（在附件按钮旁）+ `voicePanel` 全屏浮窗（电话图标 / 客服名 / 状态文字 / 红色挂断按钮） + 隐藏 `voiceRemoteAudio` autoplay
+  - CSS：voice-panel 渐变蓝背景 + voice-icon 脉动动画（呼叫中）+ 红色挂断按钮
+  - JS voice 模块：状态机 idle → ringing → accepting → talking → ended
+    - `voiceStart()`：getUserMedia 拿麦克风 → 发 voice_call → 30s 超时挂断
+    - `voiceOnAccept()`：创建 RTCPeerConnection + addTrack + createOffer → 发 voice_offer
+    - `voiceOnAnswer()`：setRemoteDescription → 进 talking 状态 + 启动计时
+    - `voiceOnIce()`：addIceCandidate
+    - `voiceEnd()`：发 voice_end + 关闭 PC + 停麦克风 + 清 timer
+  - onmessage 顶部加 `if (env.type.startsWith('voice_')) window.handleVoiceSignal(env)` 分发
+  - `window.handleVoiceSignal` 暴露给 onmessage 调用
+
+### C. admin Web 客服端接听（1 文件）
+- `admin/src/views/Console.vue`
+  - script：新增 `voiceState/voiceStatusText/voiceCallerLabel/voiceRemoteAudioRef` ref + voice 普通对象 (callId, callerFrom, pc, localStream, startTs, timer)
+  - 新增 `handleVoiceSignal(env)` 分发 voice_*
+  - `voiceOnIncoming`：会话列表查 vid 对应 identifier 显示，播本地 agentSound 提醒，30s 超时
+  - `voiceAccept`：getUserMedia + 发 voice_accept (To=visitor) + 发 voice_taken (广播让其它 agent 撤窗)
+  - `voiceOnOffer`：setRemoteDescription + createAnswer + setLocalDescription + 发 voice_answer + 启动计时器
+  - `voiceReject` / `voiceOnRemoteEnd` / `voiceEnd` / `voiceCleanup` 完整状态机
+  - template：`<div v-if="voiceState!='idle'" class="voice-overlay">` 固定右上角浮窗，渐变背景按 state 切（incoming 蓝 / talking 绿 / ended 灰），incoming 双按钮（拒绝+接听）/ talking 单按钮（挂断）
+  - CSS：voice-overlay 滑入动画 + voice-icon 脉动 + 渐变背景三种状态色
+  - onUnmounted 加 voice 资源清理（pc.close / localStream.tracks.stop / timer 清）
+
+### D. iPhone App 接听（4 修改 / 2 新增）
+- `mobile_app/pubspec.yaml`：加 `flutter_webrtc: ^0.11.7`（iOS framework ~50MB 增量）
+- `mobile_app/ios/Runner/Info.plist`：加 `NSMicrophoneUsageDescription`（iOS 麦克风权限提示）
+- `mobile_app/android/app/src/main/AndroidManifest.xml`：加 RECORD_AUDIO / MODIFY_AUDIO_SETTINGS / BLUETOOTH / BLUETOOTH_CONNECT 权限 + microphone feature
+- `mobile_app/lib/state/voice_controller.dart` **新增**：VoiceController extends ChangeNotifier
+  - 完整状态机 idle/incoming/accepting/talking/ended，跟 admin Vue 端 1:1 对齐
+  - sendEnvelope/agentId/agentNickname 字段供 AppState 注入
+  - flutter_webrtc API：`navigator.mediaDevices.getUserMedia({audio:true})` + `createPeerConnection` + `addTrack` + `createAnswer` + `addCandidate`
+  - 信令处理：accept / reject / offer / ice / end 都完整实现
+  - iOS/Android 自动音频路由（flutter_webrtc native plugin），不需要 audio widget
+- `mobile_app/lib/widgets/voice_call_overlay.dart` **新增**：全屏浮窗 widget
+  - `Material color: black54` 半透明黑底覆盖
+  - 300×自适应高 卡片，渐变背景按 state 切色（incoming 蓝 / talking 绿 / ended 灰）
+  - `_PulseIcon` 脉动电话图标动画（incoming 才动）
+  - 圆形按钮 `_CircleButton` 拒绝（红 call_end）/ 接听（绿 call）/ 挂断（红 call_end）
+- `mobile_app/lib/state/app_state.dart`：
+  - import voice_controller
+  - 加 `final VoiceController voice = VoiceController()` 全局单例
+  - `startWs` 后注入 `voice.sendEnvelope = (m) => _ws?.send(m)` + agentId/Nickname
+  - `_onEnvelope` 顶部加 `if (type?.startsWith('voice_')) voice.handleSignal(env)` 分发
+- `mobile_app/lib/pages/home_page.dart`：body 用 Stack 包裹 IndexedStack + 顶部加 `VoiceCallOverlay`（idle 状态自动 SizedBox.shrink 不占位）
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+|---|---|---|
+| 访客想给客服语音说事情 | 没办法 | widget 输入框旁电话按钮一点 → 拨号 + 客服 iPhone/电脑同时弹来电 |
+| 多客服竞争接听 | — | 第一个点接听 → 发 voice_taken 广播 → 其它 agent 浮窗自动消失 |
+| 通话中 | — | 三端任意一端挂断 → 对方收到 voice_end 自动结束 |
+| iPhone 客服 App 接听权限 | — | 系统弹麦克风授权（Info.plist NSMicrophoneUsageDescription）|
+
+**触发场景与边界 + 验证方式**
+
+- WebRTC P2P：浏览器/iOS App 都内置实现，不需要后端做媒体转发；后端只做信令中转
+- 信令走现有 WSS 通道（agent + visitor 都已经在线），不引入额外服务
+- 30 秒未接听自动挂断（widget + admin + App 三端各自计时）
+- 网络中断自动关闭（onConnectionStateChange == failed/disconnected → 调 voiceEnd）
+- 忙线：App 接听端如果已在通话中收到新 voice_call → 自动发 voice_reject(reason=busy)
+- 验证 1：widget 点电话 → 浏览器弹麦克风权限 → 同意 → admin/App 同时弹来电 ✓ 待真机测
+- 验证 2：admin 点接听 → 双向语音 ✓ 待真机测
+- 验证 3：App 点接听 → 双向语音 ✓ 待真机测
+- 验证 4：多 admin 在线时第一个接听 → 其它 admin 来电浮窗消失 ✓ 待真机测
+- 验证 5：任意一端挂断 → 对方浮窗消失 ✓ 待真机测
+
+**安全 / 健壮性**
+
+- 后端零状态：不维护通话 session，纯信令转发；不入库 raw_ws（voice payload 仅 SDP + ICE，无业务数据）
+- 客户端三端都有 timer 兜底（30s 拨号超时 + 通话中 1s 刷新 UI），防 timer 泄漏（cleanup 时 cancel + 置 null）
+- pc.onConnectionStateChange == failed/disconnected → 主动 voiceEnd 防止资源泄漏
+- localStream tracks 在 cleanup 一定 stop（macOS/iOS 否则麦克风指示灯不熄灭）
+- App `_end` 后 2.5s 自动 idle，让用户看清挂断原因
+- voice_call To 字段为空时 fanoutVoiceLocal 才广播给所有 agent；带 To 字段精确路由，杜绝越权信令（visitor 收不到不属于他的 SDP）
+
+**遗留 / 已知**
+
+- 后台接听：iOS App 进入后台后系统会冻结 WebRTC 连接，无法接来电。要支持必须 VoIP Push (PushKit) + CallKit 集成，需要付费 Apple Developer 账号 + 复杂权限申请。当前**只支持前台接听**。
+- TURN 服务：当前只配 Google STUN，跨 NAT 严格场景下（双方都在对称 NAT）可能连不通。后续要部署 coturn 自建 TURN。
+- 暂无通话录音 / 历史记录功能
+- iOS Release App 体积从 21MB → ~50MB+（WebRTC framework iOS arm64）
+
+---
+
 ## [028] 2026-05-24 15:40 — 三件套小优化：访客端粘贴文件/图片 + App 端设置同步 Web + 三端消息复制按钮
 
 **起因 / 需求**

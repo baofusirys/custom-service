@@ -145,6 +145,47 @@
   .msg-line.mine .bubble-copy:hover { background: rgba(255,255,255,.32); color: #fff; }
   .bubble-copy--done { background: #10b981 !important; color: #fff !important; opacity: 1 !important; }
 
+  /* ====== 语音通话浮窗 ====== */
+  .voice-panel {
+    position: absolute; inset: 0;
+    z-index: 50;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: linear-gradient(160deg, #1e3a8a 0%, #2974ff 100%);
+    color: #fff; padding: 20px;
+    animation: voice-fade-in .25s ease-out;
+  }
+  @keyframes voice-fade-in {
+    from { opacity: 0; transform: scale(.95); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+  .voice-panel .voice-icon {
+    width: 88px; height: 88px; border-radius: 50%;
+    background: rgba(255,255,255,.18);
+    display: flex; align-items: center; justify-content: center;
+    margin-bottom: 18px;
+    animation: voice-pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes voice-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,.35); }
+    50%      { box-shadow: 0 0 0 18px rgba(255,255,255,0); }
+  }
+  .voice-panel.voice-panel--talking .voice-icon { animation: none; background: rgba(16,185,129,.25); }
+  .voice-panel.voice-panel--ended .voice-icon  { animation: none; background: rgba(255,255,255,.12); }
+  .voice-target { font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+  .voice-status { font-size: 14px; opacity: .85; margin-bottom: 32px; }
+  .voice-hang {
+    width: 60px; height: 60px; border-radius: 50%; border: none;
+    background: #ef4444; color: #fff; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 14px rgba(239,68,68,.45);
+    transition: background .15s, transform .1s;
+  }
+  .voice-hang:hover { background: #dc2626; }
+  .voice-hang:active { transform: scale(.95); }
+  .voice-panel.voice-panel--ended .voice-hang { display: none; }
+  #voiceRemoteAudio { display: none; }
+
 
   /* 同组多条气泡的"chain" 视觉：
    *   - 非最后一条：靠头像那侧的下角小圆角，连接下一条
@@ -266,10 +307,34 @@
             </svg>
           </button>
           <input type="file" id="fileInput" style="display:none">
+          <button class="icon-btn" id="voiceBtn" title="语音通话">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+            </svg>
+          </button>
         </div>
         <button class="send-btn" id="sendBtn">发送</button>
       </div>
     </footer>
+
+    <!-- 语音通话浮窗（覆盖在 widget 顶部，呼叫中/通话中显示） -->
+    <div id="voicePanel" class="voice-panel" style="display:none">
+      <div class="voice-icon">
+        <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+        </svg>
+      </div>
+      <div class="voice-target">客服</div>
+      <div class="voice-status">拨号中...</div>
+      <button class="voice-hang" id="voiceHangBtn" title="挂断">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/>
+          <line x1="22" y1="2" x2="2" y2="22"/>
+        </svg>
+      </button>
+      <!-- 远端音频流挂载点，autoplay 在用户点击「呼叫」手势之后允许 -->
+      <audio id="voiceRemoteAudio" autoplay playsinline></audio>
+    </div>
   </div>
 
 <script>
@@ -320,6 +385,12 @@
   closeBtn.onclick = function () { parent.postMessage({ __cs: 1, type: 'close' }, '*'); };
   fileBtn.onclick = function () { fileInput.click(); };
   fileInput.onchange = onPickFile;
+  // 语音通话按钮 + 挂断按钮 + 远端 audio 绑定
+  var voiceBtn = document.getElementById('voiceBtn');
+  var voiceHangBtn = document.getElementById('voiceHangBtn');
+  voice.remoteAudio = document.getElementById('voiceRemoteAudio');
+  if (voiceBtn) voiceBtn.onclick = function () { voiceStart(); };
+  if (voiceHangBtn) voiceHangBtn.onclick = function () { voiceEnd('您挂断了'); };
   sendBtn.onclick = sendText;
   inputEl.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
@@ -333,6 +404,193 @@
     statusEl.textContent = text;
     dotEl.classList.toggle('off', !ok);
   }
+
+  // ====== 语音通话（WebRTC + WSS 信令） ======
+  // 完整流程：
+  //   visitor 点电话按钮 → getUserMedia → ws.send(voice_call) →
+  //   等 voice_accept (agent 接听，来源是 e.from) → 创建 RTCPeerConnection +
+  //   addTrack + createOffer + setLocalDescription → ws.send(voice_offer, to=agent) →
+  //   收 voice_answer → setRemoteDescription → 双方互换 voice_ice → 通话建立
+  //   任何一方 voice_end → 关闭 PC + 关麦克风 + 撤窗
+  var voice = {
+    state: 'idle',  // idle / ringing / accepting / talking / ended
+    callId: null,
+    pc: null,
+    localStream: null,
+    remoteAudio: null,
+    remoteAgent: null,  // "agent:xxx" 接听方
+    startTs: 0,
+    timer: null,        // 拨号超时 / 通话计时
+  };
+  var ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+  function voicePanel() { return document.getElementById('voicePanel'); }
+  function voiceSetStatus(text, klass) {
+    var p = voicePanel();
+    if (!p) return;
+    p.style.display = 'flex';
+    p.querySelector('.voice-status').textContent = text;
+    p.classList.remove('voice-panel--talking', 'voice-panel--ended');
+    if (klass) p.classList.add(klass);
+  }
+  function voiceHidePanel() {
+    var p = voicePanel(); if (!p) return;
+    p.style.display = 'none';
+    p.classList.remove('voice-panel--talking', 'voice-panel--ended');
+  }
+
+  async function voiceStart() {
+    if (voice.state !== 'idle') return;
+    if (!alive) { renderSys('未连接，无法呼叫'); return; }
+    voice.state = 'ringing';
+    voice.callId = 'call-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    try {
+      voice.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      voice.state = 'idle';
+      renderSys('无法访问麦克风：' + (e.message || e));
+      return;
+    }
+    voiceSetStatus('拨号中…等待客服接听');
+    ws.send(JSON.stringify({
+      type: 'voice_call', ts: Date.now(),
+      extra: { call_id: voice.callId }
+    }));
+    // 30 秒无人接听自动挂断
+    voice.timer = setTimeout(function () {
+      if (voice.state === 'ringing') voiceEnd('无人接听');
+    }, 30000);
+  }
+
+  function createVoicePC() {
+    var pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    pc.onicecandidate = function (ev) {
+      if (ev.candidate && voice.remoteAgent) {
+        ws.send(JSON.stringify({
+          type: 'voice_ice', to: voice.remoteAgent, ts: Date.now(),
+          extra: {
+            call_id: voice.callId,
+            candidate: ev.candidate.candidate,
+            sdpMid: ev.candidate.sdpMid,
+            sdpMLineIndex: ev.candidate.sdpMLineIndex
+          }
+        }));
+      }
+    };
+    pc.ontrack = function (ev) {
+      if (voice.remoteAudio && ev.streams[0]) {
+        voice.remoteAudio.srcObject = ev.streams[0];
+      }
+    };
+    pc.onconnectionstatechange = function () {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        voiceEnd('连接中断');
+      }
+    };
+    return pc;
+  }
+
+  async function voiceOnAccept(env) {
+    if (voice.state !== 'ringing') return;
+    var cid = env.extra && env.extra.call_id;
+    if (cid !== voice.callId) return;
+    if (voice.timer) { clearTimeout(voice.timer); voice.timer = null; }
+    voice.remoteAgent = env.from;  // "agent:xxx"
+    voice.state = 'accepting';
+    voiceSetStatus('正在建立通话…');
+    voice.pc = createVoicePC();
+    voice.localStream.getTracks().forEach(function (t) {
+      voice.pc.addTrack(t, voice.localStream);
+    });
+    var offer = await voice.pc.createOffer();
+    await voice.pc.setLocalDescription(offer);
+    ws.send(JSON.stringify({
+      type: 'voice_offer', to: voice.remoteAgent, ts: Date.now(),
+      extra: { call_id: voice.callId, sdp: offer.sdp }
+    }));
+  }
+
+  async function voiceOnAnswer(env) {
+    if (voice.state !== 'accepting' || !voice.pc) return;
+    try {
+      await voice.pc.setRemoteDescription({ type: 'answer', sdp: env.extra.sdp });
+    } catch (e) {
+      voiceEnd('协商失败');
+      return;
+    }
+    voice.state = 'talking';
+    voice.startTs = Date.now();
+    voiceSetStatus('通话中 00:00', 'voice-panel--talking');
+    voice.timer = setInterval(function () {
+      if (voice.state !== 'talking') return;
+      var sec = Math.floor((Date.now() - voice.startTs) / 1000);
+      var mm = String(Math.floor(sec / 60)).padStart(2, '0');
+      var ss = String(sec % 60).padStart(2, '0');
+      voiceSetStatus('通话中 ' + mm + ':' + ss, 'voice-panel--talking');
+    }, 1000);
+  }
+
+  async function voiceOnIce(env) {
+    if (!voice.pc || !env.extra) return;
+    try {
+      await voice.pc.addIceCandidate({
+        candidate: env.extra.candidate,
+        sdpMid: env.extra.sdpMid,
+        sdpMLineIndex: env.extra.sdpMLineIndex
+      });
+    } catch (e) {}
+  }
+
+  function voiceOnReject(env) {
+    if (voice.state !== 'ringing') return;
+    voiceEnd('客服拒绝了通话');
+  }
+
+  function voiceOnEnd(env) {
+    if (voice.state === 'idle') return;
+    voiceEnd('对方已挂断');
+  }
+
+  function voiceEnd(reason) {
+    if (voice.state === 'idle') return;
+    if (voice.remoteAgent) {
+      ws.send(JSON.stringify({
+        type: 'voice_end', to: voice.remoteAgent, ts: Date.now(),
+        extra: { call_id: voice.callId, reason: reason || '' }
+      }));
+    } else {
+      // 拨号期间没人接，广播给所有 agent 让来电浮窗消失
+      ws.send(JSON.stringify({
+        type: 'voice_end', ts: Date.now(),
+        extra: { call_id: voice.callId, reason: reason || '' }
+      }));
+    }
+    if (voice.pc) { try { voice.pc.close(); } catch {} voice.pc = null; }
+    if (voice.localStream) {
+      voice.localStream.getTracks().forEach(function (t) { t.stop(); });
+      voice.localStream = null;
+    }
+    if (voice.timer) { clearTimeout(voice.timer); clearInterval(voice.timer); voice.timer = null; }
+    if (voice.remoteAudio) voice.remoteAudio.srcObject = null;
+    voice.state = 'ended';
+    voice.callId = null;
+    voice.remoteAgent = null;
+    voiceSetStatus(reason || '通话结束', 'voice-panel--ended');
+    setTimeout(function () {
+      if (voice.state === 'ended') { voice.state = 'idle'; voiceHidePanel(); }
+    }, 2500);
+  }
+
+  // 暴露给 ws.onmessage 调用
+  window.handleVoiceSignal = function (env) {
+    switch (env.type) {
+      case 'voice_accept': voiceOnAccept(env); break;
+      case 'voice_reject': voiceOnReject(env); break;
+      case 'voice_answer': voiceOnAnswer(env); break;
+      case 'voice_ice':    voiceOnIce(env); break;
+      case 'voice_end':    voiceOnEnd(env); break;
+    }
+  };
 
   // ====== 通知声音（真实录制 WAV 文件） ======
   // 访客端只听 visitor 系列 3 种音色，加 none。文件在 widget/public/sounds/，
@@ -690,6 +948,11 @@
         if (env.from && env.from.indexOf('agent:') === 0) {
           setReadIndicator(true);
         }
+        return;
+      }
+      // 语音通话信令分发（仅当存在 voice 模块时，避免 undefined）
+      if (env.type && env.type.indexOf('voice_') === 0) {
+        if (window.handleVoiceSignal) window.handleVoiceSignal(env);
         return;
       }
       if (env.type === 'chat') {
