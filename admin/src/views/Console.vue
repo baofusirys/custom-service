@@ -20,7 +20,7 @@ const draft = ref('')
 const onlineStats = ref({ visitors: 0, agents: 0 })
 const fileInput = ref(null)
 const sending = ref(false)
-const agentSound = ref('chime') // 由 /admin/settings 拉到的客服端通知音
+const agentSound = ref('agent1') // 由 /admin/settings 拉到的客服端通知音
 const myConnId = ref('') // 自己 WSS 连接 ID（hello 时拿到，用于多端同步去重）
 let ws = null
 
@@ -29,7 +29,7 @@ async function loadSoundPref() {
   if (session.agent?.role !== 'admin') return
   try {
     const r = await http.get('/admin/settings')
-    agentSound.value = r.data?.agent_notify_sound || 'chime'
+    agentSound.value = r.data?.agent_notify_sound || 'agent1'
   } catch {}
 }
 

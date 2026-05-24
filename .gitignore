@@ -12,6 +12,9 @@ cert*/
 *.pem
 *.key
 
+# 爷爷给的原始音频文件（已重命名分发到三端各自的 sounds/ 目录，原始目录不必入库）
+音频内容/
+
 # 构建产物
 backend/bin/
 backend/tmp/

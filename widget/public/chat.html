@@ -279,8 +279,7 @@
   var unread = 0;
   var pingTimer = null;
   var lastGroup = null; // 最近一组消息的元数据，用于合并
-  var notifySound = 'classic'; // 通知声音，启动时拉服务端覆盖
-  var audioCtx = null;
+  var notifySound = 'visitor1'; // 通知声音，启动时拉服务端覆盖；旧 key (classic/chime/...) 在 playNotify 内 fallback 到 visitor1
   // widget 是否处于打开状态。loader.js 通过 postMessage('widget_state') 通知。
   // 默认 false（页面刚加载时 iframe 在但 widget 收起）；打开时清零未读。
   var isWidgetOpen = false;
@@ -317,84 +316,51 @@
     dotEl.classList.toggle('off', !ok);
   }
 
-  // ====== 通知声音（Web Audio API 程序合成） ======
-  var SOUND_DEFS = {
-    // ---- 短促音色 ----
-    classic: function (ctx) { tone(ctx, 880, 0.18, 'sine', 0.3); },
-    chime:   function (ctx) { seq(ctx, [{f:1320,d:0.08},{f:990,d:0.18}], 'sine', 0.3); },
-    ding:    function (ctx) { seq(ctx, [{f:587,d:0.1},{f:784,d:0.18}], 'sine', 0.35); },
-    soft:    function (ctx) { tone(ctx, 523, 0.35, 'triangle', 0.22); },
-    alert:   function (ctx) { seq(ctx, [{f:700,d:0.06},{f:0,d:0.04},{f:700,d:0.06},{f:0,d:0.04},{f:700,d:0.1}], 'sine', 0.28); },
-    // ---- 响亮长音色 ----
-    bell:    function (ctx) { layered(ctx, [{f:1046.5,v:0.5,d:1.2},{f:2093,v:0.18,d:0.85}], 'sine'); },
-    doorbell:function (ctx) { seq(ctx, [{f:659.25,d:0.25},{f:523.25,d:0.6}], 'sine', 0.5); },
-    trill:   function (ctx) { seq(ctx, [{f:880,d:0.08},{f:1100,d:0.08},{f:880,d:0.08},{f:1100,d:0.08},{f:880,d:0.08},{f:1100,d:0.08},{f:880,d:0.22}], 'sine', 0.45); },
-    fanfare: function (ctx) { seq(ctx, [{f:523.25,d:0.12},{f:659.25,d:0.12},{f:783.99,d:0.12},{f:1046.5,d:0.4}], 'sine', 0.5); },
-    chord:   function (ctx) { layered(ctx, [{f:523.25,v:0.28,d:0.8},{f:659.25,v:0.28,d:0.8},{f:783.99,v:0.28,d:0.8}], 'sine'); },
-    none:    function () {}
+  // ====== 通知声音（真实录制 WAV 文件） ======
+  // 访客端只听 visitor 系列 3 种音色，加 none。文件在 widget/public/sounds/，
+  // 浏览器访问路径 ./sounds/visitorN.wav（相对当前 chat.html 所在 /widget/ 路径）
+  var SOUND_FILES = {
+    visitor1: 'sounds/visitor1.wav',
+    visitor2: 'sounds/visitor2.wav',
+    visitor3: 'sounds/visitor3.wav'
   };
-  function getAudio() {
-    if (audioCtx && audioCtx.state !== 'closed') return audioCtx;
-    try {
-      var C = window.AudioContext || window.webkitAudioContext;
-      if (!C) return null;
-      audioCtx = new C();
-      return audioCtx;
-    } catch { return null; }
-  }
-  function tone(ctx, freq, dur, type, vol) {
-    var o = ctx.createOscillator(), g = ctx.createGain(), t0 = ctx.currentTime;
-    o.type = type; o.frequency.value = freq;
-    g.gain.setValueAtTime(0, t0);
-    g.gain.linearRampToValueAtTime(vol, t0 + 0.01);
-    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-    o.connect(g).connect(ctx.destination);
-    o.start(t0); o.stop(t0 + dur + 0.02);
-  }
-  function seq(ctx, notes, type, vol) {
-    var t = ctx.currentTime;
-    notes.forEach(function (n) {
-      if (n.f <= 0) { t += n.d; return; }
-      var o = ctx.createOscillator(), g = ctx.createGain();
-      o.type = type; o.frequency.value = n.f;
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(vol, t + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + n.d);
-      o.connect(g).connect(ctx.destination);
-      o.start(t); o.stop(t + n.d + 0.02);
-      t += n.d;
-    });
-  }
-  // 多层叠加（和弦 / 谐波）：所有层同时开始，各自有独立时长和音量
-  function layered(ctx, layers, type) {
-    var t0 = ctx.currentTime;
-    layers.forEach(function (n) {
-      var o = ctx.createOscillator(), g = ctx.createGain();
-      o.type = type; o.frequency.value = n.f;
-      g.gain.setValueAtTime(0, t0);
-      g.gain.linearRampToValueAtTime(n.v, t0 + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + n.d);
-      o.connect(g).connect(ctx.destination);
-      o.start(t0); o.stop(t0 + n.d + 0.02);
-    });
-  }
+  // 预加载所有音频元素：第一次试听零延迟
+  var soundCache = {};
+  Object.keys(SOUND_FILES).forEach(function (k) {
+    var a = new Audio(SOUND_FILES[k]);
+    a.preload = 'auto';
+    a.volume = 1.0;
+    soundCache[k] = a;
+  });
   var lastPlay = 0;
   function playNotify() {
     if (!notifySound || notifySound === 'none') return;
     var now = Date.now();
     if (now - lastPlay < 500) return; // 500ms 防抖
     lastPlay = now;
-    var def = SOUND_DEFS[notifySound];
-    if (!def) return;
-    var ctx = getAudio();
-    if (!ctx) return;
-    if (ctx.state === 'suspended') ctx.resume().catch(function(){});
-    try { def(ctx); } catch {}
+    var a = soundCache[notifySound];
+    // 老用户数据库里可能存的是 classic/chime 等旧 key → fallback 到 visitor1
+    if (!a) a = soundCache.visitor1;
+    if (!a) return;
+    try {
+      a.currentTime = 0;
+      a.volume = 1.0;
+      var p = a.play();
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) {}
   }
-  // 浏览器要求音频必须用户手势触发；用户在聊天框点击就算
+  // 浏览器要求音频必须用户手势触发；用户在聊天框第一次点击时解锁所有 Audio
   document.addEventListener('click', function () {
-    var ctx = getAudio();
-    if (ctx && ctx.state === 'suspended') ctx.resume().catch(function(){});
+    Object.keys(soundCache).forEach(function (k) {
+      var a = soundCache[k];
+      try {
+        a.volume = 0;
+        var p = a.play();
+        if (p && p.then) p.then(function () { a.pause(); a.currentTime = 0; a.volume = 1.0; })
+                          .catch(function () { a.volume = 1.0; });
+        else a.volume = 1.0;
+      } catch (e) { a.volume = 1.0; }
+    });
   }, { once: true, capture: true });
 
   // ====== 时间格式化 ======

@@ -13,8 +13,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _loading = true;
   bool _saving = false;
 
-  String _agentSound = 'chime';
-  String _visitorSound = 'classic';
+  String _agentSound = 'agent1';
+  String _visitorSound = 'visitor1';
   bool _notifyVisitorEnter = true;
   bool _greetingEnabled = true;
   final _greetingText = TextEditingController(
@@ -40,8 +40,8 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => _loading = true);
     try {
       final s = await Api.getSettings();
-      _agentSound = (s['agent_notify_sound'] ?? 'chime').toString();
-      _visitorSound = (s['visitor_notify_sound'] ?? 'classic').toString();
+      _agentSound = (s['agent_notify_sound'] ?? 'agent1').toString();
+      _visitorSound = (s['visitor_notify_sound'] ?? 'visitor1').toString();
       _notifyVisitorEnter = (s['notify_visitor_enter']?.toString() ?? 'true') != 'false';
       _greetingEnabled = (s['greeting_enabled']?.toString() ?? 'true') != 'false';
       if (s['greeting_text'] != null && s['greeting_text'].toString().isNotEmpty) {

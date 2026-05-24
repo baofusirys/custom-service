@@ -4,6 +4,75 @@
 
 ---
 
+## [026] 2026-05-24 08:50 — 通知音色彻底重做：废弃 11 种程序合成 → 改用 6 个真实录音 WAV（三端统一）
+
+**起因 / 需求**
+
+爷爷反馈三端（admin / widget / iPhone App）的程序合成音色一律「声音太小」：
+- iOS 上深度调试发现 audioplayers 5.2.1 在 iOS 26.5 上 BytesSource 直接 silent fail
+- 升级到 audioplayers 6.4.0 后又遇到「AVPlayerItem.Status.failed err=-12860」—— 6.x 默认临时文件后缀 `.mp3`，AVPlayer 拿 WAV 当 mp3 解码失败
+- 加 `mimeType: 'audio/wav'` 后能响但音量偏小（PCM 合成幅度只有 0.3~0.5）
+- 把 vol 拉到 0.95 仍然不够大
+
+爷爷直接给了 6 个真实录制的 WAV 文件，决定**全部废弃程序合成**，三端统一用真实录音。
+
+**改了什么 / 加了什么 / 删了什么**
+
+新增（15 文件 + 3 目录 + 1 SQL）：
+- 三端 sounds 目录各放对应 WAV：
+  - `mobile_app/assets/sounds/`：agent1/2/3 + visitor1/2/3 共 6 个（Flutter 全部用）
+  - `admin/public/sounds/`：同上 6 个（admin 管理员要给客服+访客都设置）
+  - `widget/public/sounds/`：visitor1/2/3 共 3 个（访客只听访客端音色）
+- `backend/migrations/004_sound_upgrade.sql` 把数据库残留的旧合成音色 key（chime / classic / ding / soft / alert / bell / doorbell / trill / fanfare / chord）UPDATE 成 agent1 / visitor1
+
+修改：
+- `admin/src/api/sound.js` 完全重写：HTMLAudioElement 预加载 + `unlockAudio()` 首次手势解锁 autoplay policy + 500ms 防抖；用 `import.meta.env.BASE_URL` 动态拼路径兼容 vite 开发/生产
+- `widget/public/chat.html` 删除 122 行合成代码（tone/seq/layered + AudioContext），换成 3 行 `new Audio(url)` 预加载 + click 解锁；旧 key fallback 到 visitor1
+- `mobile_app/lib/api/sound.dart` 完全重写：用 `AssetSource('sounds/xxx.wav')` 加载本地 asset；保留 AudioContext playback / 静音键也响、500ms 防抖、每次 new player 避免 state machine bug、`setVolume(1.0)` 显式拉满；旧 key fallback 到 agent1
+- `mobile_app/pubspec.yaml` audioplayers 升级 5.2.1 → 6.6.0、新增 `assets: - assets/sounds/`
+- 4 处硬编码默认音色 key 全部 sed 替换：`'chime'` → `'agent1'`、`'classic'` → `'visitor1'`（admin/src/views/Settings.vue、admin/src/views/Console.vue、mobile_app/lib/state/app_state.dart、mobile_app/lib/pages/settings_page.dart）
+- `.gitignore` 加 `音频内容/`（爷爷原始 WAV，已分发到三端，不必入库）
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+|---|---|---|
+| 三端可选音色 | 11 种合成（classic/chime/ding/...）| 7 种真实（工作台 1/2/3 + 访客端 1/2/3 + 静音） |
+| iOS App 试听 | iOS 26.5 audioplayers 5.2.1 silent fail；升 6.x 后 AVPlayer err=-12860；加 mimeType 后能响但太小 | 真实录音 + AssetSource + AVPlayer 正常播放，**音量大** |
+| admin Web | Web Audio API oscillator 合成 + 浏览器音量衰减，明显偏小 | 真实录音 HTMLAudioElement + 系统满音量 |
+| widget 访客端 | 同上 | 同上 |
+| 老数据库已设音色 | 仍是 chime/classic 等旧 key，前端 dropdown 找不到对应 option | migration 004 自动 UPDATE 成 agent1/visitor1 |
+
+**触发场景与边界 + 验证方式**
+
+触发：
+- 客服收到访客消息 → 三端均播 agent_notify_sound（默认 agent1）
+- 访客收到客服消息 → widget 播 visitor_notify_sound（默认 visitor1）
+- 用户在设置页点试听 → 立即播
+- 500ms 内重复同名音色防抖
+
+边界：
+- 浏览器 autoplay policy：用户首次点击页面后才能解锁 Audio
+- iOS audioplayers 6.x：必须传 `mimeType: 'audio/wav'`（虽然 AssetSource 内部自动识别扩展名，但保留 sound.dart 的 fallback 注释提醒）
+- 老数据库 (002 已 applied)：004 是新增 migration，会自动应用一次性强制 UPDATE
+- WAV 文件 280KB ~ 360KB 每个，三端总体积增加约 5MB（admin 1.6MB + widget 800KB + iOS App 1.7MB）
+
+验证（已实测）：
+1. `curl -sI https://maihaocs.icu/admin/sounds/agent1.wav` → 200
+2. `curl -sI https://maihaocs.icu/widget/sounds/visitor1.wav` → 200
+3. 数据库 `SELECT key_name, value FROM settings WHERE key_name LIKE '%sound%'` → agent_notify_sound=agent1 / visitor_notify_sound=visitor1
+4. iPhone App build → 19.6MB → 21.4MB（多了 1.8MB 就是 6 个 WAV 嵌入的体积）
+5. iPhone App 试听 → 真实录音、音量大
+
+**安全 / 健壮性**
+
+- 三端 sound 模块都有 try/catch 静默失败兜底（音频失败不影响业务）
+- 旧 key fallback：admin/widget/App 都有 fallback 到默认音色，老用户数据库值仍能用
+- migration 004 用 `SET time_zone='+08:00'` 保证 updated_at 是北京时间
+- 不偷懒：4 个文件硬编码 key 全部 sed 替换 + 新建 migration 而非改老 migration（保护 schema_migrations checksum）
+
+---
+
 ## [025] 2026-05-24 07:55 — iOS App 真机 Release 调试通跑 + 域名 maihaocs.icu 全自动 HTTPS 证书
 
 **起因 / 需求**

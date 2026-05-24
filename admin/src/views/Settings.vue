@@ -7,8 +7,8 @@ import { listSounds, playSound, unlockAudio } from '../api/sound'
 const loading = ref(false)
 const saving = ref(false)
 const form = ref({
-  agent_notify_sound: 'chime',
-  visitor_notify_sound: 'classic',
+  agent_notify_sound: 'agent1',
+  visitor_notify_sound: 'visitor1',
   notify_visitor_enter: true,
   greeting_enabled: true,
   greeting_text: '您好，欢迎光临！请问有什么可以帮您？',
@@ -22,8 +22,8 @@ async function load() {
   try {
     const r = await http.get('/admin/settings')
     const d = r.data || {}
-    form.value.agent_notify_sound = d.agent_notify_sound || 'chime'
-    form.value.visitor_notify_sound = d.visitor_notify_sound || 'classic'
+    form.value.agent_notify_sound = d.agent_notify_sound || 'agent1'
+    form.value.visitor_notify_sound = d.visitor_notify_sound || 'visitor1'
     form.value.notify_visitor_enter = d.notify_visitor_enter !== 'false'
     form.value.greeting_enabled = d.greeting_enabled !== 'false'
     form.value.greeting_text = d.greeting_text || form.value.greeting_text

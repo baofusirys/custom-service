@@ -28,13 +28,13 @@ class AppState extends ChangeNotifier {
   // 自己 WSS 连接 ID（从 hello envelope 拿）—— 多端同步去重的关键
   String? myConnId;
   // 客服端通知音色（admin 才能拉到完整设置，普通客服 fallback 默认）
-  String agentSound = 'chime';
+  String agentSound = 'agent1';
 
   Future<void> loadAgentSound() async {
     if (agent?.role != 'admin') return;
     try {
       final s = await Api.getSettings();
-      agentSound = (s['agent_notify_sound'] ?? 'chime').toString();
+      agentSound = (s['agent_notify_sound'] ?? 'agent1').toString();
     } catch (_) {}
   }
 
