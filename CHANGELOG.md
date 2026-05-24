@@ -4,6 +4,41 @@
 
 ---
 
+## [037] 2026-05-25 00:40 — App 聊天页标题居中 + 加访客来源/当前页/位置信息条
+
+**起因 / 需求**
+爷爷反馈 iPhone App 聊天页：
+1. 顶部「访客 119572」**不居中**（被左对齐顶到返回按钮旁）
+2. **访客网址看不清楚**（其实根本没显示当前页 URL，且老逻辑把"地理位置"和"referer"拼在 AppBar 副标题字号 11px 一行里看不清）
+
+对比 admin web Console.vue 是用两条 el-tag「来源：xxx」+「当前页：xxx」清晰展示，App 端缺失。
+
+**改了什么**（修改 1 文件）
+
+- `mobile_app/lib/pages/chat_page.dart`：
+  - AppBar `title` 从 `Column(crossAxisAlignment.start, [Text(name), Text(loc+referer fontSize:11)])` → 单行 `Text(name, fontSize:17, fontWeight:w600)`，并显式 `centerTitle: true`，标题真居中
+  - body 顶部新增 `_visitorInfoBar(conv)` 信息条：灰底 (0xFFF5F7FA)，三行（任一非空才显示）`来源：${referer}` / `当前页：${lastPage}` / `位置：${location}`；标签加粗深色 + 内容字号 13；URL 长不 ellipsis 而是自动换行（爷爷强调「看不清」就是要看全）
+  - 新增辅助 `_infoLine(label, value)` RichText 渲染
+  - import `models.dart` 的 Conversation 类型注解（已 import）
+
+**业务流程对比**
+
+| 端 | 改前 | 改后 |
+|---|---|---|
+| App 聊天页标题 | 「访客 119572」+ 第二行 11px 文字（且只拼 location + referer，没 lastPage），全部左对齐 | 「访客 119572」17px 加粗居中（与 iOS 风格一致）|
+| App 聊天页访客信息 | 同上 11px 一行隐没在 AppBar 里看不清 | 正文顶部独立信息条，灰底，13px，行高 1.4，长 URL 自动换行；缺字段不显示 |
+| 与 admin web 一致性 | 缺当前页 URL；只有 referer 拼地理位置 | 来源 + 当前页 + 位置三件套（admin 是「来源」+「当前页」el-tag，App 多了「位置」补充地理） |
+
+**触发场景与边界 + 验证方式**
+- 访客只有 referer 没 last_page：只显示「来源：...」一行
+- 访客 referer 和 last_page 都空（直接访问 / 单页应用）：只显示位置（如果有地理）
+- 三项全空：信息条整个不渲染（`SizedBox.shrink()`），不留空白
+- 长 URL（>50 字符）：自动换行多行展示，不截断不 ellipsis
+- 不影响：消息列表 / 输入框 / 来电铃声 / 录音 / 通话功能
+- 验证：iPhone 打开任意会话 → 标题居中 + 信息条带 URL 清晰可见
+
+---
+
 ## [036] 2026-05-25 00:25 — 三端语音来电统一循环铃声 voice-ring.mp3 + 下线 push_sound_call 设置
 
 **起因 / 需求**

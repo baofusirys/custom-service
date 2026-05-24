@@ -66,20 +66,18 @@ class _ChatPageState extends State<ChatPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(conv.displayName, style: const TextStyle(fontSize: 16)),
-            if (conv.location.isNotEmpty || conv.referer.isNotEmpty)
-              Text(
-                [conv.location, conv.referer].where((s) => s.isNotEmpty).join(' · '),
-                style: const TextStyle(fontSize: 11, color: Colors.white70),
-              ),
-          ],
+        centerTitle: true,
+        // [037] 标题真居中（之前内层 Column crossAxisAlignment.start 把它顶到左边了）
+        title: Text(
+          conv.displayName,
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
         ),
       ),
       body: Column(
         children: [
+          // [037] 访客来源 / 当前页 / 位置信息条（对齐 admin web Console.vue 的访客信息）
+          // AppBar 顶部容易被截断看不清，单独放到正文顶部，每条独立一行 + 自动换行，URL 再长也能看清
+          _visitorInfoBar(conv),
           Expanded(
             child: NotificationListener<ScrollNotification>(
               onNotification: (n) {
@@ -108,6 +106,49 @@ class _ChatPageState extends State<ChatPage> {
           ),
           _inputBar(),
         ],
+      ),
+    );
+  }
+
+  /// 访客信息条：来源 / 当前页 / 地理位置，对齐 admin Console.vue 的访客信息块
+  /// 三项任一非空才显示；URL 太长支持换行而不是 ellipsis（爷爷反馈"看不清"）
+  Widget _visitorInfoBar(Conversation conv) {
+    final rows = <Widget>[];
+    if (conv.referer.isNotEmpty) {
+      rows.add(_infoLine('来源', conv.referer));
+    }
+    if (conv.lastPage.isNotEmpty) {
+      rows.add(_infoLine('当前页', conv.lastPage));
+    }
+    if (conv.location.isNotEmpty) {
+      rows.add(_infoLine('位置', conv.location));
+    }
+    if (rows.isEmpty) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      color: const Color(0xFFF5F7FA),
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: rows,
+      ),
+    );
+  }
+
+  Widget _infoLine(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: RichText(
+        text: TextSpan(
+          style: const TextStyle(fontSize: 13, color: Color(0xFF606266), height: 1.4),
+          children: [
+            TextSpan(
+              text: '$label：',
+              style: const TextStyle(fontWeight: FontWeight.w600, color: Color(0xFF303133)),
+            ),
+            TextSpan(text: value),
+          ],
+        ),
       ),
     );
   }
