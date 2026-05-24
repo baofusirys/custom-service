@@ -4,6 +4,47 @@
 
 ---
 
+## [034-fix1] 2026-05-24 23:30 — hub.go voice_end 去重 bug：实测出现重复「连接失败」sys 消息
+
+**起因 / 需求**
+[034] 部署后实测：iPhone 接听后 WebRTC 失败（VPN 导致 ICE 打洞失败），双方都触发 voice_end(code=failed)。爷爷的聊天记录里出现了**两条「连接失败」**而不是一条。
+
+抓 raw_ws.log 复盘：
+- `22:24:51.383` visitor 发 voice_end(failed, dur=16) → hub 写第 1 条 sys ✓
+- `22:24:51.397` sys「连接失败」FanoutToConv
+- `22:24:51.498` iPhone 发 voice_end(failed, dur=15) → **hub 又写了第 2 条 sys** ✗
+- `22:24:51.509` sys「连接失败」FanoutToConv（重复）
+
+**根因**
+[034] 我的去重逻辑写在 `pendingCall.finished` 字段上，但**第一次成功后我同时把 buffer `Delete` 了**——第二次 voice_end 进来时 `pendingCalls.Load(cid)` 返回 not ok，走 else 分支的 `extractVisitorID(envelope)` fallback 又调一次 `OnVoiceCallFinished` 写第二条 sys。`finished=true` 标志因为 buffer 被删而完全失效。
+
+**改了什么**（修改 1 文件）
+
+- `backend/internal/ws/hub.go`：
+  - Hub struct 新增 `finishedCalls sync.Map`（map[callID]time.Time），跟 pendingCalls 解耦
+  - 删除 `pendingCall.finished` 字段（不再依赖）
+  - voice_end/reject 分支重写：进入时先查 `finishedCalls.Load(cid)`，命中就 break；第一次走完流程后 `finishedCalls.Store(cid, time.Now())` + 5 分钟 AfterFunc 自动清理；同时 `pendingCalls.Delete(cid)` 释放内存
+  - 注释更新 pendingCall 说明去重已移到 Hub 层
+
+**业务流程对比**
+
+| 时序 | 改前 | 改后 |
+|---|---|---|
+| visitor 发 voice_end(failed) | hub 写 sys 「连接失败」+ buffer 删 | hub 写 sys + finishedCalls 标记 + buffer 删 |
+| iPhone 发 voice_end(failed) 0.1s 后 | buffer 已删 → 走 fallback → **写第 2 条 sys** | finishedCalls 命中 → break → **不写第 2 条** |
+
+**触发场景与边界 + 验证方式**
+- **双方同时挂断**：第二个 voice_end 在 5 分钟 dedup 窗口内必被拦截
+- **5 分钟后的重复**：理论上不会发生（WebRTC 信令不可能延迟这么久），即使发生也只是多一条 sys，不会崩
+- **buffer 过期 + 单边挂断**：仍走 `extractVisitorID(envelope)` fallback 写 sys，然后 finishedCalls 记下，第二个 voice_end 仍能被去重
+- **不影响 [034] 主流程**：6 种 code 写 sys 的逻辑没动
+- **验证**：raw_ws.log 中下次双端 voice_end 时，应该只看到 1 条 sys「连接失败」FanoutToConv，不是 2 条
+
+**注意：通话失败本身不是 [034] bug**
+raw_ws.log 显示 iPhone 发的 ICE candidate 全是 `198.18.0.1` / `127.0.0.1` / `fd00::` / `::1` 本地虚拟接口，srflx 是 `172.104.124.21`（不是真实 iPhone 公网 IP）—— **iPhone 上开着 VPN/科学上网工具**，把 WebRTC 锁在 VPN 隧道里，跟访客端 `110.241.19.222` 之间无法 P2P 打洞。需爷爷测试时关 iPhone VPN，或者后续部署 TURN server (CoTURN) 让 P2P 失败时走 relay。这块单独再开一条。
+
+---
+
 ## [034] 2026-05-24 23:10 — 聊天记录加通话状态系统消息（未接 / 拒绝 / 忙线 / 挂断含时长）
 
 **起因 / 需求**

@@ -39,6 +39,11 @@ type Hub struct {
 	// 收到 voice_accept/reject/end 时删除对应 call_id。
 	pendingCalls sync.Map // map[callID(string)]*pendingCall
 
+	// finishedCalls: 已通知 service 写过 sys 消息的 callID，5 分钟 dedup TTL。
+	// 跟 pendingCalls 解耦：pendingCalls 30s 后由 AfterFunc 强制清，无法靠它去重晚到的 voice_end。
+	// 双方同时挂断时，第二个 voice_end 凭这里的标志跳过，避免重复写 sys。
+	finishedCalls sync.Map // map[callID(string)]time.Time
+
 	register   chan *Client
 	unregister chan *Client
 	incoming   chan incoming
@@ -381,35 +386,39 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 				}
 			}
 		case "voice_end", "voice_reject":
-			// 第一次到达 → 调 service 写 sys 消息；finished=true 后续重复来的跳过
+			// 第一次到达 → 调 service 写 sys 消息 + 记 finishedCalls；后续 5 分钟内重复来的跳过
 			if cid := extractCallID(e); cid != "" {
+				// dedup：双方同时挂断时第二个 voice_end 在这里被拦截
+				if _, done := h.finishedCalls.Load(cid); done {
+					break
+				}
 				var visitorID string
 				if v, ok := h.pendingCalls.Load(cid); ok {
 					pc := v.(*pendingCall)
-					if pc.finished {
-						// 已经被对方挂断/拒绝触发过一次，本次跳过
-						h.pendingCalls.Delete(cid)
-						break
-					}
-					pc.finished = true
 					visitorID = pc.visitorID
-					h.pendingCalls.Delete(cid)
 				} else {
 					// buffer 过期或重启了，fallback 从 envelope 推 visitor
 					visitorID = extractVisitorID(e)
 				}
-				if visitorID != "" {
-					code := extractCode(e)
-					if code == "" {
-						// 客户端没传 code（旧版本兼容）：voice_reject 默认 rejected，voice_end 默认 hangup
-						if e.Type == "voice_reject" {
-							code = "rejected"
-						} else {
-							code = "hangup"
-						}
-					}
-					h.sink.OnVoiceCallFinished(visitorID, cid, code, extractDurationSec(e))
+				if visitorID == "" {
+					break
 				}
+				code := extractCode(e)
+				if code == "" {
+					// 客户端没传 code（旧版本兼容）：voice_reject 默认 rejected，voice_end 默认 hangup
+					if e.Type == "voice_reject" {
+						code = "rejected"
+					} else {
+						code = "hangup"
+					}
+				}
+				// 进入 dedup map（5 分钟自动清），并清掉 pendingCalls
+				h.finishedCalls.Store(cid, time.Now())
+				time.AfterFunc(5*time.Minute, func() {
+					h.finishedCalls.Delete(cid)
+				})
+				h.pendingCalls.Delete(cid)
+				h.sink.OnVoiceCallFinished(visitorID, cid, code, extractDurationSec(e))
 			}
 		}
 	default:
@@ -418,13 +427,12 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 }
 
 // pendingCall 待接听的来电。env 用值类型避免被后续 handleIncoming 改字段污染。
-// visitorID: voice_call 发起者，service 用它找当前 conv 写 sys 消息
-// finished: voice_end/reject 第一次到达时设 true，防止双方挂断时重复写 sys 消息
+// visitorID: voice_call 发起者，service 写 sys 消息时找会话用
+// 去重靠 Hub.finishedCalls，不在这里存
 type pendingCall struct {
 	env       Envelope
 	visitorID string
 	expires   time.Time
-	finished  bool
 }
 
 // 初始 TTL = 30 秒（等待接听窗口）；voice_accept 后延长到 30 分钟（通话进行中）
