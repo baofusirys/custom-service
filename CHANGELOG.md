@@ -4,6 +4,43 @@
 
 ---
 
+## [043] 2026-05-25 16:30 — 恢复「语音来电 APNs 推送音色」可配置（[036] 逆操作）
+
+**起因 / 需求**
+爷爷反馈：iPhone 系统通知栏收到 luckfast 来电推送时响的那一下系统音，希望跟「新消息提示音」一样可在 admin / App 设置里选 luckfast 0-15 任一音色，而不是 [036] 时硬编码的 "4"。
+
+爷爷明确区分两件事不要混：
+- **App 内界面来电后循环播 voice-ring.mp3**（[036] 已实现，本回合不动）
+- **iPhone 锁屏/后台 luckfast APNs 推送弹通知时系统响的音**（[036] 删了配置硬编码 "4"，本回合恢复可配）
+
+**改了什么**（修改 3 文件，纯属 [036] 第二步的逆操作）
+
+- `backend/internal/handler/http.go` allowedSettingKeys：`push_sound_call` 注释「已下线」→ 恢复 `true` 白名单，注释改为「跟 voice-ring.mp3 是两件事」
+- `admin/src/views/Settings.vue`：form 初始化加 `push_sound_call: '4'`；load / save 各加一行；template 在「新消息提示音」下方加「语音来电提示音」el-form-item（下拉 16 选 1 + form-tip 说明跟 voice-ring 独立）
+- `mobile_app/lib/pages/settings_page.dart`：恢复 `_pushSoundCall = '4'` 字段；load 读 `push_sound_call`；save 写入；UI 加一个 `_pushSoundTile`（标题「语音来电提示音」+ hint 说明跟内置铃声独立）
+
+**业务流程对比**
+
+| 配置 | [036] 后 | [043] 后 |
+|---|---|---|
+| 系统通知栏弹来电通知时响的音 | 永远是 luckfast 音色 4（不可改）| admin / App 任选 0-15 16 种音色 |
+| App 内来电界面进入后播 voice-ring.mp3 循环 | ✓ 不变 | ✓ 不变 |
+| admin Settings「语音来电提示音」下拉 | 不存在 | 16 选 1 + 解释跟 voice-ring 独立 |
+| App 设置「语音来电提示音」选项 | 不存在 | 16 选 1 + 同上说明 |
+
+**触发场景与边界 + 验证方式**
+
+- **跟 voice-ring.mp3 完全独立**：本回合**没碰** `widget/public/chat.html` / `admin/src/api/sound.js` / `mobile_app/lib/api/sound.dart` / `voice_controller.dart`，App 内来电铃声照常循环
+- **service.go 早就在读 `push_sound_call` setting**：[036] 只删了 admin / mobile_app 写入路径，service.go 一直在 `pushAPNsCommon(..., "push_sound_call", "4")`，setting 空时 fallback "4"。本回合把写入路径接回去后，新值即生效
+- **向下兼容**：未设置（数据库为空）时仍走默认 "4"，老用户升级后跟之前一致
+- **不影响**：widget / 语音通话本身 / 通话状态 sys 消息 / 图片队列 / iPhone 发图片 / 任何 [037-042] 改动
+- **验证**：
+  1. admin Settings 出现「语音来电提示音」下拉，保存后 DB `settings` 表 `push_sound_call` 行有值
+  2. App 设置页同样有「语音来电提示音」选项
+  3. 访客打过来 → 客服 iPhone 锁屏弹通知 → 听到的音色是 admin 选的那个
+
+---
+
 ## [042] 2026-05-25 03:00 — 自托管就绪：脱敏生产坐标 / iOS Bundle ID 占位 / 加 LICENSE + INSTALL.md
 
 **起因 / 需求**

@@ -502,10 +502,11 @@ var allowedSettingKeys = map[string]bool{
 	"push_user_id":  true,
 	"push_user_key": true,
 	// luckfast 推送音色（"0"-"15" 共 16 种），管理员可在 admin Settings 各场景独立配置
+	// 注：这只控制 iPhone 系统通知栏弹通知时播的音（锁屏 / 后台场景），
+	// 跟 App 内界面来电时本地循环的 voice-ring.mp3（[036]）是两件事
 	"push_sound_enter":   true, // 新访客打开 widget 时播放
 	"push_sound_message": true, // 已有会话中访客发新消息时播放
-	// 注：push_sound_call 已下线 [036]——App 端来电统一播 voice-ring.mp3 循环铃声，
-	// APNs 推送音色固定为 "4"（service.go pushAPNsCommon 兜底默认），不再让管理员配置
+	"push_sound_call":    true, // [043] 恢复：语音来电 APNs 推送音色（系统通知栏）
 	// 访客 widget 电话按钮旁的提示文字（公开给访客 widget 读）
 	"voice_call_hint": true,
 	// （可选）覆盖推送点击跳转 URL，默认 maihaocs://open 拉起 App
