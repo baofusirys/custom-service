@@ -1,0 +1,111 @@
+name: Build & Push Images
+
+# 触发：push 到 main / 推 v* tag / 手动
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+# GHCR push 必需的写权限
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # 镜像名空间用仓库 owner（小写）：ghcr.io/baofusirys/cs-*
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      # 一个 job 失败不影响其他 6 个
+      fail-fast: false
+      matrix:
+        include:
+          - name: cs-backend
+            context: ./backend
+          - name: cs-admin
+            context: ./admin
+            build_args: |
+              VITE_API_BASE=/api
+              VITE_WS_BASE=/ws
+          - name: cs-widget
+            context: ./widget
+          - name: cs-nginx
+            context: ./nginx
+          - name: cs-mysql
+            context: ./mysql
+          - name: cs-redis
+            context: ./redis
+          - name: cs-coturn
+            context: ./turn
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set lowercase owner
+        id: meta
+        run: echo "owner_lc=$(echo '${{ env.OWNER }}' | tr 'A-Z' 'a-z')" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          IMG="${{ env.REGISTRY }}/${{ steps.meta.outputs.owner_lc }}/${{ matrix.name }}"
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAGS="$IMG:latest,$IMG:sha-$SHORT_SHA"
+          # 如果是 tag push（v1.2.3），多打一个版本号 tag
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VER="${{ github.ref_name }}"
+            TAGS="$TAGS,$IMG:${VER#v}"
+          fi
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "Will push: $TAGS"
+
+      - name: Build & Push ${{ matrix.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: ${{ matrix.build_args }}
+          # GitHub Actions 缓存：第一次 build 完，后续 build 共用缓存层
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+          # 多架构（amd64 主流服务器 + arm64 树莓派/M 系列 Mac）
+          platforms: linux/amd64,linux/arm64
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=${{ matrix.name }}
+            org.opencontainers.image.licenses=MIT
+
+  summary:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Summary
+        run: |
+          echo "### Build result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "镜像（公开拉取，不需要 token）：" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          OWNER_LC=$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')
+          for n in cs-backend cs-admin cs-widget cs-nginx cs-mysql cs-redis cs-coturn; do
+            echo "- \`docker pull ghcr.io/$OWNER_LC/$n:latest\`" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "首次 push 后到 https://github.com/${{ github.repository_owner }}?tab=packages 把每个镜像 visibility 改 Public（一次性，以后所有 tag 自动 Public）" >> $GITHUB_STEP_SUMMARY

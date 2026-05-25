@@ -4,6 +4,75 @@
 
 ---
 
+## [044] 2026-05-25 22:00 — 跟 Chatwoot 对齐：GHCR 预编译镜像 + 端口全 env 化 + 一键 install.sh
+
+**起因 / 需求**
+爷爷反馈两件事：
+1. 「Chatwoot 那么容易被自托管集成 — 我们这边集成方还要 clone 仓库才能用，太麻烦」
+2. 「端口和那些乱七八糟的服务，不要和一般的任何服务有冲突」
+
+根因：本项目过去**只支持源码部署**（`docker compose up -d --build` 在用户机器上编译 Go / Vue / WebRTC），用户必须 clone 全仓库 ~300MB 还要等 20 分钟编译。Chatwoot 的杀手锏是**官方发布预编译镜像到 Docker Hub** — 用户只下 docker-compose.yml + .env 就能跑。本回合一次性补齐这条工程能力 + 端口全 env 化避冲突。
+
+**改了什么**（修改 7 文件 + 新增 4 文件）
+
+### 1. GitHub Actions 自动化镜像构建
+- 新增 `.github/workflows/build-images.yml`：matrix 并行 build 7 个镜像（backend / admin / widget / nginx / mysql / redis / coturn），多架构 linux/amd64 + linux/arm64，push 到 `ghcr.io/baofusirys/cs-*`；触发：push main + tag v* + 手动
+- Tags：`latest` + `sha-<7位>` + `<version>`（tag push 时）
+- 加 GitHub Actions cache（type=gha scope=镜像名）大幅加速后续 build
+- summary job 自动生成 pull 命令清单到 Step Summary
+
+### 2. 三种部署模式架构
+- 新增 **`docker-compose.production.yml`**：每个 service 用 `image: ghcr.io/baofusirys/cs-*:latest` 替代 `build:`；用户只下载这一个文件 + `.env` 即可，**不 clone 仓库**
+- 新增 **`install.sh`**：一键脚本（5 分钟）→ 装 Docker → 创建 /srv/cs-data → 下 yml + .env → openssl 自动生成 6 个强密码（仅占位字段替换防覆盖用户配置）→ 自动探测公网 IP 填 TURN_EXTERNAL_IP → 必填项检查 → docker compose pull + up -d → 输出登录信息
+- 现有 `docker-compose.yml` 保留作开发模式（带 `build:`），三种模式并存
+
+### 3. 端口全 env 化 + 避冲突默认值
+- `docker-compose.yml` + `docker-compose.production.yml` nginx 段：`80:80` `443:443` → `${NGINX_HTTP_PORT:-80}:80` `${NGINX_HTTPS_PORT:-443}:443`
+- coturn 段：所有 TURN 端口变量化 `TURN_LISTEN_PORT / TURN_TLS_PORT / TURN_MIN_PORT / TURN_MAX_PORT`
+- `turn/turnserver.conf.tmpl`：`listening-port` / `tls-listening-port` / `min-port` / `max-port` 都用 `${TURN_*}` 模板
+- `turn/entrypoint.sh`：加端口变量默认值（兜底 `: ${TURN_LISTEN_PORT:=3478}` 等）+ export 让 envsubst 看到
+- **TURN relay 默认改 49152-49200 → 50000-50200**：避开 Linux ephemeral 默认 32768-60999 的常用前段（统计上 32-49k 段更易被其他应用占用）；同时改云厂商安全组示例 + ufw 命令
+- `.env.example` 加：NGINX_HTTP_PORT / NGINX_HTTPS_PORT（端口冲突段）+ TURN_LISTEN_PORT / TURN_TLS_PORT / TURN_MIN_PORT / TURN_MAX_PORT（CoTURN 段）
+
+### 4. 文档
+- **`INSTALL.md`** 第 0 节加「三种部署模式」对比表（一键 / 镜像 / 源码）+ 模式 B 完整命令清单 + 模式 C 源码编译入口
+- 2.3 节端口列表从 49152-49200 改 50000-50200 + 加「⚠️ 端口冲突」前置警示
+- **新增第 7.6 节「端口冲突解决方案」**：
+  - 方案 A：让 custom_service 用别的端口 + 完整 .env 改法 + Let's Encrypt 80 端口被占的坑 + DNS-01 替代提示
+  - 方案 B：用集成方已有的 nginx 反代到 custom_service（ENABLE_HTTPS=false + 外层 nginx 完整反代配置含 WSS upgrade headers）
+  - CoTURN 端口同样可改
+- **`README.md`**：顶部加 Build Images CI badge + MIT License badge；加「5 分钟自托管」一行命令 + GHCR 镜像清单
+
+**业务流程对比**
+
+| 角度 | 改前 | 改后 |
+|---|---|---|
+| 集成方部署 | 必须 git clone 300MB + 20 分钟编译 + 2C2G 服务器 | 1 行 install.sh / 5 分钟 / 1C1G 即可 |
+| 升级 | `git pull && docker compose up -d --build`（再编译一次）| `docker compose pull && up -d`（仅拉镜像 + 重启）|
+| 服务器要求 | Go 编译峰值 2GB+ RAM | 只跑容器，1GB 够 |
+| 80/443 跟已有 nginx 冲突 | 必须手改 docker-compose.yml | 改 .env 一行 |
+| TURN UDP relay 跟系统 ephemeral 冲突 | 49152-49200 可能撞 | 50000-50200 避开常用段 |
+| Mac 用户 / 树莓派部署 | 不支持（amd64 only） | linux/amd64 + linux/arm64 双架构 |
+| 镜像分发 | 无 | ghcr.io 公开，5 分钟全球 CDN 拉 |
+
+**触发场景与边界 + 验证方式**
+
+- **首次 push 后 GHCR 镜像 visibility 是 private**：跟仓库一致；爷爷需手动到 `github.com/baofusirys?tab=packages` 把 7 个镜像 visibility 改成 Public（一次性，以后所有 tag 自动 public）
+- **CI cache 复用**：cache-from/to type=gha scope=镜像名，下次 push 只跑增量 build；首次约 15-20 分钟，后续 3-5 分钟
+- **多架构**：amd64 主流云服务器 + arm64（树莓派 / AWS Graviton / Apple Silicon Mac）；buildx 同时编两套架构 push manifest list，pull 时 docker 按本机架构自动选
+- **占位符防覆盖**：install.sh `update_if_placeholder` 只替换占位字段，已有非占位值（用户改过的）跳过；防覆盖用户配置
+- **后端 envsubst 端口生效**：turn/entrypoint.sh `export TURN_LISTEN_PORT ...` 让 envsubst 看到，渲染 turnserver.conf 时按 .env 值
+- **Let's Encrypt 80 端口冲突**：INSTALL.md 7.6 节明确警示 + 给 DNS-01 替代提示
+- **不影响**：CoTURN 业务逻辑 / 三端 widget+admin+mobile_app 代码 / 后端 service / 现有 .env 字段都向下兼容（新加端口变量都有 `:-default` fallback）
+- **验证**：
+  1. push 到 main → GitHub Actions 跑 7 个 build job 并行 → ghcr.io 出现 7 个镜像
+  2. 手动到 packages 页改 7 个 visibility=Public
+  3. 任何人在干净服务器跑 `bash <(curl ... install.sh)` → 5 分钟后 docker compose ps 应 7 容器全 Up
+  4. .env 改 NGINX_HTTP_PORT=8080 → docker compose up -d → 用 `:8080` 访问能进 admin
+  5. .env 改 TURN_MIN_PORT=51000 → coturn 容器启动后 `docker compose logs coturn` 应见 `min-port=51000`
+
+---
+
 ## [043] 2026-05-25 16:30 — 恢复「语音来电 APNs 推送音色」可配置（[036] 逆操作）
 
 **起因 / 需求**

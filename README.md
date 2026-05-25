@@ -1,8 +1,21 @@
 # Custom Service — 企业级自托管在线客服系统
 
+[![Build Images](https://github.com/baofusirys/custom-service/actions/workflows/build-images.yml/badge.svg)](https://github.com/baofusirys/custom-service/actions/workflows/build-images.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 > 一行 `<script>` 嵌入任意网页 · WSS 实时通信 · Go + Vue3 + Element Plus · Docker 一键部署
 
 > **第一次部署？看 [INSTALL.md](INSTALL.md) 完整小白教程**（从买服务器到 widget 上线全流程，含 iPhone App build / 推送 / 数据迁移）
+
+## 5 分钟自托管（推荐）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/install.sh)
+```
+
+自动装 Docker / 生成强密码 / 拉预编译镜像 / 启动。无需 git clone、无需本地编译。
+
+镜像在 GitHub Container Registry，公开免授权拉取：`ghcr.io/baofusirys/cs-{backend,admin,widget,nginx,mysql,redis,coturn}:latest`
 
 ---
 

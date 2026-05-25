@@ -2,7 +2,7 @@
 # ============================================================
 # CoTURN 启动 entrypoint
 #   1) 校验必填环境变量（缺一不可的话直接 fail-fast 别静默跑）
-#   2) 把 cs_ssl_data 命名卷里的 maihaocs.icu.{pem,key} 软链到 /etc/coturn/certs/
+#   2) 把 cs_ssl_data 命名卷里的 ${TURN_REALM}.{pem,key} 软链到 /etc/coturn/certs/
 #   3) envsubst 渲染 turnserver.conf
 #   4) exec turnserver 作为 PID 1
 # ============================================================
@@ -10,8 +10,14 @@ set -euo pipefail
 
 # ---- 必填变量校验（fail-fast）----
 : "${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP not set (服务器公网 IP，必填)}"
-: "${TURN_REALM:?TURN_REALM not set (例如 maihaocs.icu)}"
+: "${TURN_REALM:?TURN_REALM not set (例如 cs.yourcompany.com)}"
 : "${TURN_STATIC_AUTH_SECRET:?TURN_STATIC_AUTH_SECRET not set (与后端共享的 HMAC 密钥)}"
+# [044] 端口可配，默认值由 docker-compose 注入（NGINX_*/TURN_*）
+: "${TURN_LISTEN_PORT:=3478}"
+: "${TURN_TLS_PORT:=5349}"
+: "${TURN_MIN_PORT:=50000}"
+: "${TURN_MAX_PORT:=50200}"
+export TURN_LISTEN_PORT TURN_TLS_PORT TURN_MIN_PORT TURN_MAX_PORT
 
 # ---- TLS 证书软链（cs_ssl_data 命名卷由 nginx acme.sh 写入）----
 mkdir -p /etc/coturn/certs
