@@ -4,6 +4,59 @@
 
 ---
 
+## [049] 2026-05-26 00:25 — cs-nginx 加 realip 模块：集成方多层反代下限流不再被代理容器 IP 拖死
+
+**起因 / 需求**
+集成方反馈："cs-nginx 在 caddy/traefik 后部署时，$remote_addr 是代理容器 IP，传给 backend 的 X-Real-IP 也是容器 IP，导致 backend 限流以代理容器 IP 维度统计 → 单个 IP 拖死所有用户 429 死循环"。
+
+**验证**：
+- `nginx/nginx.conf` http 块**完全没有** set_real_ip_from / real_ip_header / real_ip_recursive
+- `_upstream.inc` 所有 location `proxy_set_header X-Real-IP $remote_addr` → 把 `$remote_addr`（socket IP）传给 backend
+- **更糟**：nginx.conf http 块的 `limit_req_zone $binary_remote_addr` 也按 socket IP 限流——意味着多层代理下 cs-nginx 自己**先 429** 拒掉所有访客（backend 都没收到请求）→ **双层 429**
+
+那个 AI 这次诊断完全正确（跟 [046] 的"Bug 2 限流 key 用 socket IP"误诊不同——那次是说后端代码错，实际后端 ClientIP 函数早就正确读 header；**这次是 cs-nginx 没配 realip 模块导致 $remote_addr 本身就是错的，header 也跟着错**，从根上的问题不一样）。
+
+**改了什么**（修改 1 文件 nginx/nginx.conf）
+
+http 块在 resolver 之后、limit_req_zone 之前插入：
+```nginx
+set_real_ip_from 172.16.0.0/12;     # docker 默认 bridge 网段（cs-net / 任意 docker 网络）
+set_real_ip_from 10.0.0.0/8;        # 其他常见私网 / k8s pod 网段
+set_real_ip_from 192.168.0.0/16;    # 家庭/办公局域网部署
+set_real_ip_from 127.0.0.0/8;       # localhost 反代场景
+real_ip_header X-Real-IP;
+real_ip_recursive on;
+```
+
+效果：当请求来自这 4 个可信内网网段（即"前面有可信代理"），nginx realip 模块在 post-read 阶段从 X-Real-IP header 提取真访客 IP 覆盖 `$remote_addr`。之后所有 `$binary_remote_addr` / `$remote_addr` 引用都是真访客 IP，包括：
+- limit_req_zone 限流维度（cs-nginx 自身）→ 按真访客 IP
+- limit_conn_zone 并发数维度 → 按真访客 IP
+- _upstream.inc `proxy_set_header X-Real-IP $remote_addr` → 传给 backend 的也是真访客 IP
+- backend `ClientIP()` 拿到真访客 IP → backend 限流也按真访客 IP
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 集成方直接暴露 cs-nginx 到公网（一层）| `$remote_addr` = 真访客 IP，OK | 不变（公网 IP 不在 172.16/12 等可信网段，realip 不改写） |
+| 集成方在 caddy/traefik 后部署（两层）| `$remote_addr` = caddy 容器 IP → 限流双层 429 | `$remote_addr` 被改写成 caddy 设的 X-Real-IP 真访客 IP，限流正常 |
+| 集成方在 CDN（Cloudflare）后部署（三层）| 同上 + CDN edge IP 也错 | CDN 必须设 X-Real-IP，cs-nginx 信任 CDN edge IP → 提取真客户 IP |
+| limit_req_zone 按 IP 限速 | 集体 429 | 单访客独立桶，正常 |
+
+**触发场景与边界 + 验证方式**
+
+- **上游必须设 X-Real-IP**：caddy `header_up X-Real-IP {remote_host}`；traefik 默认走 X-Forwarded-For 也行（real_ip_header 可改成 X-Forwarded-For，但 X-Real-IP 是事实标准更稳）
+- **不影响一层部署**：公网 IP 不匹配 172.16/12 等内网，realip 模块不改写，向下兼容
+- **real_ip_recursive on**：X-Forwarded-For 有 `1.2.3.4, 10.0.0.5, 172.18.0.5` 这种多层链时，从右往左剥可信 IP，剥到第一个非信任 IP（1.2.3.4 真访客）就停
+- **不信任公网 IP**：如果某个上游代理 IP 是公网 IP（罕见），不会被信任，仍取 socket IP 兜底
+- **GHCR 镜像**：本次修了 cs-nginx 一个，push 后 GitHub Actions 重 build cs-nginx，其他 6 个走 cache
+- **验证**：
+  1. 集成方 caddy 后部署 → 多用户同时刷 widget → 应不再出现集体 429
+  2. 直接 curl `curl -H 'X-Real-IP: 1.2.3.4' https://你域名/api/health` 从内网容器跑（172.x.x.x） → backend `business.log` 应记录 `ip:1.2.3.4` 而不是 nginx 容器 IP
+  3. backend `ClientIP()` 函数不需要改，跟之前一样按 X-Real-IP > X-Forwarded-For > RemoteAddr 优先级——只是现在 cs-nginx 传给它的 X-Real-IP 是真的了
+
+---
+
 ## [048] 2026-05-26 00:10 — loader.js iframe allow 加 microphone/camera/autoplay：跨域 widget 麦克风权限恢复
 
 **起因 / 需求**
