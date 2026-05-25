@@ -84,8 +84,14 @@ jobs:
           # GitHub Actions 缓存：第一次 build 完，后续 build 共用缓存层
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
-          # 多架构（amd64 主流服务器 + arm64 树莓派/M 系列 Mac）
-          platforms: linux/amd64,linux/arm64
+          # 仅 amd64（覆盖 99% 云服务器；阿里云/腾讯云/AWS/DigitalOcean 默认 amd64）
+          # 不出 arm64：cs-admin 是 Vue3 + Vite + ~200 npm 包，在 amd64 runner 上 QEMU 模拟 arm64
+          # 跑 npm install + vite build 实测 30+ 分钟跑不完（amd64 原生 1 分钟），完全不可接受
+          # 真要 arm64（树莓派/Apple Silicon/AWS Graviton）的用户走源码自编：
+          #   git clone + docker compose up -d --build（本地原生 arm64 编译 5-10 分钟）
+          # 未来想加 arm64：要么换 GitHub native arm64 runner（收费 $0.08/分钟）
+          # 要么前端改用 esbuild / bun 替代 vite（npm 阶段才是瓶颈）
+          platforms: linux/amd64
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}

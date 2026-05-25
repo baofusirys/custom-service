@@ -4,6 +4,34 @@
 
 ---
 
+## [044-fix1] 2026-05-25 22:40 — Actions 去掉 arm64：cs-admin Vue3 QEMU 实测 38 分钟跑不完
+
+**起因 / 需求**
+[044] 首次跑 Actions 实测：6/7 job 10 分钟内完成，**cs-admin 跑了 38 分钟仍未完成** → 强制 cancel。根因：amd64 runner 用 QEMU 模拟 arm64 跑 Vue3 + Vite + ~200 npm 包的 `npm install` + `vite build`，慢到不可接受（amd64 原生只要 1 分钟）。其他 6 个 job 不涉及 npm 所以 arm64 也能 2-10 分钟跑完。
+
+**改了什么**（修改 2 文件）
+
+- `.github/workflows/build-images.yml`：
+  - `platforms: linux/amd64,linux/arm64` → `platforms: linux/amd64`
+  - 加详细注释说明：99% 云服务器是 amd64；要 arm64 的（树莓派 / Apple Silicon Mac / AWS Graviton）走源码自编模式 `git clone + docker compose up -d --build` 本地原生 arm64 编译 5-10 分钟；未来要恢复 arm64 需要 GitHub native arm64 runner（收费）或前端改 esbuild/bun
+- `CHANGELOG.md`：[044] 描述的"双架构"宣传修正成实测后选择仅 amd64 的 trade-off 说明
+
+**业务流程对比**
+
+| 用户 | 改前承诺 | 改后实际 |
+|---|---|---|
+| amd64 云服务器（99% 用户）| pull amd64 镜像 5 分钟 | 同上，**不变** |
+| arm64 设备（树莓派 / Apple Silicon Mac / AWS Graviton）| pull arm64 镜像 5 分钟 | 走源码自编模式：`git clone + docker compose up -d --build` 5-10 分钟（INSTALL.md 模式 C） |
+| Actions 单次 build 耗时 | 实测 cs-admin 卡 38+ 分钟跑不完 | 全部 < 10 分钟（amd64 原生快） |
+
+**触发场景与边界 + 验证方式**
+- amd64 镜像在 arm64 设备上 docker pull 会自动降级但**实际跑不了**（架构不匹配 exec format error），所以 arm64 用户必须自编
+- 前 6 个 job（mysql/redis/coturn/nginx/backend/widget）首次 build 完已成功 push GHCR（[044] commit `d6bf732` 留下的镜像），但 cs-admin 没出来不能用——本次 push 重跑会全部覆盖
+- 未来恢复 arm64 的预案：用 docker/setup-qemu-action + 改 cs-admin 单独跑在 ubuntu-24.04-arm runner（如果 GitHub 推出免费 arm64 runner 就免费）
+- 验证：本次 push 触发 Actions 后，预期 7 个 job 全部 5-10 分钟内完成；packages 页面看到 7 个 cs-* 镜像
+
+---
+
 ## [044] 2026-05-25 22:00 — 跟 Chatwoot 对齐：GHCR 预编译镜像 + 端口全 env 化 + 一键 install.sh
 
 **起因 / 需求**
