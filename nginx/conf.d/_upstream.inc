@@ -22,6 +22,12 @@
     }
 
     # 嵌入式 widget 静态文件
+    # [046] widget 必须可被任意第三方网站 iframe 嵌入（这是 widget 存在的意义），
+    # 而 ssl.conf.template server 块全局 add_header X-Frame-Options "SAMEORIGIN" 会被这里
+    # 继承导致跨域嵌入被浏览器拒。
+    # nginx add_header 是块级**覆盖**（不是合并）：location 一旦声明 add_header，
+    # server 块所有 add_header 全部失效。所以要把 server 那几条安全 header 在这里
+    # 重新声明一遍（除 X-Frame-Options 故意不加），既允许跨域嵌入又不丢安全基线。
     location /widget/ {
         set $widget_host widget;
         rewrite ^/widget(/.*)$ $1 break;
@@ -30,6 +36,13 @@
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # 重声明 server 块那几条（覆盖原 SAMEORIGIN 同时不丢 HSTS / nosniff / Referrer-Policy）
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        # widget loader.js / chat.html 要被任意域 fetch + iframe，CORS 允许全部
+        add_header Access-Control-Allow-Origin "*" always;
+        # 故意不加 X-Frame-Options（这就是这次的关键修复）
     }
 
     # 登录接口：严格限速（防爆破）

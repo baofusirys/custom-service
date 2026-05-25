@@ -4,6 +4,59 @@
 
 ---
 
+## [046] 2026-05-25 23:30 — 修两个跨域嵌入真 bug：widget 死循环「连接失败」 + iframe 被 SAMEORIGIN 拒
+
+**起因 / 需求**
+另一个集成方（fakami-caddy 同主机部署 widget 的爷爷）的 AI 反馈 3 个根因 bug。我并行验证后判定：**2 真 1 假**。本回合修两个真 bug，假的（限流 key 用 socket IP）说明清楚误诊原因。
+
+**真 bug 1：chat.html bootstrap 跨域 SecurityError 死循环**
+
+- 位置：`widget/public/chat.html` L1073
+- 病征：widget 在跨子域 iframe 中显示「连接失败，重试中」无限循环
+- 根因：bootstrap async 函数构造 `/api/visitor/session` 请求 body 时**裸读** `parent.location.href`：
+  `last_page: parent.location ? parent.location.href : '',`
+  跨域 iframe 中读 parent.location.href 抛 SecurityError → bootstrap promise reject → onError 进入"连接失败"重试循环。
+- 同文件 L834 `tryReadHostPageDirectly` 函数已经用 try/catch 包了，但 L1073 这一处漏了
+- 修复：用 IIFE try/catch 兜底
+
+**真 bug 2：nginx 全局 X-Frame-Options "SAMEORIGIN" 让 widget 被 iframe 嵌入失败**
+
+- 位置：`nginx/conf.d/ssl.conf.template` L18 全局 server 块 `add_header X-Frame-Options "SAMEORIGIN" always`
+- 病征：第三方网站嵌入 `<script src="/widget/loader.js">` 后，loader.js 创建的 iframe 加载 chat.html 被浏览器拒绝（控制台报 `Refused to display in a frame because it set 'X-Frame-Options' to 'sameorigin'`）
+- 根因：server 块 `add_header X-Frame-Options "SAMEORIGIN"` 被 `/widget/` location 继承 → widget 被浏览器拒绝跨域嵌入
+- 修复：`_upstream.inc` location /widget/ 显式声明 add_header，**故意不加** X-Frame-Options（nginx add_header 是块级覆盖不是合并，location 一旦声明 add_header 会覆盖 server 块全部）。同时重声明 HSTS / X-Content-Type-Options / Referrer-Policy 不丢安全基线，加 Access-Control-Allow-Origin "*" 助跨域
+
+**假 bug：限流 key 用 socket IP（误诊）**
+
+- 另一个 AI 说限流 key 用 `r.RemoteAddr` 是 socket IP，CF/反代后全是 edge IP
+- 实测：`backend/internal/security/ratelimit.go` L34-53 的 `ClientIP(c *gin.Context)` 函数早就按 **X-Real-IP > X-Forwarded-For > RemoteAddr** 优先级处理；`_upstream.inc` 所有 location 都正确 `proxy_set_header X-Real-IP $remote_addr` + `X-Forwarded-For $proxy_add_x_forwarded_for`
+- **整条链路 IP 透传正确**，那个 AI 没看代码乱讲
+- 真正可能的问题：如果 cs-nginx 前面再加一层 caddy（fakami 场景），caddy 必须设 `X-Real-IP` / `X-Forwarded-For` 透传给 cs-nginx；caddy 不设的话 cs-nginx 看到的就是 caddy 容器 IP。这是 caddy 配置问题，不在 custom-service
+
+**改了什么**（修改 2 文件）
+
+- `widget/public/chat.html` L1073：裸 `parent.location.href` → IIFE try/catch
+- `nginx/conf.d/_upstream.inc` location /widget/：重声明 server 块安全 header 同时**故意不加** X-Frame-Options + 加 Access-Control-Allow-Origin "*"
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| widget 嵌入第三方网站（跨域）| iframe 创建失败 + bootstrap SecurityError 死循环「连接失败」| iframe 正常加载 + bootstrap 同域读到 hostURL / 跨域空字符串由 loader postMessage 补 |
+| widget 嵌入同域网站 | 正常 | 正常 |
+| /admin/ /api/ /ws/ X-Frame-Options | SAMEORIGIN 不变（防点击劫持）| 不变 |
+| HSTS / nosniff / Referrer-Policy（widget 路径）| 仍生效（server 块继承）| 仍生效（重声明）|
+
+**触发场景与边界 + 验证方式**
+
+- **nginx add_header 块级覆盖陷阱**：location 加任意 add_header 会让 server 块所有 add_header 失效。所以必须把要保留的安全 header 在 location 重新声明
+- **同域嵌入不退化**：bootstrap IIFE try/catch 在同域时正常返 parent.location.href，跨域时返空（由 loader.js postPageInfo postMessage 后补）
+- **不影响**：admin / API / WSS / TURN / 推送 / 通话 / 消息 / 图片 / 设置 等所有功能
+- **GHCR 镜像**：本次修了 widget 和 nginx 两个，push 后 GitHub Actions 重 build 这两个镜像 + cs-backend 等 5 个走 cache 几乎不变
+- **验证**：第三方网站嵌入 `<script src="https://你的域名/widget/loader.js" data-cs-endpoint="wss://你的域名" data-cs-site="default" defer></script>` → F12 控制台应**不见** SecurityError / X-Frame-Options 拒绝 → 右下角客服气泡正常出现 → 点击展开 iframe → bootstrap 成功 → 消息能发能收
+
+---
+
 ## [044-fix1] 2026-05-25 22:40 — Actions 去掉 arm64：cs-admin Vue3 QEMU 实测 38 分钟跑不完
 
 **起因 / 需求**

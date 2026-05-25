@@ -1070,7 +1070,10 @@
           visitor_id: visitorID,
           site_id: siteID,
           referer: document.referrer || '',
-          last_page: parent.location ? parent.location.href : '',
+          // [046] 跨域 iframe 中读 parent.location.href 抛 SecurityError 会导致整个
+          // bootstrap async 链 reject → widget 死循环"连接失败"。用 IIFE try/catch 兜底。
+          // 同域时直接读到 host URL；跨域时静默返空字符串（由 loader.js postMessage 后补 hostURL）
+          last_page: (function () { try { return parent.location.href; } catch (e) { return ''; } })(),
           ua: navigator.userAgent
         })
       });
