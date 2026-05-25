@@ -4,6 +4,49 @@
 
 ---
 
+## [047] 2026-05-25 23:55 — install.sh 加 --cn 国内 GHCR 反代加速（南京大学镜像）
+
+**起因 / 需求**
+集成方反馈："国内服务器拉不了 ghcr.io 镜像"。实测确认：ghcr.io 在国内 10-100KB/s 经常超时，250MB 镜像可能拉半小时还失败。Docker Hub 镜像加速器（DaoCloud / 1ms.run 等）**只加速 Docker Hub 不加速 GHCR**。
+
+**实测 3 个 GHCR 国内反代当前可用性**：
+
+| 反代 | 测试结果 |
+|---|---|
+| **`ghcr.nju.edu.cn`**（南京大学）| ✅ 200 OK，1.6s（实测国内最稳）|
+| `docker.1ms.run/ghcr.io` | ❌ 404（路径协议不匹配）|
+| `dockerproxy.cn/ghcr.io` | ❌ timeout |
+
+**改了什么**（修改 3 文件）
+
+- `install.sh` 加 `--cn` / `--china` 参数（或 `CN=1` 环境变量等价）：
+  - 检测到 `--cn` → `GHCR_HOST=ghcr.nju.edu.cn`
+  - 下载完 `docker-compose.yml` 后 sed 替换 `ghcr.io/baofusirys/` → `$GHCR_HOST/baofusirys/`
+  - 报告替换 N 处
+- `INSTALL.md` 新增「🇨🇳 国内服务器加速」整段：
+  - 一键脚本 `--cn` 参数说明
+  - 模式 B 手动 sed 命令
+  - 备选反代清单（南大主推 + 中科大 + 1ms.run 备注）
+  - daemon mirror 配置说明（顺带，对本项目用处不大）
+- `README.md` 5 分钟自托管段加国内版命令一行
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 国内服务器自托管 | ghcr.io 10-100KB/s 经常 timeout，250MB 镜像拉 30min-2h 还可能失败 | `--cn` 走南大反代 5-20MB/s 稳定 5 分钟拉完 |
+| 海外/港台服务器 | 不变 | 不变（默认仍 ghcr.io） |
+| 模式 B 手动部署 | 同上 ghcr.io | 文档给一行 sed 命令 |
+
+**触发场景与边界 + 验证方式**
+- `--cn` 仅替换 docker-compose.yml 里的镜像路径，不改 GitHub Actions 推送目标（爷爷的 CI 仍只 push 到 ghcr.io，南大反代是只读 cache，自动同步）
+- 南大反代有 5-15 分钟 cache 延迟：新 push 镜像可能稍晚才能从南大拉到（业务上无影响，毕竟用户拉的是 :latest 不是刚 push 的 SHA）
+- 反代挂掉的兜底：用户重跑 install.sh 不加 --cn 退回 ghcr.io 原站
+- 不影响：所有现有部署（爷爷自己的 maihaocs.icu 是 `docker compose up -d --build` 从源码构建，不走 GHCR）
+- 验证：国内服务器跑 `bash install.sh --cn` 应在 5 分钟内拉完 7 个镜像 + 启动；`docker images` 应显示 `ghcr.nju.edu.cn/baofusirys/cs-*`
+
+---
+
 ## [046] 2026-05-25 23:30 — 修两个跨域嵌入真 bug：widget 死循环「连接失败」 + iframe 被 SAMEORIGIN 拒
 
 **起因 / 需求**

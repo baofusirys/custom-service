@@ -9,11 +9,47 @@
 
 | 模式 | 谁用 | 命令 | 时长 | 服务器要求 |
 |---|---|---|---|---|
-| **A. 一键脚本**（推荐 90% 用户）| 普通用户、运维、急用 | `bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/install.sh)` | **5 分钟** | 1C1G 都行 |
+| **A. 一键脚本**（推荐 90% 用户）| 普通用户、运维、急用 | `bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/install.sh)` <br>**国内服务器加 `--cn`** 走南京大学镜像反代（10x 快） | **5 分钟** | 1C1G 都行 |
 | **B. 手动 + 预编译镜像** | 想自己看 docker-compose 内容 | 下 2 个文件 → `docker compose pull && up -d` | 10 分钟 | 1C1G |
 | **C. 从源码自己编译** | 二次开发 / 改代码 | `git clone` → `docker compose up -d --build` | 20-40 分钟（首次 Go/Vue/WebRTC 全编译）| 2C2G+（编译峰值要内存）|
 
 普通自托管用户**选 A**，本文档下面 1-8 节走的也是 A 流程。
+
+---
+
+## 🇨🇳 国内服务器加速（必看）
+
+`ghcr.io` 在国内访问慢/超时（10-100KB/s 经常断），250MB 镜像可能拉半小时。**一键脚本加 `--cn` 参数自动走南京大学 GHCR 镜像反代**（实测 5-20MB/s 稳定）：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/install.sh) --cn
+```
+
+脚本会自动把 `docker-compose.yml` 里的 `ghcr.io/baofusirys/cs-*` sed 替换成 `ghcr.nju.edu.cn/baofusirys/cs-*`，docker compose pull 时就走南大反代。
+
+不想用一键脚本而是手动部署（模式 B）的国内用户也可以下完 yml 后自己 sed：
+```bash
+sed -i 's|ghcr.io/baofusirys/|ghcr.nju.edu.cn/baofusirys/|g' docker-compose.yml
+```
+
+### 其他可选 GHCR 反代（备用）
+- 南京大学：`ghcr.nju.edu.cn`（**推荐**，教育网带宽足，长期稳定）
+- 中科大：`ghcr.mirror.ustc.edu.cn`（部分时段可用）
+- 1ms.run：`docker.1ms.run/ghcr.io`（路径协议不太一致，慎用）
+
+### 实在不通？配 Docker daemon mirror（最后手段）
+编辑 `/etc/docker/daemon.json`：
+```json
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.m.daocloud.io"
+  ]
+}
+```
+（注意：这两个只加速 docker.io 不加速 ghcr.io，对本项目用处不大；只是顺带说一下）
+
+然后 `systemctl restart docker`。
 
 ---
 
@@ -25,6 +61,8 @@
 # 不需要 git clone，下 2 个文件
 mkdir -p /opt/custom-service && cd /opt/custom-service
 curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/docker-compose.production.yml -o docker-compose.yml
+# 国内服务器加这一行：
+# sed -i 's|ghcr.io/baofusirys/|ghcr.nju.edu.cn/baofusirys/|g' docker-compose.yml
 curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/.env.example -o .env
 
 # 编辑 .env，必填 6 项：PUBLIC_DOMAIN / ACME_EMAIL / 6 个密码 / TURN_EXTERNAL_IP

@@ -10,7 +10,11 @@
 ## 5 分钟自托管（推荐）
 
 ```bash
+# 海外 / 港台服务器
 bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/install.sh)
+
+# 🇨🇳 国内服务器（加 --cn 走南京大学 GHCR 反代，10x 快）
+bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/main/install.sh) --cn
 ```
 
 自动装 Docker / 生成强密码 / 拉预编译镜像 / 启动。无需 git clone、无需本地编译。

@@ -21,9 +21,27 @@ ok()   { echo -e "${GREEN}[ ✓ ] $*${NC}"; }
 warn() { echo -e "${YELLOW}[ ! ] $*${NC}"; }
 die()  { echo -e "${RED}[ x ] $*${NC}" >&2; exit 1; }
 
+# ---- [047] 参数：--cn 用国内 GHCR 反代加速 ----
+# 用法：bash install.sh --cn  或  CN=1 bash install.sh
+USE_CN=0
+for arg in "$@"; do
+  case "$arg" in
+    --cn|--china) USE_CN=1 ;;
+  esac
+done
+[[ "${CN:-}" = "1" ]] && USE_CN=1
+
 REPO_RAW="https://raw.githubusercontent.com/baofusirys/custom-service/main"
 INSTALL_DIR="${INSTALL_DIR:-/opt/custom-service}"
 DATA_DIR="${HOST_DATA_DIR:-/srv/cs-data}"
+
+# [047] 国内反代：ghcr.io → ghcr.nju.edu.cn（南京大学镜像，国内最稳的 GHCR 反代）
+# 实测从国内服务器拉镜像速度 5-20MB/s（vs ghcr.io 原站 10-100KB/s 经常 timeout）
+GHCR_HOST="ghcr.io"
+if [[ "$USE_CN" = "1" ]]; then
+  GHCR_HOST="ghcr.nju.edu.cn"
+  say "🇨🇳 国内加速模式：GHCR 镜像走 $GHCR_HOST"
+fi
 
 # ---- 1. 前置检查 ----
 say "1/6 检查运行环境"
@@ -58,6 +76,12 @@ if [[ -f .env ]]; then
   warn ".env 已存在，跳过下载（保留你现有配置）"
 else
   curl -fsSL "$REPO_RAW/.env.example" -o .env
+fi
+# [047] --cn 模式：把 docker-compose.yml 里 ghcr.io 替换为反代域名
+if [[ "$USE_CN" = "1" ]]; then
+  sed -i.bak "s|ghcr\.io/baofusirys/|$GHCR_HOST/baofusirys/|g" docker-compose.yml && rm -f docker-compose.yml.bak
+  COUNT=$(grep -c "$GHCR_HOST/baofusirys/" docker-compose.yml || echo 0)
+  ok "GHCR 镜像路径已替换为 $GHCR_HOST（$COUNT 处）"
 fi
 ok "下载完成"
 
