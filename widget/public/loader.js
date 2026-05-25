@@ -78,7 +78,14 @@
   iframe.src = origin + '/widget/chat.html?endpoint=' + encodeURIComponent(endpoint) +
     '&site=' + encodeURIComponent(siteID);
   iframe.title = '在线客服';
-  iframe.allow = 'clipboard-read; clipboard-write';
+  // [048] 跨域 iframe 必须显式 allow microphone/camera/autoplay，否则 chat.html 调
+  // getUserMedia({audio:true}) 会被 Permission Policy 拒绝（访客点电话按钮没反应）。
+  // - microphone：WebRTC 语音通话必需
+  // - camera：未来加视频通话用，现在加上无害
+  // - autoplay：来电铃声 voice-ring.mp3 循环播放（[036]）+ 通话音频远端流自动播
+  // - clipboard-read/write：复制聊天消息内容（[028]）
+  // 不指定 source list 即 default 'self'，对跨域 iframe 即 iframe src 的 origin（widget 域）
+  iframe.allow = 'microphone; camera; autoplay; clipboard-read; clipboard-write';
   iframe.style.cssText = 'width:100%;height:100%;border:0;display:block;background:#fff';
   wrap.appendChild(iframe);
 

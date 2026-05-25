@@ -4,6 +4,54 @@
 
 ---
 
+## [048] 2026-05-26 00:10 — loader.js iframe allow 加 microphone/camera/autoplay：跨域 widget 麦克风权限恢复
+
+**起因 / 需求**
+集成方反馈："cs-widget loader.js 创建 iframe 时 allow 缺 microphone; camera"。验证 `widget/public/loader.js` L81：
+```js
+iframe.allow = 'clipboard-read; clipboard-write';
+```
+**确实只有 clipboard，缺 microphone 和 camera**。跨域 iframe 中调 `getUserMedia({audio:true})` 会被浏览器 Permission Policy 拒绝 → 访客点电话按钮 → 麦克风权限对话框都弹不出来 → 语音通话直接失败。
+
+为啥之前在 maihaocs.icu 自测时没暴露？因为 `maihaocs.icu/widget/demo.html` 跟 `maihaocs.icu/widget/chat.html` **同域**，同域 iframe 默认继承 parent 的 permission 不需要显式 allow。**只有第三方网站嵌入时跨域 iframe 才命中这个 bug**——所以 [029] 实现语音通话后一直没暴露，直到 fakami 集成方真跨域嵌入时才发现。
+
+**改了什么**（修改 1 文件 widget/public/loader.js）
+
+L81 iframe.allow 从：
+```
+clipboard-read; clipboard-write
+```
+扩为：
+```
+microphone; camera; autoplay; clipboard-read; clipboard-write
+```
+
+- `microphone`：WebRTC 语音通话核心，getUserMedia({audio:true}) 必需
+- `camera`：未来加视频通话用，现在加上无害
+- `autoplay`：来电铃声 voice-ring.mp3 循环播放（[036]）+ 通话远端音频流自动播
+- `clipboard-read/write`：复制聊天消息（[028]，保留）
+- 不指定 source list = default `'self'`，对跨域 iframe 即 iframe src 的 origin（widget 域）
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 同域嵌入（maihaocs.icu/widget/demo.html）语音通话 | OK（同域默认继承）| OK 不变 |
+| 第三方网站跨域嵌入语音通话 | ❌ getUserMedia 被拒绝，访客点电话无反应 | ✅ 浏览器弹麦克风权限弹窗，授权后正常通话 |
+| 来电铃声 voice-ring.mp3 | 大多浏览器接受同域 user gesture 后的 audio.play()，所以同域 OK | 显式声明 autoplay 跨域也稳 |
+| 复制聊天消息 | OK | OK 不变 |
+
+**触发场景与边界 + 验证方式**
+
+- **同域不退化**：默认 'self' 等同于不设 allow 时的行为（同域继承），同域嵌入仍正常
+- **iOS Safari 兼容**：iOS Safari 14+ 支持 Permission Policy + iframe allow，本修复对 iOS 浏览器同样生效
+- **第三方网站集成方不用动**：他们 HTML 里的 `<script src="loader.js">` 不变；loader.js 自己创建 iframe 时设 allow
+- **不影响**：admin / backend / mobile_app / mysql / redis / coturn / nginx 等任何其他组件
+- **GHCR 镜像**：本次修了 widget 一个，push 后 GitHub Actions 重 build cs-widget，其他 6 个走 cache 几乎不变
+- **验证**：第三方网站嵌入 widget → 点电话按钮 → 浏览器**弹麦克风权限弹窗**（之前没弹直接静默失败）→ 授权后客服端 admin 看到来电浮窗 → 接通后双向音频通
+
+---
+
 ## [047] 2026-05-25 23:55 — install.sh 加 --cn 国内 GHCR 反代加速（南京大学镜像）
 
 **起因 / 需求**
