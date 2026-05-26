@@ -434,6 +434,9 @@
   var retry = 0;
   var unread = 0;
   var pingTimer = null;
+  // [054] 重连控制：防 connectWS 多实例并发打爆 backend rl:wsh 限流
+  var reconnectTimer = null;   // 保存待执行 setTimeout id，防多个 onclose 各自排队
+  var isConnecting = false;    // 防重入锁，CONNECTING 期间外部再次调 connectWS 跳过
   var lastGroup = null; // 最近一组消息的元数据，用于合并
   var notifySound = 'visitor1'; // 通知声音，启动时拉服务端覆盖；旧 key (classic/chime/...) 在 playNotify 内 fallback 到 visitor1
   // widget 是否处于打开状态。loader.js 通过 postMessage('widget_state') 通知。
@@ -1109,14 +1112,59 @@
     } catch {}
   }
 
+  // [054] scheduleReconnect 是唯一的重连入口：防多个 onclose 各自 setTimeout 叠加，
+  // 也防快速失败时 retry++ 把 backoff 算得过大或并发雪崩。
+  // 默认指数退避 1.6^n，上限 30s；retry >= 3 时强制 60s 覆盖 backend Redis rl:wsh 60s 窗口。
+  function scheduleReconnect() {
+    if (reconnectTimer) {
+      // 已经在排队中，本次跳过（防多 onclose 叠加打爆限流）
+      return;
+    }
+    var backoff;
+    if (retry >= 3) {
+      // 连续 3 次失败大概率是被 backend 限流了（rl:wsh 60s 窗口）
+      // 直接退避 60s 覆盖整个 Redis 窗口，避免继续打爆 + 触发 viol 拉黑
+      backoff = 60000;
+    } else {
+      backoff = Math.min(30000, 1000 * Math.pow(1.6, retry));
+    }
+    retry++;
+    reconnectTimer = setTimeout(function () {
+      reconnectTimer = null;
+      connectWS();
+    }, backoff);
+  }
+
   function connectWS() {
+    // [054] 防重入：CONNECTING/OPEN 状态直接跳过，避免外部（pageshow/visibilitychange/
+    // loader.js self-heal 等）在 ws 还没就绪时再次调用 connectWS 导致并发风暴
+    if (isConnecting) return;
+    if (ws) {
+      if (ws.readyState === WebSocket.OPEN) return;
+      if (ws.readyState === WebSocket.CONNECTING) return;
+      // CLOSING / CLOSED 状态安全，可以创建新 ws
+    }
+    // 清掉残留的 reconnectTimer，避免重复触发
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    // 清掉残留的 pingTimer 防泄漏
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+
+    isConnecting = true;
     var url = endpoint.replace(/^https?:\/\//, function (m) {
       return m === 'https://' ? 'wss://' : 'ws://';
     }) + '/ws/visitor?token=' + encodeURIComponent(token);
-    ws = new WebSocket(url);
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      isConnecting = false;
+      scheduleReconnect();
+      return;
+    }
     ws.onopen = function () {
+      isConnecting = false;
       alive = true; retry = 0;
       setStatus('在线', true);
+      if (pingTimer) clearInterval(pingTimer);  // 防重复 setInterval 泄漏
       pingTimer = setInterval(function () {
         if (alive) try { ws.send(JSON.stringify({ type: 'ping', ts: Date.now() })); } catch {}
       }, 30000);
@@ -1164,14 +1212,36 @@
       }
     };
     ws.onclose = function () {
+      isConnecting = false;
       alive = false;
-      clearInterval(pingTimer);
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
       setStatus('已断开，重连中', false);
-      var backoff = Math.min(30000, 1000 * Math.pow(1.6, retry++));
-      setTimeout(connectWS, backoff);
+      scheduleReconnect();  // [054] 走统一去重入口，不再裸 setTimeout
     };
-    ws.onerror = function () { try { ws.close(); } catch {} };
+    // [054] onerror 不主动 close —— 浏览器握手失败时会同时 fire onerror + onclose，
+    // 让 onclose 自然触发即可；之前主动 close 是双触发，未来场景会踩坑
+    ws.onerror = function (ev) {
+      // 仅记日志方便排查（console.warn 不抛错）；不动 ws.close，交给 onclose
+      try { console.warn('[cs-widget] ws error', ev); } catch (e) {}
+    };
   }
+
+  // [054] Patch 3：bfcache + 页面生命周期管理
+  // pagehide：用户跳走 / 后退到别页前主动 close ws，防 bfcache 中老 ws 还活着
+  window.addEventListener('pagehide', function () {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (ws) {
+      try { ws.close(1000, 'pagehide'); } catch (e) {}
+    }
+  });
+  // pageshow：bfcache 恢复时（ev.persisted=true）老 ws 已断，重置 retry 立即重连
+  window.addEventListener('pageshow', function (ev) {
+    if (ev.persisted) {
+      retry = 0;
+      connectWS();
+    }
+  });
 
   // [040] 待发送文件队列（来自粘贴 / 附件按钮多选 / 多次粘贴），点发送时才真正依次上传
   // 支持多文件：每个 chip 独立 × 移除；粘贴/选附件追加到队列而不是覆盖

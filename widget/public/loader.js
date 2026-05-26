@@ -10,7 +10,18 @@
  * iframe 隔离运行，宿主页 CSS / JS 全无污染。
  */
 (function () {
-  if (window.__CS_WIDGET_LOADED__) return;
+  // [054] guard 加强：__CS_WIDGET_LOADED__ 哨兵 + iframe 真实存在性双重检查
+  // 旧逻辑只看哨兵，bfcache 恢复 / SPA 框架清 body 后哨兵仍 true 但 btn/iframe 已被销毁，
+  // 导致 loader.js 不重新注入 + 老 chat.html 实例的 connectWS 还在跑 → 后台多实例并发风暴
+  if (window.__CS_WIDGET_LOADED__) {
+    var existingBtn = document.getElementById('__cs_widget_btn__');
+    var existingWrap = document.getElementById('__cs_widget_wrap__');
+    if (existingBtn && existingWrap && document.body.contains(existingBtn)) {
+      return;  // 哨兵 + DOM 都在 → 真的不需要再注入
+    }
+    // 哨兵存在但 DOM 不在 = bfcache/SPA 异常状态，清哨兵让下面流程重新注入
+    delete window.__CS_WIDGET_LOADED__;
+  }
   window.__CS_WIDGET_LOADED__ = true;
 
   var script = document.currentScript || (function () {

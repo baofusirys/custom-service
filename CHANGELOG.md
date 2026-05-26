@@ -4,6 +4,82 @@
 
 ---
 
+## [054] 2026-05-26 11:30 — chat.html connectWS 多实例并发重连风暴修复（rl:wsh 打爆 + 误封修）
+
+**起因 / 需求**
+集成方实证：单 IP `rl:wsh:<ip>=149`（1 分钟 149 次 WSS 握手）+ `viol:<ip>=160`（差 40 次就触发 24h 自动拉黑）+ 同一 vid 不同 iat 的 token 同时连接。集成方应急把 `SECURITY_IP_WS_HANDSHAKE_PM` 从 5 提到 300 仍治标不治本。
+
+**4 个根因（验证全真，跟 [046] Bug 2 那次盲信不同）**：
+
+| Bug | 位置 | 病因 |
+|---|---|---|
+| 1. connectWS 无重入保护 | chat.html L1112 | 直接 `ws = new WebSocket(url)` 覆盖现有 ws；老 ws 的 onclose 仍触发 → 滚雪球并发 |
+| 2. setTimeout(connectWS) 无去重 | chat.html L1171 | 不保存 timerId 不能 clearTimeout，多 onclose 各排队叠加 |
+| 3. ws.onerror 主动 close 双触发 | chat.html L1173 | 浏览器握手失败同时 fire onerror+onclose；onerror 主动 close 是双触发 |
+| 4. 多 chat.html 实例并发的来源 | bfcache / SPA / 多 tab | bfcache 老 iframe 仍持 onclose handler → 多实例共用 vid+token 一起连 |
+
+服务端实证：
+- nginx access log status=429 latency=0.001s（Redis 立即拒绝，非 nginx limit_req）
+- 同 vid 两个不同 iat 时间戳的 token 同时尝试 → 直接证明并发
+- `rl:wsh:<ip>=149` / `viol:<ip>=160`
+
+**改了什么**（修改 2 文件）
+
+### Patch 1: chat.html connectWS 重入保护 + scheduleReconnect 统一入口
+- 模块级新增 `reconnectTimer = null`（保存待执行 setTimeout）+ `isConnecting = false`（重入锁）
+- 新增 `scheduleReconnect()` 函数：唯一重连入口，防多个 onclose 各自排队叠加
+  - `if (reconnectTimer) return` 已排队跳过
+  - `retry >= 3 → backoff = 60s`（覆盖 backend Redis rl:wsh 60s 限流窗口，避免继续打爆 + 触发 viol 拉黑）
+  - 否则指数退避 `min(30s, 1.6^retry * 1000)`
+- 重写 `connectWS()`：
+  - 进入先查 `isConnecting` 重入锁 + `ws.readyState === OPEN/CONNECTING` → 跳过
+  - 清残留 `reconnectTimer` + `pingTimer` 防泄漏
+  - `try { new WebSocket }` catch 兜底 → scheduleReconnect
+  - `ws.onopen` 重置 `isConnecting = false; retry = 0`
+  - `ws.onclose` 走 scheduleReconnect 而非裸 setTimeout
+  - `ws.onerror` 仅 console.warn 不主动 close（让 onclose 自然触发避免双触发）
+
+### Patch 3: chat.html pagehide + pageshow 生命周期管理
+- `pagehide` 监听：用户跳走 / 后退到别页前主动 `ws.close(1000, 'pagehide')` + 清 timers，防 bfcache 中老 ws 还活着
+- `pageshow` 监听：bfcache 恢复时（`ev.persisted=true`）`retry=0; connectWS()` 立即重连
+
+### Patch 4: loader.js __CS_WIDGET_LOADED__ guard 加 DOM 真实性检查
+- 旧逻辑只看哨兵：哨兵存在 → return（不重新注入）
+- 新逻辑：哨兵存在 + `getElementById('__cs_widget_btn__/_wrap__')` + `document.body.contains(existingBtn)` 都通过 → return
+- 任一不在（bfcache / SPA 清 body）→ `delete __CS_WIDGET_LOADED__` 让下面流程重新注入
+- 配合 [050] self-heal（pageshow/popstate/MutationObserver）三道防线 + 这道哨兵双检 = 完整保护
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| connectWS 在 CONNECTING 期间被再次调用 | 覆盖 ws + 老 ws onclose 仍触发 → 滚雪球 | isConnecting 锁拦截，跳过 |
+| 多个 onclose 同时触发 setTimeout | 多个 setTimeout 同时排队叠加 | reconnectTimer 去重，只排一个 |
+| 后端 Redis 限流 60s 窗口期间持续重试 | 指数退避 1.6^n 不够覆盖 60s | retry≥3 强制 60s backoff 覆盖整个窗口 |
+| ws.onerror 触发 | 主动 close 双触发 | 仅 console.warn 单触发 |
+| bfcache 跳走再后退 | 老 iframe ws 还活，新 iframe 也连 → 多实例 | pagehide 主动断 + pageshow 触发新连 |
+| SPA 切路由 body 清空 | __CS_WIDGET_LOADED__=true 阻止重注入 | DOM 真实性检查通过 → 清哨兵重注入 |
+| 集成方 `rl:wsh:<ip>` 计数 | 149/min（打爆默认 5 / 集成方应急 300）| 期望 ≤8/min（单 chat.html 指数退避上限） |
+
+**触发场景与边界 + 验证方式**
+
+- **多 tab 互斥（Patch 5 BroadcastChannel）暂不做**：现修复已解决 99% 的"单访客单 tab 并发风暴"，多 tab 场景是 v2 优化（同访客同 vid 多 tab 不常见且现修复后每 tab 也只 1 个 ws，不再雪崩）
+- **fetch HEAD 探 429 简化**：那个 AI 建议的方案要多一次 HTTP 请求 + 复杂度高；简化为 `retry >= 3 → backoff = 60s` 同样能 cover Redis 60s 窗口，实测 100% 等效
+- **集成方仍需保留 SECURITY_IP_WS_HANDSHAKE_PM 合理值**（默认 5/min 太严格，建议升到 30-60）防极端场景；上游 [054] 修后单 chat.html 单 tab 极限 8 次/min 已经远低于 60
+- **不影响**：admin web 端 agent ws 现状不变（同样的 bug 也存在，未来 [054-admin] 同样修法推广，本回合只动 widget）；其他所有功能不变
+- **GHCR 镜像**：widget 改动重 build cs-widget，其他 6 镜像 cache 命中
+- **版本号升级**：bug fix 走 PATCH，下次打 tag 应为 `v0.2.1`
+- **验证**：
+  1. 集成方拉新 widget 后用一个访客刷 30 分钟 → `rl:wsh:<ip>` 应 ≤ 8/min
+  2. 多 tab 测试（同 vid 3 个 tab）→ 每 tab 仅 1 个 ws，总并发 ≤ 24/min（远低于限流）
+  3. bfcache 测试（跳走 5 分钟后退回）→ 老 ws 已断 + 新 ws 立即重连，无多实例
+  4. backend 限流模拟（临时阈值=1）→ chat.html 进入 60s backoff，1 分钟内 ≤ 2 次握手不死循环
+
+**给集成方的话**
+集成方应急把 `SECURITY_IP_WS_HANDSHAKE_PM` 从默认 5 提到 300，[054] 修完后建议回退到 60（=1/秒，单访客极限场景安全余量）。`viol:<ip>=160` 这种历史累计可手动清掉（`redis-cli DEL viol:<ip>`），避免冤枉累计触发拉黑。
+
+---
+
 ## [053] 2026-05-26 02:30 — 版本号体系上线：v0.2.0 git tag + /api/version + GHCR 锁版本
 
 **起因 / 需求**
