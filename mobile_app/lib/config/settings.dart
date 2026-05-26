@@ -58,6 +58,14 @@ class Settings {
     await sp.setString(_keyAgentJson, jsonEncode(agent));
   }
 
+  /// [064] 仅更新 token，不动 agent json。
+  /// /agent/login/refresh 接口只返新 token 不返 agent 资料（agent 资料没变），
+  /// 调用方拿到新 token 后直接 setAgentToken 就行。
+  static Future<void> setAgentToken(String token) async {
+    final sp = await _sp;
+    await sp.setString(_keyAgentToken, token);
+  }
+
   static Future<void> clearSession() async {
     final sp = await _sp;
     await sp.remove(_keyAgentToken);

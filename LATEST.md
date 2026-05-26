@@ -1,4 +1,4 @@
-### 当前版本：v0.5.1 · 2026-05-26
+### 当前版本：v0.6.0 · 2026-05-27
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -68,9 +68,9 @@
 ```
 
 ## 最近 3 次重大改动摘要
-- **[063] 2026-05-26 v0.5.1**：admin 工作台点击会话「标记已读慢 2-3 秒」体感优化。`pickConv` 旧版串行 `loadMessages → assign → unread=0`（美国服务器 RTT ~250ms × 2 RPC ≈ 600ms，体感像卡顿）。改乐观 UI：`c.unread = 0` 立刻执行（0ms badge 消失）+ `loadMessages` / `assign` 用 `Promise.all` 并行（总耗时降为 max 而非 sum）。后端 endpoint 实测各 ~90ms 不慢，问题纯在前端串行+反馈靠后。
+- **[064] 2026-05-27 v0.6.0**：解决集成方 fakami 商城反馈 [068] iOS 客服 App 12h token 过期后 401 死循环 7 小时不停的严重问题。同模式 [054]/[058] 的 token 续期版。改动：① backend 新增 `/api/agent/login/refresh` endpoint（grace 24h，agent 仍 active 校验，audit log）+ `security.ParseAgentTokenAllowExpired` + 区分 `ErrTokenExpired/ErrTokenInvalid/ErrTokenMalformed` 错误类型，middleware/AgentAuth/AgentWS handler 返回 code=40102（expired）/40103（invalid）让客户端区分；② mobile_app `http_client.dart` 加 Dio 401 interceptor + refresh lock + authFailedStream；③ `ws_client.dart` token 改可变 + 连接前主动检查 exp < 5min refresh + isConnecting 锁；④ `app_state.dart` 订阅 authFailedStream 自动 logout 走 Consumer 路由跳 LoginPage；⑤ admin Vue `http.js` / `ws.js` 同样模式 401 interceptor + refresh。
+- **[063] 2026-05-26 v0.5.1**：admin 工作台点击会话「标记已读慢 2-3 秒」体感优化（乐观 UI + 并行 RPC）。
 - **[062] 2026-05-26 v0.5.0**：全部移除按 IP 维度的限流（爷爷决策："去掉，不要了！"）。
-- **[061] 2026-05-26 v0.4.1**：[060] hotfix —— ip2region v4 xdb 字段位修正 + .env 永久搬到 `/srv/cs-data/.env`。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）

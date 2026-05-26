@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -60,6 +61,11 @@ func SecurityHeaders() gin.HandlerFunc {
 }
 
 // AgentAuth 校验客服 / 管理员 JWT。
+// [064] 区分错误码让客户端能精准走「过期 → refresh」还是「无效 → 重登」分支：
+//
+//	code=40101 未登录（缺 Authorization header）→ 客户端走登录页
+//	code=40102 登录已过期（token expired）       → 客户端可调 /agent/login/refresh 续 token
+//	code=40103 token 无效（签名错 / 篡改）       → 客户端走登录页
 func AgentAuth(secret []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
@@ -69,7 +75,11 @@ func AgentAuth(secret []byte) gin.HandlerFunc {
 		}
 		claims, err := security.ParseAgentToken(secret, tok)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40102, "msg": "登录已过期"})
+			if errors.Is(err, security.ErrTokenExpired) {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40102, "msg": "登录已过期"})
+				return
+			}
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40103, "msg": "token 无效"})
 			return
 		}
 		c.Set("agent_id", claims.AgentID)

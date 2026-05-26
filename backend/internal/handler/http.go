@@ -227,8 +227,85 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 	})
 }
 
+// RefreshAgentToken [064] 客户端用即将过期 / 已过期不久的 token 换新 token。
+//
+// 设计要点（解决 [068] iOS App 12h 后 401 死循环问题）：
+//  1. 必须 Authorization: Bearer <oldToken> 带旧 token
+//  2. 旧 token 用 ParseAgentTokenAllowExpired 解析（允许 exp 已过），但签名/sub 必须 valid
+//  3. grace period 24h：过期超过 24h 的拒绝（防止失效太久的 token 被无限续命）
+//  4. 重新查 DB agent 仍 active（防止已禁用的 agent 续 token）
+//  5. 签发同样 12h TTL 的新 token + 写 audit log
+//
+// 错误码：
+//
+//	40101 缺 Authorization header
+//	40103 token 签名错 / 篡改
+//	40104 token 过期超过 24h grace period（必须重登）
+//	40105 agent 已禁用 / 不存在
+//	50019 后端签发失败
+func (h *HTTP) RefreshAgentToken(c *gin.Context) {
+	auth := c.GetHeader("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 40101, "msg": "缺少 token"})
+		return
+	}
+	oldToken := strings.TrimPrefix(auth, "Bearer ")
+	claims, err := security.ParseAgentTokenAllowExpired(h.cfg.JWTSecret, oldToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 40103, "msg": "token 无效"})
+		return
+	}
+	// 检查 grace period：过期 > 24h 拒绝（避免一个老 token 永远续命；同时也阻挡老掉牙的窃取 token）
+	if claims.ExpiresAt != nil {
+		const gracePeriod = 24 * time.Hour
+		expired := time.Since(claims.ExpiresAt.Time)
+		if expired > gracePeriod {
+			h.svc.Limiter().LogSecurityWarn(security.ClientIP(c), "refresh_token_too_old",
+				fmt.Sprintf("aid=%d expired=%s ago", claims.AgentID, expired))
+			c.JSON(http.StatusUnauthorized, gin.H{"code": 40104, "msg": "登录已过期太久，请重新登录"})
+			return
+		}
+	}
+	// 重新查 DB：agent 必须仍存在且 active（防止已禁用的 agent 还能续 token）
+	agent, err := h.svc.Store().GetAgentByID(c.Request.Context(), claims.AgentID)
+	if err != nil || agent == nil || !agent.Active {
+		h.svc.Limiter().LogSecurityWarn(security.ClientIP(c), "refresh_token_agent_inactive",
+			fmt.Sprintf("aid=%d", claims.AgentID))
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 40105, "msg": "账号已禁用"})
+		return
+	}
+	// 签发新 token（同样 12h TTL）
+	const newTTL = 12 * time.Hour
+	newTok, err := security.IssueAgentToken(h.cfg.JWTSecret, agent.ID, agent.Username, agent.Role, newTTL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50019, "msg": "签发 token 失败"})
+		return
+	}
+	// 审计：token 续期事件必须落盘，便于事后查"哪个 IP 用谁的 token 续了"
+	h.svc.AuditLog().Info("agent_token_refresh",
+		zap.Int64("aid", agent.ID),
+		zap.String("username", agent.Username),
+		zap.String("ip", security.ClientIP(c)))
+	h.svc.Store().AuditLog(c.Request.Context(), agent.Username, "token_refresh",
+		fmt.Sprintf("agent:%d", agent.ID), "", security.ClientIP(c))
+	c.JSON(http.StatusOK, gin.H{
+		"code":       0,
+		"token":      newTok,
+		"expires_in": int(newTTL.Seconds()),
+	})
+}
+
 // AgentWS 客服的 WSS 入口。query: token=<agent_token>
-// [062] 移除按 IP 的 WSS 握手限流（爷爷决策）；防御层：agent JWT token 校验 + WSS origin / SSL
+// [062] 移除按 IP 的 WSS 握手限流；防御层：agent JWT token 校验 + WSS origin / SSL
+// [064] 区分错误码让 App 客户端能：
+//
+//	code=40106 缺 token            → 跳登录页
+//	code=40102 token 已过期         → 客户端调 /agent/login/refresh 续 token 后重连
+//	code=40107 token 无效（签名错） → 跳登录页
+//
+// 注：WSS upgrade 之前 reject 时 Flutter WebSocketChannel.connect 只能拿 HTTP 401，
+// 读不到 body 里的 code。所以 mobile_app 必须**主动在连接前检查 exp**（_shouldRefreshToken），
+// 不能完全依赖服务端 close code。
 func (h *HTTP) AgentWS(c *gin.Context) {
 	tok := c.Query("token")
 	if tok == "" {
@@ -237,6 +314,10 @@ func (h *HTTP) AgentWS(c *gin.Context) {
 	}
 	claims, err := security.ParseAgentToken(h.cfg.JWTSecret, tok)
 	if err != nil {
+		if errors.Is(err, security.ErrTokenExpired) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40102, "msg": "登录已过期"})
+			return
+		}
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40107, "msg": "token 无效"})
 		return
 	}

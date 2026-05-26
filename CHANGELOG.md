@@ -4,6 +4,182 @@
 
 ---
 
+## [064] 2026-05-27 03:30 — 修复 [068] iOS 客服 App 12h token 过期后 401 死循环（同模式 [054]/[058] 的 token 续期版）· v0.6.0
+
+**起因 / 需求**
+
+集成方 baofusir/fakami 商城（49.233.156.149）2026-05-27 02:45 提交了一份**质量极高**的 bug 报告（项目内编号 [068]，对应我项目 [064]）：
+
+> iOS 客服 App 用一段时间后突然所有功能失效，**必须完全退出 App 重新登录**才恢复。后台关闭/重开 App 也不行。服务端日志铁证：客服 App（UA=Dart/3.10）从 02:34 起反复 401 失败，**持续到 02:39+，≥15 次 401，** 同一 IP 同一过期 token。
+
+诊断（集成方做的）：
+- JWT decode：iat=2026-05-26 06:46:31 BJT，exp=2026-05-26 18:46:31 BJT，**TTL 12h**
+- 当前时间 2026-05-27 02:34 BJT，token 已过期 **7h48min**
+- App 仍在用过期 token **反复重试 7 小时不停**
+
+**4 个根本 bug**（集成方诊断准确）：
+1. `mobile_app/lib/api/http_client.dart` 没有任何 Dio 401 interceptor，token 在构造时固化到 headers，过期后无任何机制更新
+2. `mobile_app/lib/api/ws_client.dart` token 字段是 `final String` 不可变，重连仍用旧 token → 死循环 401
+3. `_scheduleReconnect` 无限重试、不区分 close code，1.6× 退避太慢（19 次后 cap 30s，1 小时 ~150 次，7h ~1000+ 次跟服务端日志一致）
+4. 无 isRefreshing 锁，多 API 并发 401 可能触发多次 refresh
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 新增功能 1 个、修改文件 8 个、修复严重 bug 1 个
+
+### A. Backend：新增 `/api/agent/login/refresh` endpoint + 错误码细分
+
+#### A1. `backend/internal/security/jwt.go`
+
+- 新增 sentinel errors：`ErrTokenExpired` / `ErrTokenInvalid` / `ErrTokenMalformed`，handler 用 `errors.Is` 分别返不同 HTTP code
+- `ParseAgentToken` 改为区分错误类型：签名 OK 但已过期 → `ErrTokenExpired`（claims 仍返回，便于 refresh 校验 grace period）；签名错 → `ErrTokenInvalid`；完全不是 JWT → `ErrTokenMalformed`
+- 新增 `ParseAgentTokenAllowExpired`：用 `jwt.WithoutClaimsValidation()` 跳过 exp 校验，给 refresh 接口用
+
+#### A2. `backend/internal/store/store.go`
+
+新增 `GetAgentByID(id int64)`：refresh 时确认 agent 仍存在且 active（防止已禁用的 agent 续 token）
+
+#### A3. `backend/internal/handler/http.go` 新增 `RefreshAgentToken` handler
+
+设计要点：
+- 必须 `Authorization: Bearer <oldToken>` 带旧 token
+- 旧 token 用 `ParseAgentTokenAllowExpired` 解析（允许 exp 已过），但签名/sub 必须 valid
+- **Grace period 24h**：过期超过 24h 拒绝（防止失效太久的 token 被无限续命）
+- 重新查 DB agent 仍 active
+- 签发同样 12h TTL 的新 token + 写 audit log（`agent_token_refresh` 事件落 audit.log + audit_log 表）
+
+错误码：
+- `40101` 缺 Authorization header
+- `40103` token 签名错 / 篡改
+- `40104` token 过期超过 24h grace period（必须重登）
+- `40105` agent 已禁用 / 不存在
+- `50019` 后端签发失败
+
+#### A4. `backend/internal/middleware/middleware.go` `AgentAuth` 区分错误码
+
+- `40101` 未登录（缺 Authorization header） → 客户端走登录页
+- `40102` 登录已过期（token expired）→ 客户端可调 `/agent/login/refresh` 续 token
+- `40103` token 无效（签名错 / 篡改）→ 客户端走登录页
+
+#### A5. `backend/internal/handler/http.go` `AgentWS` 同样区分
+
+- `40106` 缺 token
+- `40102` token 已过期
+- `40107` token 无效（签名错）
+
+注：WSS upgrade 之前 reject 时 Flutter `WebSocketChannel.connect` 只能拿 HTTP 401，读不到 body 里的 code。所以 mobile_app **必须主动在连接前检查 exp**，不能完全依赖服务端 close code（见 B2）。
+
+#### A6. `backend/cmd/server/main.go` 注册路由
+
+```go
+api.POST("/agent/login/refresh", h.RefreshAgentToken)
+```
+
+不挂 `AgentAuth` middleware（因为 token 可能已过期，必须由 `ParseAgentTokenAllowExpired` 自己处理）
+
+### B. mobile_app：Dio 401 interceptor + ws 主动 refresh + 自动跳 LoginPage
+
+#### B1. `mobile_app/lib/api/http_client.dart` 重写
+
+- 加 `Dio.interceptors.add(InterceptorsWrapper(onError))`：拦截 401 → 检查 code=40102 → 调 `_refreshToken()` → 成功用新 token 重试原请求 → 失败 `_onAuthFailed`
+- `_refreshToken()` 用 `Completer<bool>` 做**互斥锁** `_refreshLock`：多个并发 401 只调 1 次 refresh（同模式 [058] bootstrap isBootstrapping 锁）
+- 用独立的 tmpDio 调 `/agent/login/refresh`（不带 interceptor，避免无限递归）
+- 新增 `refreshTokenPublic()` 公开入口给 `ws_client.dart` 主动 refresh 用
+- 新增 `authFailedStream` `StreamController<void>` broadcast：grace > 24h / agent 禁用 时广播让 main 跳 LoginPage
+
+#### B2. `mobile_app/lib/api/ws_client.dart` 重写
+
+- `token` 字段从 `final String` 改为可变 `String _token`
+- 加 `_isConnecting` 重入锁（同 [054] `connectWS` `isConnecting` 模式）
+- `_connect()` 改 async，**连接前主动检查** `_shouldRefreshToken()`：解析 JWT payload 拿 exp，距过期 < 5 分钟 → 调 `Api.refreshTokenPublic()` → 拿新 token 再连
+  - 这是解决 [068] 的**关键路径**：WSS handshake 401 时 Flutter 拿不到自定义 close code，必须客户端自己提前判断
+- `_onClose(closeCode)` 区分 4001 token expired → 主动 refresh + 重连；4002 invalid → `stop()` 不再死循环
+- refresh 失败 → `stop()` 不再重连，等 authFailedStream 触发跳 LoginPage
+
+#### B3. `mobile_app/lib/config/settings.dart`
+
+新增 `setAgentToken(token)`：仅更新 token 不动 agent json。refresh 接口只返新 token 不返 agent 资料（agent 资料没变）
+
+#### B4. `mobile_app/lib/state/app_state.dart`
+
+- 新增 `_authFailedSub StreamSubscription<void>?`
+- `bootstrap()` 里订阅 `Api.authFailedStream`：收到事件 → 自动 `logout()` 清 session
+- `app.dart` 的 `_Root` Consumer 在 `state.token == null` 时自动渲染 `LoginPage`，所以不需要手动 `Navigator.pushReplacement`，**响应式路由跳转**
+- 加 `@override dispose()` 取消订阅
+
+### C. admin Vue：axios 401 interceptor + ws 主动 refresh（同模式推广）
+
+#### C1. `admin/src/api/http.js` 重写
+
+- 加 `_refreshPromise` 互斥锁（JS Promise 单例）
+- response interceptor 拦截 401 → 检查 code=40102 → 调 `refreshToken()` → 成功用新 token 重试原请求 → 失败 `gotoLogin()`
+- `refreshToken()` 用 `fetch` 而非 axios（避免触发 interceptor 递归）
+- `gotoLogin()` 防 NavigationDuplicated
+
+#### C2. `admin/src/api/ws.js` 重写
+
+- `token` 改可变 `_token`
+- `_isConnecting` 重入锁
+- `_connect` 改 async，连接前主动检查 `_shouldRefreshToken()`（同 B2 逻辑，浏览器 `atob` 解码 JWT payload）
+- `onclose` 区分 close code 4001/4002
+
+### D. 版本 + 文档
+
+- `VERSION` 0.5.1 → **0.6.0**（MINOR：新增 refresh endpoint 是新功能）
+- `backend/internal/config/version.go` 同步
+- `LATEST.md` 顶部版本号 + 最近 3 次摘要刷新
+
+**业务流程对比**
+
+| 场景 | 改前 v0.5.1 | 改后 v0.6.0 |
+|---|---|---|
+| 客服 App 用 12h | token 过期 → HTTP/WSS 全 401 → 死循环重试 7+h | App 提前 5min 主动 refresh，用户无感 |
+| WSS 在线时 token 过期 | 死循环 401 → 客服每天手动重登一次 | onclose 收 4001 → 自动 refresh + 重连 |
+| 客服 30h 没用 App | token grace > 24h 后续不成 → 死循环 | refresh 收 40104 → authFailedStream → 自动跳 LoginPage |
+| 多 API 并发 401 | 可能并发多次 refresh | `_refreshLock` 互斥，只调 1 次 |
+| agent 被 admin 禁用后用 token | token 还能用 12h | refresh 收 40105 → 自动跳 LoginPage |
+| admin Vue 后台 12h | 跟 App 同模式，所有请求 401 跳登录 | 自动 refresh 用户无感 |
+
+**触发场景与边界 + 验证方式**
+
+测试用例（集成方建议的 7 个）：
+
+1. **正常 idle 11h55min**：调任意 API → App 自动 refresh（exp 检查 < 5min 触发）→ 用户无感 ✓
+2. **token 已完全过期**（改系统时间 13h 后）：调 API → 401 → interceptor 触发 refresh + 重试 ✓
+3. **WSS 在线时 token 过期**：close code 4001 → `_refreshAndReconnect` ✓
+4. **refresh 也失败（grace > 24h）**：onAuthFailed → AppState.logout → 跳 LoginPage ✓
+5. **多 API 并发 401**：`_refreshLock`/`_refreshPromise` 保证只 1 次 refresh ✓
+6. **网络中断 + token 过期**：恢复后 refresh + 续连，不死循环 ✓
+7. **refresh API 5xx**：catch 失败 → onAuthFailed 跳 LoginPage（不再无限重试）✓
+
+不影响：
+- 登录流程（`/agent/login` 不变，仍签发 12h TTL token）
+- 老 App 不升级仍可用（旧逻辑也工作，只是体验差每天手动重登）
+- 老 backend 不升级 + 新 App：refresh 接口 404 → 走 `_onAuthFailed` 跳登录页（fallback 兼容）
+- 访客 widget（不涉及 agent token）
+- WebRTC 通话（24h TURN 凭证独立机制）
+
+部署影响：
+- backend 新增 1 个 endpoint + 重 build cs-backend 镜像
+- admin 静态资源重 build cs-admin 镜像
+- **mobile_app 必须重新 build iOS .ipa 给集成方**——这是 Flutter Native build，集成方无法在客户端 sed patch
+- 数据库 schema 不动
+- 兼容老客户端：401 时旧 App 仍报错跳登录页（跟改前一样），不破坏
+
+**反思 / 同模式追溯**
+
+| Bug | 模式 | 修复 commit |
+|---|---|---|
+| [054] chat.html connectWS 重连风暴 | 无重入锁 + 固定 retry + 不识别错误码 | e19be07 `isConnecting/reconnectTimer/scheduleReconnect` |
+| [058] chat.html bootstrap 死循环 | 无重入锁 + 固定 5s retry + 不识别 429 | c11ae39 `isBootstrapping/Retry-After/sessionStorage` |
+| **[064] App AgentWS + Api token 死循环** | **无 refresh 机制 + final token + 不识别 401** | **本次：Dio interceptor + refresh lock + 主动 exp 检查 + backend refresh endpoint** |
+
+三个**同模式 bug**，分别在三个不同的客户端（chat.html / chat.html / mobile_app + admin）。统一模式：**所有需要重连/重试的客户端都必须有：① 重入锁 ② 错误码区分 ③ 退避策略 ④ 终止条件**。
+
+下次审计：访客 widget chat.html 的 visitor token 是否也有同样问题？暂时不动（visitor token 12h 内通常会话已结束），但理论上同模式应该一起改。
+
+---
+
 ## [063] 2026-05-26 17:30 — admin 工作台「点击会话→标记已读」从 2-3s 卡顿降到 0ms · v0.5.1
 
 **起因 / 需求**

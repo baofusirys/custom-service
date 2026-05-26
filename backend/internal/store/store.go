@@ -557,6 +557,20 @@ FROM agents WHERE username=? LIMIT 1`, username).Scan(
 	return a, err
 }
 
+// GetAgentByID [064] 按 ID 查 agent。/agent/login/refresh 用，确认 agent 仍存在且 active 再签新 token。
+// 不返回 pass_hash（refresh 流程不需要）。
+func (s *Store) GetAgentByID(ctx context.Context, id int64) (*Agent, error) {
+	a := &Agent{}
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, username, role, nickname, active, created_at, last_login
+FROM agents WHERE id=? LIMIT 1`, id).Scan(
+		&a.ID, &a.Username, &a.Role, &a.Nickname, &a.Active, &a.CreatedAt, &a.LastLogin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return a, err
+}
+
 func (s *Store) CreateAgent(ctx context.Context, a *Agent) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 INSERT INTO agents(username, pass_hash, role, nickname, active, created_at)

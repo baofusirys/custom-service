@@ -164,6 +164,9 @@ func main() {
 
 		// 客服登录（[062] 不再走 IP HTTP 限流，靠 bcrypt cost=12 ~ 250ms/次自然防爆破）
 		api.POST("/agent/login", h.AgentLogin)
+		// [064] token 续期：解决 [068] iOS App 12h 后 401 死循环问题
+		// 不挂 AgentAuth middleware 因为 token 可能已过期（ParseAgentTokenAllowExpired 自己处理）
+		api.POST("/agent/login/refresh", h.RefreshAgentToken)
 
 		// 客服已登录
 		ag := api.Group("/agent", middleware.AgentAuth(cfg.JWTSecret))

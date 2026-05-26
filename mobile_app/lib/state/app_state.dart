@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../api/http_client.dart';
@@ -43,12 +44,29 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
+  // [064] 监听 Api.authFailedStream：token 完全失效（grace > 24h / agent 禁用）时
+  // 自动 logout 让顶层 _Root 跳到 LoginPage。
+  StreamSubscription<void>? _authFailedSub;
+
   Future<void> bootstrap() async {
     backendUrl = await Settings.getBackendUrl();
     token = await Settings.getAgentToken();
     final a = await Settings.getAgent();
     if (a != null) agent = Agent.fromJson(a);
+    // [064] 订阅 401 失效广播（http_client.dart Dio interceptor 触发）
+    _authFailedSub ??= Api.authFailedStream.listen((_) async {
+      // 已经在 logout 路径里了就跳过
+      if (token == null) return;
+      await logout();
+    });
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _authFailedSub?.cancel();
+    _authFailedSub = null;
+    super.dispose();
   }
 
   // ===== Login / Logout =====
