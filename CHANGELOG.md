@@ -4,6 +4,31 @@
 
 ---
 
+## [056] 2026-05-26 13:00 — 版本号升 v0.3.0：[054] PATCH + [055] MINOR 累积发版
+
+**起因 / 需求**
+v0.2.0 之后累积 [054] connectWS 重连风暴根治（PATCH）+ [055] 访客识别增强含新 API（MINOR）。按 SemVer 至少 MINOR 升级；统一打 v0.3.0 tag 让集成方能锁版本，不再用 `:sha-xxx` 临时引用。
+
+**改了什么**（3 处版本号同步 + 打 tag + Release）
+
+- `VERSION` 文件：`0.2.0` → `0.3.0`
+- `backend/internal/config/version.go`：`const Version = "0.3.0"`
+- `LATEST.md` 顶部版本号 → v0.3.0
+- git tag `v0.3.0` + push → GitHub Actions 触发 build → GHCR 自动打 `:0.3.0` tag（7 镜像全套）
+- `gh release create v0.3.0` 自动从 commit 生成 Release notes
+
+**v0.3.0 包含的增量**（相比 v0.2.0）
+- [054] connectWS 多实例并发重连风暴根治（PATCH 级修复，本应 v0.2.1）
+- [055] 访客唯一性识别增强 + 新 API endpoint `/api/agent/visitor/:vid/related`（MINOR 新能力）
+- [055] visitors 表新增 ip_hash 列（向下兼容 migration）
+- [055] widget cookie + localStorage 双轨 vid 防丢
+
+按 SemVer 严格分应该 `v0.2.1 → v0.3.0` 两次发版，本回合简化合并一次发 `v0.3.0`。
+
+**验证**：push tag 后 GHCR 应有 `:0.3.0` tag；`curl https://你域名/api/version` 应返 `{"version":"0.3.0",...}`
+
+---
+
 ## [055] 2026-05-26 12:30 — 访客唯一性识别增强：IP 关联访客面板 + cookie 双轨防丢
 
 **起因 / 需求**
