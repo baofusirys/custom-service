@@ -175,19 +175,35 @@ class _ChatPageState extends State<ChatPage> {
               },
               // reverse: true —— 进入页面时天然显示最新消息（在视觉底部），
               // 不再依赖 maxScrollExtent 计算，告别 ListView 懒渲染滚不到底的坑
-              child: ListView.builder(
-                controller: _scroll,
-                reverse: true,
-                padding: const EdgeInsets.only(top: 12, bottom: 8),
-                itemCount: msgs.length,
-                itemBuilder: (ctx, i) {
-                  // i 是从底往上的 index；映射到原数组的真实索引
-                  final realIdx = msgs.length - 1 - i;
-                  final m = msgs[realIdx];
-                  final prev = realIdx == 0 ? null : msgs[realIdx - 1];
-                  return _row(m, prev, lastMine, state);
-                },
-              ),
+              // [051] 加 loading 态：openConv 立刻 push 页面后，messages 暂时空，显示 spinner
+              //       而不是空白页；HTTP 拉到消息后 notifyListeners 自动重渲染
+              child: (msgs.isEmpty && state.loadingMessages)
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: 32, height: 32,
+                            child: CircularProgressIndicator(strokeWidth: 2.5),
+                          ),
+                          SizedBox(height: 12),
+                          Text('加载消息中…', style: TextStyle(color: Colors.grey, fontSize: 13)),
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      controller: _scroll,
+                      reverse: true,
+                      padding: const EdgeInsets.only(top: 12, bottom: 8),
+                      itemCount: msgs.length,
+                      itemBuilder: (ctx, i) {
+                        // i 是从底往上的 index；映射到原数组的真实索引
+                        final realIdx = msgs.length - 1 - i;
+                        final m = msgs[realIdx];
+                        final prev = realIdx == 0 ? null : msgs[realIdx - 1];
+                        return _row(m, prev, lastMine, state);
+                      },
+                    ),
             ),
           ),
           _inputBar(),

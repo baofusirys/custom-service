@@ -137,11 +137,13 @@ class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindi
             ),
         ],
       ),
-      onTap: () async {
-        await ctx.read<AppState>().openConv(c);
-        if (ctx.mounted) {
-          Navigator.of(ctx).push(MaterialPageRoute(builder: (_) => const ChatPage()));
-        }
+      onTap: () {
+        // [051] 立刻 push 页面 + 后台拉消息（不 await），实现 IM 标准的 0ms 切换体验
+        // 改前：await openConv → 等 1-2s HTTP → push，用户感觉"卡了一下"
+        // 改后：openConv 立刻设 activeConv + 触发后台 HTTP，立刻 push 页面
+        //       ChatPage 通过 state.loadingMessages 显示 spinner，HTTP 返回后自动重渲染
+        ctx.read<AppState>().openConv(c);
+        Navigator.of(ctx).push(MaterialPageRoute(builder: (_) => const ChatPage()));
       },
     );
   }

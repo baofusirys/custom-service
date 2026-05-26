@@ -4,6 +4,69 @@
 
 ---
 
+## [051] 2026-05-26 01:10 — App 点会话 1-2 秒延迟修复：即时切页 + 后台拉消息（IM 标准 0ms 感知）
+
+**起因 / 需求**
+爷爷反馈：从会话列表点某个对话后，**等 1-2 秒**才进入聊天界面，不能预加载吗？
+
+诊断：`mobile_app/lib/state/app_state.dart` `openConv()` 是 Future 函数，**串行 await 两个 HTTP 请求**：
+1. `Api.listMessages(c.id, limit:100)` — 拉历史消息（200-1000ms）
+2. `Api.assign(c.id)` — 标记 agent 接管（100-500ms）
+
+`conversations_page.dart` onTap 又 **await openConv 完成才 push 页面**：
+```dart
+onTap: () async {
+  await ctx.read<AppState>().openConv(c);   // 等 1-2 秒
+  Navigator.push(...ChatPage);              // 才 push
+}
+```
+
+用户感觉"卡了一下才进去"。这是 IM 反模式（微信 / WhatsApp / Telegram 都是即点即切，消息异步填充）。
+
+**改了什么**（修改 3 文件）
+
+### 1. `app_state.dart` openConv 重构（从 Future 到同步 void）
+- 立刻同步设 `activeConv = c` + `messages.clear()` + `loadingMessages = true` + notifyListeners
+- 后台 IIFE 跑 HTTP（不 await）：listMessages → assign → read marker
+- **race 防护**：HTTP 回来前先查 `activeConv?.id != reqConvId`（用户快速切会话时丢弃旧结果，防消息串台）
+- finally 块复位 `loadingMessages = false` 让 UI 退出 spinner
+
+新增字段 `bool loadingMessages = false`，`closeActive()` 也 reset。
+
+### 2. `conversations_page.dart` onTap 不 await
+```dart
+onTap: () {
+  ctx.read<AppState>().openConv(c);   // 同步立刻返
+  Navigator.push(MaterialPageRoute(builder: (_) => const ChatPage()));   // 立刻 push
+}
+```
+
+### 3. `chat_page.dart` 加 loading skeleton
+- ChatPage build 时 `state.activeConv` 已经被 openConv 同步设了，不再 null，**立刻能 push 页面**
+- 消息列表区域：`(msgs.isEmpty && state.loadingMessages)` → 显示 CircularProgressIndicator + "加载消息中…"
+- HTTP 回来 notifyListeners → ChatPage 自动重渲染显示消息列表
+
+**业务流程对比**
+
+| 时刻 | 改前 | 改后 |
+|---|---|---|
+| 用户点会话 t=0ms | 等… | 立刻 push 页面（spinner） |
+| t=500ms | 仍等… | spinner 转着 |
+| t=1500ms（HTTP 回） | 终于 push 页面 + 显示消息 | spinner 消失 + 消息渲染 |
+| 用户感知切页延迟 | **1-2 秒** | **0ms** |
+
+**触发场景与边界 + 验证方式**
+
+- **race condition 防护**：用户在 spinner 时快速点另一个会话 → 旧 reqConvId !== 新 activeConv.id → 旧 HTTP 回结果直接丢；防止旧消息覆盖新会话消息
+- **HTTP 失败**：catch 静默，spinner 消失（finally），messages 仍空——用户看到空聊天页（未来加 retry 按钮）
+- **真正空会话**（极少见，会话存在但无消息）：HTTP 返空数组 → msgs 仍 empty + loadingMessages false → 条件 `(msgs.isEmpty && loadingMessages)` false → 显示空 ListView（不再 spinner 死转）
+- **closeActive race**：用户在 spinner 时按返回 → closeActive 把 activeConv 设 null + loadingMessages 重置 → HTTP 回来时 activeConv?.id != reqConvId 也跳过
+- **不影响**：sendChat / uploadAndSendFile / voice / 通话 / 推送 / WSS 消息推送等所有功能；ConversationsPage [050] AppLifecycleState.resumed 刷新仍生效
+- **GHCR 镜像**：mobile_app 改动不入 GHCR，仅 IPA 装机
+- **验证**：iPhone App 主屏点会话 → 应立刻切到 ChatPage 看到 spinner → 1-2 秒消息出现
+
+---
+
 ## [050] 2026-05-26 00:50 — 修两个体验 bug：widget 后退/SPA 后图标消失 + App 后台回前台不自动刷新
 
 **起因 / 需求**

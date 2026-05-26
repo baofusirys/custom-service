@@ -108,31 +108,53 @@ class AppState extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> openConv(Conversation c) async {
+  /// [051] 加载状态标志：openConv 立刻返、ChatPage 据此显示 spinner
+  /// true = 后台 HTTP 拉消息中；false = 拉完（或失败/无消息）
+  bool loadingMessages = false;
+
+  /// [051] 即时切换，不阻塞 UI。
+  /// 改前：await listMessages + await assign 后才返回 → ConversationsPage 等 1-2s 才 push 页面
+  /// 改后：立刻设 activeConv + notifyListeners → 调用方立刻 push 页面（0ms 感知切换），
+  /// 后台 unawaited 跑 HTTP，拉到消息后再 notifyListeners 让 ChatPage 重渲染
+  void openConv(Conversation c) {
     activeConv = c;
     messages.clear();
+    loadingMessages = true;
     notifyListeners();
-    try {
-      final raw = await Api.listMessages(c.id, limit: 100);
-      final list = raw.map(Message.fromJson).toList()
-        ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-      messages
-        ..clear()
-        ..addAll(list);
-      await Api.assign(c.id);
-      c.unread = 0;
-      // 标记本地所有访客消息已读 + 推 WSS read
-      for (final m in messages) {
-        if (m.sender == 'visitor') m.read = true;
+    // 防 race：用户快速切换会话时，旧的 HTTP 回来不能覆盖新的 activeConv
+    final reqConvId = c.id;
+    () async {
+      try {
+        final raw = await Api.listMessages(reqConvId, limit: 100);
+        // 用户已切到别的会话 / 关闭了，丢弃本次结果
+        if (activeConv?.id != reqConvId) return;
+        final list = raw.map(Message.fromJson).toList()
+          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        messages
+          ..clear()
+          ..addAll(list);
+        await Api.assign(reqConvId);
+        if (activeConv?.id != reqConvId) return;
+        c.unread = 0;
+        for (final m in messages) {
+          if (m.sender == 'visitor') m.read = true;
+        }
+        _sendRead(reqConvId);
+      } catch (_) {
+        // 静默：网络出错 ChatPage 显示空 + 用户可下拉重试（未来加）
+      } finally {
+        if (activeConv?.id == reqConvId) {
+          loadingMessages = false;
+          notifyListeners();
+        }
       }
-      _sendRead(c.id);
-      notifyListeners();
-    } catch (_) {}
+    }();
   }
 
   void closeActive() {
     activeConv = null;
     messages.clear();
+    loadingMessages = false;  // [051] 离开会话清 loading 标志，下次打开重新置 true
     notifyListeners();
   }
 
