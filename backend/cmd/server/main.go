@@ -22,6 +22,7 @@ import (
 	"github.com/custom-service/backend/internal/middleware"
 	"github.com/custom-service/backend/internal/redisx"
 	"github.com/custom-service/backend/internal/security"
+	"github.com/custom-service/backend/internal/security/geoip"
 	"github.com/custom-service/backend/internal/service"
 	"github.com/custom-service/backend/internal/store"
 	"github.com/custom-service/backend/internal/ws"
@@ -81,6 +82,22 @@ func main() {
 		log.Fatalf("[FATAL] 加密器初始化失败: %v", err)
 	}
 	limiter := security.NewRateLimiter(rdb, secLog, cfg.IPBlacklistThreshold)
+
+	// === [060] GeoIP 解析器（ip2region xdb v2，~11MB 全内存索引）===
+	// 失败不 fatal：xdb 文件挂了不能拖垮主业务，VisitorSession 会拿到空 country/city 仍正常落库。
+	// xdb 路径优先环境变量 GEOIP_PATH，默认 /app/data/ip2region.xdb（Dockerfile 已 COPY）。
+	geoPath := os.Getenv("GEOIP_PATH")
+	if geoPath == "" {
+		geoPath = "/app/data/ip2region.xdb"
+	}
+	geoRes, geoErr := geoip.New(geoPath)
+	if geoErr != nil {
+		bizLog.Warn("geoip disabled (visitor country/city will be empty)",
+			zap.String("path", geoPath), zap.Error(geoErr))
+	} else {
+		bizLog.Info("geoip loaded", zap.String("path", geoPath))
+	}
+	geoip.SetDefault(geoRes)
 
 	// === Store / Service ===
 	st := store.New(conn)

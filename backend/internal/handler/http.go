@@ -20,6 +20,7 @@ import (
 
 	"github.com/custom-service/backend/internal/config"
 	"github.com/custom-service/backend/internal/security"
+	"github.com/custom-service/backend/internal/security/geoip"
 	"github.com/custom-service/backend/internal/service"
 	"github.com/custom-service/backend/internal/store"
 	"github.com/custom-service/backend/internal/ws"
@@ -93,6 +94,10 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 	ipCipher, _ := h.svc.Cipher().Encrypt(ip)
 	// [055] 额外算 HMAC 哈希：写 ip_hash 字段供「关联访客」面板按 IP 查同人不同 vid
 	ipHash := security.IPHash(h.cfg.DataAESKey, ip)
+	// [060] 离线 GeoIP 解析（ip2region xdb）。库没加载/解析失败/IPv6 都返回空，不影响主流程。
+	// UpsertVisitor SQL 用 COALESCE(NULLIF(VALUES(country),''), country)，空值不会覆盖既有非空，
+	// 所以老库存量数据补不上不要紧（首次回访写一次就有了），新访客直接写入。
+	geo := geoip.Default().Lookup(ip)
 
 	now := time.Now()
 	v := &store.Visitor{
@@ -101,6 +106,8 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		IPCipher:   ipCipher,
 		IPHash:     ipHash,
 		UA:         r.UA,
+		Country:    geo.Country,
+		City:       geo.City,
 		Referer:    r.Referer,
 		LastPage:   r.LastPage,
 		Identifier: r.Identifier,

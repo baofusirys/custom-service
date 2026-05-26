@@ -4,6 +4,107 @@
 
 ---
 
+## [060] 2026-05-26 16:20 — 访客地理位置离线解析（ip2region xdb，完全离线零外部 API） · v0.4.0
+
+**起因 / 需求**
+
+[059] 给 admin 会话列表第 3 行铺好了 `📍 国家·城市 · IP` 显示坑位，但实测 country/city 字段始终空——因为后端没有 IP→地理位置库，VisitorSession 落库时 Country/City 永远是 `""`。爷爷说：「能不能显示出每个访客的地理位置？要免费的，你看着来。」
+
+候选方案对比（爷爷说 **要免费的**）：
+
+| 方案 | 离线 | 免费 | 注册门槛 | 国内 IP 精度 | 文件大小 | 选 |
+|---|---|---|---|---|---|---|
+| A. MaxMind GeoLite2 | 是 | 是 | 要注册 license key | 90%+ 国家级，城市级一般 | ~70MB | 否 |
+| B. ip-api.com | 否 | 是（45/min）| 无 | 高 | 0 | 否（外部依赖+限流） |
+| **C. ip2region xdb v2** | **是** | **是** | **无** | **极高（地级市）** | **~11MB** | **✅** |
+| D. ipip.net | 否 | 部分 | 要注册 | 极高 | API | 否 |
+
+选 C 的核心理由：① 国内项目国内访客为主，ip2region 国内 IP 准确到地级市；② 11MB 全内存索引毫秒级；③ MIT 协议无注册门槛；④ 完全离线零外部 HTTP，不会被限流，不会因第三方挂掉影响业务。
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 新增功能 1 个、新增模块 1 个、修改文件 5 个；删除 0 个
+
+### 1. 新增模块：`backend/internal/security/geoip/geoip.go`（122 行）
+
+- `Resolver` 结构体持有 `*xdb.Searcher`（全内存 vector index）
+- `Result{Country, Province, City}` 已清除 ip2region 的 `"0"` 占位符
+- `New(path)` 加载 xdb 文件：文件不存在/损坏/解析失败 → 返回 `disabled=true` 的 Resolver + error，**不 panic**（业务侧可 ignore error 继续启动）
+- `(*Resolver).Lookup(ip)` 容错优先：nil receiver / disabled / 空 IP / IPv6 → 全部返回空 `Result{}`，绝不阻塞业务
+- 全局单例：`SetDefault(r)` + `Default()`，handler 直接 `geoip.Default().Lookup(ip)`
+- 线程安全：xdb.Searcher 只读，多协程并发查询天然安全
+
+### 2. 新增依赖：`backend/go.mod`
+
+`github.com/lionsoul2014/ip2region/binding/golang v0.0.0-20240807094808-a73a17872bb6`
+
+### 3. `backend/cmd/server/main.go` 启动加载
+
+- import `internal/security/geoip`
+- limiter 初始化后追加：读 `GEOIP_PATH` 环境变量（默认 `/app/data/ip2region.xdb`）→ `geoip.New(path)` → `geoip.SetDefault(r)`
+- 失败只 `bizLog.Warn`，不 fatal（geoip 挂了不能拖垮整个服务）
+- 成功打印 `bizLog.Info("geoip loaded", path)` 便于排查
+
+### 4. `backend/internal/handler/http.go` `VisitorSession` 填字段
+
+- 拿到 `ip := security.ClientIP(c)` 之后追加 `geo := geoip.Default().Lookup(ip)`
+- `&store.Visitor{...}` 字面量加 `Country: geo.Country, City: geo.City`
+- `UpsertVisitor` SQL 原本就有 `COALESCE(NULLIF(VALUES(country),''), country)` 保护：geoip 给空值不会覆盖既有非空字段，安全
+
+### 5. `backend/Dockerfile` 三阶段构建
+
+- 新增 `FROM alpine:3.20 AS geoip` 阶段：
+  - 多 mirror 兜底：`raw.githubusercontent.com` → `github.com/raw` → `gitee.com/lionsoul/ip2region/raw`
+  - wget 30s timeout × 2 tries × 3 mirror → 任一成功即可
+  - 校验文件 >1MB（防 ghproxy 返回 1.7KB 错误页冒充）
+  - 全部失败 → `exit 1` 显式构建失败（不要悄悄出空文件）
+- 运行阶段加 `COPY --from=geoip /geo/ip2region.xdb /app/data/ip2region.xdb`
+- 国内 win11 本地直接拉 raw.github 拉不下来 → 让 GHA runner（美国）build 阶段拉，秒拉
+
+### 6. `VERSION` / `backend/internal/config/version.go` 升 `0.3.0 → 0.4.0`
+
+新增功能（地理位置解析）属于 MINOR 升级。
+
+### 7. `LATEST.md` 顶部版本号 + 最近 3 次重大改动摘要刷新
+
+**业务流程对比**
+
+| 角度 | 改前（v0.3.0） | 改后（v0.4.0） |
+|---|---|---|
+| Admin 会话列表第 3 行 📍 | 只有 IP（如 `📍 110.241.19.222`）| `📍 中国·上海 · 110.241.19.222`（国内）/ `📍 美国 · 8.8.8.8`（海外）|
+| 访客解析延迟 | 0（不解析）| < 1ms（全内存 vector index 查询）|
+| 外部依赖 | 无 | 无（xdb 文件随镜像分发，离线）|
+| API 调用配额 | / | 无（不调任何第三方 HTTP）|
+| 数据来源 | / | ip2region.xdb（MIT 开源，国内地级市级精度）|
+
+**触发场景与边界 + 验证方式**
+
+- **触发**：每次 VisitorSession（访客 widget bootstrap 时） → 一次 Lookup → 写库
+- **不触发**：
+  - 已存在的老 visitor 行（UpsertVisitor 不覆盖既有 country/city）→ 老访客第一次回访时才补上
+  - WSS 握手 / 后续消息 / agent 接口 → 不重复查（库里已有就够了）
+- **边界值**：
+  - **IPv6**：xdb v2 只支持 IPv4，IPv6 直接返空 `Result{}`（埋点：`Disabled()` 检测）
+  - **内网 IP**（127.0.0.1 / 192.168.x.x）：xdb 返回 `0|0|内网IP|内网IP|内网IP` 或类似，`clean()` 把 `0` 转空字符串后展示为「内网IP · 1.2.3.4」或仅 IP
+  - **不可达 / 非法 IP**：`net.ParseIP` 失败 → 返空 `Result{}`
+  - **xdb 文件丢失** / 损坏：Resolver disabled，所有 Lookup 返空，业务正常跑（admin 看到只有 IP）
+- **不影响**：
+  - 任何其他模块（geoip 模块独立、Lookup 失败容错）
+  - [055] RelatedVisitors（按 ip_hash 查不依赖 country/city）
+  - [058] 限流/熔断
+- **GHCR 镜像**：仅 `cs-backend` 改，重 build。镜像比 v0.3.0 大约 +11MB
+- **xdb 数据更新**：ip2region 仓库 1-2 月一次大更新 → 后续重 build 镜像自动拿最新
+
+**验证方式**（部署后）
+
+1. 后端容器启动日志：`grep "geoip loaded" /srv/cs-data/logs/backend/business.log` → 应有一行带 path
+2. 国内访客访问 widget → DB 查 `SELECT country, city FROM visitors WHERE id='<vid>'` → 应有「中国 / 广东省」类
+3. Admin 后台会话列表第 3 行 → 应显示 `📍 中国·上海 · 1.2.3.4` 而不是只有 IP
+4. 模拟 IPv6 访问：`X-Real-IP: 2001:db8::1` → country/city 应保持空（不该报错）
+5. 模拟 xdb 删除：`docker exec cs-backend rm /app/data/ip2region.xdb`（不要真做）→ 重启应看到 `geoip disabled` warn 但服务正常起
+
+---
+
 ## [059] 2026-05-26 15:30 — admin 会话列表显示访客 IP + 地理位置（第 3 行 📍 灰色小字）
 
 **起因 / 需求**

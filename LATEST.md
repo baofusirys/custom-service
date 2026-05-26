@@ -1,4 +1,4 @@
-### 当前版本：v0.3.0 · 2026-05-26
+### 当前版本：v0.4.0 · 2026-05-26
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -66,9 +66,9 @@
 ```
 
 ## 最近 3 次重大改动摘要
-- **[035] 2026-05-24**：引入 CoTURN（WebRTC TURN/STUN relay）。解决 iPhone 挂 VPN 时通话「连接失败」问题。三端通话前 fetch 后端 `/api/turn-credential` 拿 24h 短期 HMAC 凭证，P2P 失败时走 TURN 中继。详见 `turn/README.md`。
-- **[034 + fix1] 2026-05-24**：聊天记录加通话状态系统消息（未接 / 拒绝 / 忙线 / 挂断含时长 / 连接失败）。hub 用独立 `finishedCalls sync.Map` 5 分钟 dedup 防双方挂断重复写 sys。
-- **[001] 2026-05-21**：项目首版。建立 Go 后端 / Vue Admin / Widget / Nginx 四模块的骨架；MySQL + Redis 持久化；WSS 全双工通信；日志按天滚动落盘；启动自动迁移；Docker 一键部署。
+- **[060] 2026-05-26**：访客地理位置离线解析。后端集成 ip2region xdb（~11MB 全内存索引，Dockerfile build 阶段从 GitHub raw / gitee 镜像下载），VisitorSession 写库时填 country/city。Admin 会话列表的 `📍 country·city · IP` 行（[059] 已铺位）从此真有值。完全离线零外部 API。
+- **[059] 2026-05-26**：Admin 会话列表显示访客 IP（解密 ip_cipher）+ 地理位置坑位。
+- **[035] 2026-05-24**：引入 CoTURN（WebRTC TURN/STUN relay）。解决 iPhone 挂 VPN 时通话「连接失败」问题。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）
