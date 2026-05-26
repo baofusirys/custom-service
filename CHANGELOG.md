@@ -4,6 +4,61 @@
 
 ---
 
+## [053] 2026-05-26 02:30 — 版本号体系上线：v0.2.0 git tag + /api/version + GHCR 锁版本
+
+**起因 / 需求**
+集成方反馈："上游有版本号维护吗？要不然维护一个，这样我就能让那边直接检查最新版了。" 现状：workflow 早已支持 `tags: ['v*.*.*']` 触发但**从没真打过 git tag**；GHCR 只有 `:latest` 和 `:sha-xxx` 没有 SemVer tag；集成方只能拉 latest 不稳定（每次 push 就变），无法锁定版本。
+
+**首版本号 v0.2.0**：
+按 SemVer，[044] 带来的 GHCR 预编译镜像 + install.sh 一键 + 端口全 env 化是 **minor 级新能力**，应从 LATEST.md 写的 v0.1.2 升 minor 到 v0.2.0。之后 [045-052] 的修复都算 patch（未来 v0.2.1 v0.2.2...）。
+
+**改了什么**（新增 2 文件 + 修改 5 文件）
+
+### 1. 版本号定义
+- 新增 **`VERSION`** 文件（仓库根，明文 `0.2.0`，single source of truth 给集成方 `curl raw` 拉）
+- 新增 **`backend/internal/config/version.go`**：`const Version = "0.2.0"`（Go 包级常量，附升级 SOP 文档注释提醒同步 2 处）
+
+### 2. backend `/api/version` 接口
+- `handler/http.go` 加 `Version(c *gin.Context)` handler：返 `{version, name, repo}`
+- `handler/http.go` `Health()` 顺带加 `version` 字段（运维 `curl /api/health` 一眼看版本）
+- `cmd/server/main.go` 注册 `api.GET("/version", h.Version)`
+
+### 3. 文档
+- `LATEST.md` 顶部版本号 `v0.1.2` → `v0.2.0` + 日期更新
+- `README.md` 加 Release badge + 加「检查版本 / 升级」段（查 deployed / upstream / 升级命令 / 锁定版本提示）
+- `INSTALL.md` 第 6 节「升级到新版本」重写：3 步对比（查 deployed / upstream / Release notes）+ 按部署模式 A/B/C 选升级命令 + 锁定版本生产推荐
+
+### 4. git tag + GitHub Release
+- 打 git tag `v0.2.0` + push → workflow `tags: ['v*.*.*']` 触发自动 build → 推 GHCR `:0.2.0` tag（每镜像）
+- `gh release create v0.2.0` 用 `--generate-notes` 自动从 commit 抽 release notes（含 [044]-[053] 全部改动）
+
+**业务流程对比**
+
+| 角色 | 改前 | 改后 |
+|---|---|---|
+| 集成方查版本 | 只能 ssh 进服务器看代码 | `curl https://你域名/api/version` 一行 |
+| 集成方查 upstream 最新 | 看 LATEST.md / commit log | `curl raw .../VERSION` 一行 |
+| 集成方锁版本 | 只能 :latest（每次 push 都变）| `image: ghcr.io/.../cs-backend:0.2.0` 锁死 |
+| 看版本变更 | 翻 CHANGELOG.md（300 行）| https://github.com/.../releases 一眼看 release 历史 |
+| 升级到新版本 | 不清楚 | 文档明确按部署模式 A/B/C 给命令 |
+
+**触发场景与边界 + 验证方式**
+
+- **版本号同步 2 处**：`VERSION` 文件 + `config/version.go const Version` 必须一致；CI 后续可加 lint 校验（`grep` 两边相等）。本回合先靠 SOP 文档约定，注释提醒升版本时改 2 处
+- **SemVer 规则**：MINOR 新增能力（v0.2.0 = [044] GHCR/install.sh/端口 env）；PATCH 修复/小改（v0.2.1 = 下次 bugfix）；MAJOR 后续 1.0 稳定版（暂不发）
+- **`/api/version` 无鉴权**：仅返版本号/项目名/repo URL 无敏感信息，公开可访问；nginx api_rps 限流仍保护
+- **GHCR tag 策略**：workflow 已实现，tag push 时打 `:latest` + `:sha-xxx` + `:0.2.0`；本回合不动 workflow
+- **集成方升级 SOP**：模式 A/B `docker compose pull && up -d`（秒级），模式 C `git pull && up -d --build`（10-20 分钟编译）
+- **不影响**：现有所有功能；新接口 `/api/version` 是纯加法，老客户端不调用也无副作用
+- **验证**：
+  1. 部署后 `curl https://maihaocs.icu/api/version` 应返 `{"version":"0.2.0",...}`
+  2. `curl https://maihaocs.icu/api/health` 应含 `"version":"0.2.0"` 字段
+  3. `curl raw .../VERSION` 应返 `0.2.0`
+  4. push tag `v0.2.0` 后 Actions 应触发 + 几分钟后 GHCR 出现 `cs-backend:0.2.0` 等 7 个 tag
+  5. https://github.com/baofusirys/custom-service/releases/tag/v0.2.0 应能看到 release page
+
+---
+
 ## [052] 2026-05-26 02:00 — CreateAgent 错误文案精细化拆分 + 入参严格校验（消"或失败"歧义）
 
 **起因 / 需求**

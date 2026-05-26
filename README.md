@@ -1,6 +1,7 @@
 # Custom Service — 企业级自托管在线客服系统
 
 [![Build Images](https://github.com/baofusirys/custom-service/actions/workflows/build-images.yml/badge.svg)](https://github.com/baofusirys/custom-service/actions/workflows/build-images.yml)
+[![Release](https://img.shields.io/github/v/release/baofusirys/custom-service?label=release)](https://github.com/baofusirys/custom-service/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 > 一行 `<script>` 嵌入任意网页 · WSS 实时通信 · Go + Vue3 + Element Plus · Docker 一键部署
@@ -20,6 +21,23 @@ bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/ma
 自动装 Docker / 生成强密码 / 拉预编译镜像 / 启动。无需 git clone、无需本地编译。
 
 镜像在 GitHub Container Registry，公开免授权拉取：`ghcr.io/baofusirys/cs-{backend,admin,widget,nginx,mysql,redis,coturn}:latest`
+
+## 检查版本 / 升级
+
+```bash
+# 查你部署的版本
+curl -s https://你的域名/api/version
+# {"version":"0.2.0","name":"custom-service","repo":"..."}
+
+# 查 upstream 最新版
+curl -s https://raw.githubusercontent.com/baofusirys/custom-service/main/VERSION
+# 0.2.0
+
+# 升级到最新（不停机数据库，仅秒级重启容器）
+cd /opt/custom-service && docker compose pull && docker compose up -d
+```
+
+锁定特定版本（生产推荐，避免 latest 突变）：把 `docker-compose.yml` 里 `:latest` 改成具体 tag 如 `:0.2.0`，全部 release tag 见 https://github.com/baofusirys/custom-service/releases
 
 ---
 

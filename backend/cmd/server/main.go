@@ -130,6 +130,7 @@ func main() {
 	api := r.Group("/api")
 	{
 		api.GET("/health", h.Health)
+		api.GET("/version", h.Version) // [053] 集成方对比 deployed vs upstream 最新版用
 
 		// 访客侧（无需登录，限流靠 IP + visitor token）
 		visitor := api.Group("/visitor")

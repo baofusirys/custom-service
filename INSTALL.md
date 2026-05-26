@@ -304,12 +304,33 @@ flutter install --release -d <iPhone 设备 ID>
 
 ## 6. 升级到新版本
 
+**[053] 版本号体系**：
+
 ```bash
-cd /custom-service
-git pull
-docker compose up -d --build
+# 查你当前部署的版本
+curl -s https://你的域名/api/version
+# 返回 {"version":"0.2.0","name":"custom-service","repo":"..."}
+
+# 查 upstream 最新版（不需要 ssh 到服务器）
+curl -s https://raw.githubusercontent.com/baofusirys/custom-service/main/VERSION
+# 返回 0.2.1（如有新版）
+
+# 看完整 release notes
+开浏览器：https://github.com/baofusirys/custom-service/releases
 ```
-完全无停机（除了 backend 容器重启的几秒）。数据库迁移自动跑。
+
+**升级方式（按部署模式选）**：
+
+| 模式 | 命令 | 说明 |
+|---|---|---|
+| A（install.sh 装的，模式 A/B）| `cd /opt/custom-service && docker compose pull && docker compose up -d` | 不编译，秒级重启 |
+| C（源码 git clone 装的）| `cd /opt/custom-service && git pull && docker compose up -d --build` | 重新编译 10-20 分钟 |
+
+无停机（除了 backend 容器重启的几秒）。数据库迁移自动跑。
+
+**锁定版本**（生产推荐，防 latest 突变）：
+编辑 `docker-compose.yml` 把 `image: ghcr.io/baofusirys/cs-backend:latest` 改成 `:0.2.0`，
+全部 release tag 见 https://github.com/baofusirys/custom-service/releases
 
 ---
 

@@ -42,10 +42,24 @@ func (h *HTTP) Health(c *gin.Context) {
 	tz := time.Now().In(h.cfg.Timezone).Format("2006-01-02 15:04:05")
 	c.JSON(http.StatusOK, gin.H{
 		"status":   "ok",
+		"version":  config.Version, // [053] 健康检查顺带带版本，运维查部署一目了然
 		"tz":       "Asia/Shanghai",
 		"now":      tz,
 		"visitors": h.hub.OnlineVisitorCount(),
 		"agents":   h.hub.OnlineAgentCount(),
+	})
+}
+
+// [053] Version 独立接口：专门给"对比 deployed vs upstream 最新版"用
+//   - 集成方查自己部署的：curl https://yourdomain/api/version
+//   - 拉 upstream 最新： curl -s https://raw.githubusercontent.com/baofusirys/custom-service/main/VERSION
+//   - 不一致就 docker compose pull && up -d 升级
+// 不需要鉴权（仅返公开版本号信息，无敏感数据）
+func (h *HTTP) Version(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"version": config.Version,
+		"name":    "custom-service",
+		"repo":    "https://github.com/baofusirys/custom-service",
 	})
 }
 
