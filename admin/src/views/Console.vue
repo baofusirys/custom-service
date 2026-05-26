@@ -339,6 +339,15 @@ function fmtGroupTime(t) {
   return d.format('MM-DD HH:mm')
 }
 
+// [059] 会话列表第 3 行：地理位置 + IP 拼装。任一存在才返非空（外层 v-if 隐藏行）
+function convGeoIp(c) {
+  const parts = []
+  const loc = [c.country, c.city].filter(Boolean).join('·')
+  if (loc) parts.push(loc)
+  if (c.ip) parts.push(c.ip)
+  return parts.join(' · ')
+}
+
 function lastMsgPreview(c) {
   const lm = c.last_message
   if (lm && lm.content) {
@@ -801,6 +810,10 @@ function voiceCleanup() {
                 <span class="conv-preview">{{ lastMsgPreview(c) }}</span>
                 <el-badge v-if="c.unread > 0" :value="c.unread" :max="99" />
               </div>
+              <!-- [059] 第 3 行：访客地理位置 + IP（任一非空才显示，省垂直空间）-->
+              <div v-if="convGeoIp(c)" class="conv-row3">
+                <span class="conv-geoip">📍 {{ convGeoIp(c) }}</span>
+              </div>
             </div>
           </div>
         </template>
@@ -1020,6 +1033,9 @@ function voiceCleanup() {
 .conv-time { font-size: 12px; color: #c0c4cc; flex-shrink: 0; }
 .conv-row2 { display: flex; justify-content: space-between; align-items: center; margin-top: 4px; gap: 8px; }
 .conv-preview { font-size: 12px; color: #909399; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+/* [059] 第 3 行：地理位置 + IP，小字灰色 */
+.conv-row3 { margin-top: 3px; }
+.conv-geoip { font-size: 11px; color: #b1b3b8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
 
 .chat-header {
   background: #fff; border-bottom: 1px solid #e6e6e6;

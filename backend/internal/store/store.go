@@ -331,9 +331,11 @@ func (s *Store) ListOpenConversations(ctx context.Context, limit int) ([]map[str
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	// [059] 顺手把 v.ip_cipher 也 SELECT 出来（handler 层解密成明文 IP 给客服看
+	// 「访客 IP + 地理位置」一目了然，会话列表选客户体验提升）
 	rows, err := s.db.QueryContext(ctx, `
 SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_at,
-       v.identifier, v.country, v.city, v.last_page, v.referer
+       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher
 FROM conversations c
 JOIN visitors v ON v.id = c.visitor_id
 WHERE c.status='open'
@@ -346,14 +348,14 @@ LIMIT ?`, limit)
 	out := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var (
-			id, vid                         string
-			aid                             sql.NullInt64
-			unread                          int
-			started, updated                time.Time
-			ident, country, city, page, ref sql.NullString
+			id, vid                                   string
+			aid                                       sql.NullInt64
+			unread                                    int
+			started, updated                          time.Time
+			ident, country, city, page, ref, ipCipher sql.NullString
 		)
 		if err := rows.Scan(&id, &vid, &aid, &unread, &started, &updated,
-			&ident, &country, &city, &page, &ref); err != nil {
+			&ident, &country, &city, &page, &ref, &ipCipher); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
@@ -368,6 +370,7 @@ LIMIT ?`, limit)
 			"city":       nullStr(city),
 			"last_page":  nullStr(page),
 			"referer":    nullStr(ref),
+			"ip_cipher":  nullStr(ipCipher), // [059] handler 层会解密成 ip 明文并删掉这个字段
 		})
 	}
 	if err := rows.Err(); err != nil {

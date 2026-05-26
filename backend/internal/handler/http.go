@@ -253,6 +253,16 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50006, "msg": "查询失败"})
 		return
 	}
+	// [059] 把 store 里的 ip_cipher（AES-GCM 密文）解密成明文 IP 给客服 UI 显示，
+	// 不直接外泄密文（前端拿密文也没用，浪费带宽 + 不规范）
+	for _, row := range rows {
+		if ic, ok := row["ip_cipher"].(string); ok && ic != "" {
+			if ip, err := h.svc.Cipher().Decrypt(ic); err == nil {
+				row["ip"] = ip
+			}
+		}
+		delete(row, "ip_cipher") // 不外泄密文
+	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": rows})
 }
 

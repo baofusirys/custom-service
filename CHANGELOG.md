@@ -4,6 +4,56 @@
 
 ---
 
+## [059] 2026-05-26 15:30 — admin 会话列表显示访客 IP + 地理位置（第 3 行 📍 灰色小字）
+
+**起因 / 需求**
+爷爷看会话列表（截图 16 个在线访客）发现只有访客名 + 时间 + 消息预览，**看不到访客 IP 和地理位置**。希望直接列表层就能看到，不用点进每个会话才知道在哪里。
+
+顺便：爷爷问 [055] 加的「关联访客」按钮在哪——已经在右上角访客详情条里（`访客 29f6b6` 旁边蓝色文字），点击弹 dialog 显示同 IP 30 天内其他历史 vid。爷爷截图里其实能看到。
+
+**改了什么**（修改 3 文件）
+
+### Store 层：SQL 加 ip_cipher
+- `backend/internal/store/store.go` `ListOpenConversations` SQL `SELECT` 加 `v.ip_cipher`
+- Scan 多加 `ipCipher sql.NullString` 字段
+- map 返回里加 `"ip_cipher": nullStr(ipCipher)`（handler 层会解密 + 删）
+
+### Handler 层：解密 ip_cipher → ip 明文，不外泄密文
+- `backend/internal/handler/http.go` `ListConversations` 拿到 rows 后循环：
+  - `if ic, ok := row["ip_cipher"].(string); ok && ic != ""` → `h.svc.Cipher().Decrypt(ic)` → `row["ip"] = ip`
+  - `delete(row, "ip_cipher")` 不向前端外泄密文（密文给前端也没用 + 浪费带宽 + 不规范）
+
+### admin Console.vue：列表加第 3 行 + 辅助函数
+- conv-item 加 `<div v-if="convGeoIp(c)" class="conv-row3"><span class="conv-geoip">📍 {{ convGeoIp(c) }}</span></div>`
+- `convGeoIp(c)` 工具函数：`[c.country, c.city]` join `·` + `c.ip`，任一为空跳过；都空返空字符串（v-if 隐藏整行）
+- CSS `.conv-row3` margin-top:3px / `.conv-geoip` font-size:11px color:#b1b3b8 灰色小字 ellipsis
+
+**业务流程对比**
+
+| 角度 | 改前 | 改后 |
+|---|---|---|
+| 会话列表显示信息 | 名 + 时间 + 消息预览 + 未读 | + 第 3 行 📍 国家·城市 · IP（任一非空）|
+| 国内访客 | 看不出哪个省/城市 | 「📍 中国·上海 · 1.2.3.4」一眼 |
+| 海外访客 | 看不出哪个国家 | 「📍 United States · 8.8.8.8」 |
+| 访客 IP 明文 | 不返前端（ip_cipher 数据库存密文）| 仅 agent 鉴权后接口返明文，admin UI 用 |
+| 关联访客（[055]）位置 | （爷爷不知道在哪）| 提醒：在 chat-header 右上「访客 xxx | 来源 | **关联访客**」蓝字按钮点开 dialog |
+
+**触发场景与边界 + 验证方式**
+
+- **解密性能**：每次 ListConversations 解密 ≤ 200 个 IP，AES-GCM 每个 ~ 1μs → 总 < 200μs，可忽略
+- **ip_cipher 不外泄**：handler 删除 map 里 ip_cipher 字段，前端拿到的只有解密后的 `ip` 明文
+- **隐私**：仅 agent 鉴权后能查（middleware.AgentAuth 把关），跟 [055] RelatedVisitors 一致原则
+- **国家/城市目前是空**：visitors 表 country/city 字段虽然存在但目前**没有 IP→地理位置库**填充（早期设计预留），所以显示可能只有 IP 没国家城市。如果爷爷要补 GeoIP 解析，[060] 单独立项加 MaxMind GeoLite2 或 ip-api 类
+- **localhost / 内网 IP**：显示 `127.0.0.1` / `192.168.x.x` 是正常的（本地开发场景）
+- **不影响**：[055] RelatedVisitors 接口 / cookie 双轨 / 任何其他功能
+- **GHCR 镜像**：backend + admin 改，重 build
+- **验证**：
+  1. 部署后 admin 后台会话列表应看到每个 conv 第 3 行 📍 IP（如 `📍 110.241.19.222`）
+  2. 如果国家/城市有值（未来加 GeoIP 后）→ 显示 `📍 中国·上海 · 110.241.19.222`
+  3. 关联访客按钮在 chat-header 右上方，点击弹 dialog（[055] 已实现）
+
+---
+
 ## [058] 2026-05-26 14:50 — bootstrap 死循环重试 + 默认限流阈值放宽（解集成方管理员被自动拉黑 24h）
 
 **起因 / 需求**
