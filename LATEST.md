@@ -1,4 +1,4 @@
-### 当前版本：v0.4.0 · 2026-05-26
+### 当前版本：v0.4.1 · 2026-05-26
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -10,6 +10,8 @@
 - 服务器：`<你的服务器 IP>:22 / root`
 - 远端代码目录：`/custom-service/`（或任意目录，与 docker-compose 上下文匹配即可）
 - 远端数据目录：`/srv/cs-data/{logs,uploads,ssl}`（铁律：必须在代码仓库外，详见 [CLAUDE.md 数据安全铁律]）
+- **远端 .env 路径**：`/srv/cs-data/.env`（[061] 起永久搬到仓库目录外，避免被 rsync/sftp 部署误删）
+- **启动命令**：`cd /custom-service && docker compose --env-file /srv/cs-data/.env up -d --build`
 - 入口：
   - 管理后台 `https://<你的域名>/admin/`
   - Widget 演示 `https://<你的域名>/widget/demo.html`
@@ -66,9 +68,9 @@
 ```
 
 ## 最近 3 次重大改动摘要
-- **[060] 2026-05-26**：访客地理位置离线解析。后端集成 ip2region xdb（~11MB 全内存索引，Dockerfile build 阶段从 GitHub raw / gitee 镜像下载），VisitorSession 写库时填 country/city。Admin 会话列表的 `📍 country·city · IP` 行（[059] 已铺位）从此真有值。完全离线零外部 API。
+- **[061] 2026-05-26 v0.4.1**：[060] 上线 hotfix 三件事 —— ① ip2region v4 xdb 真实格式是「国家|省份|城市|ISP|国家代码」5 段（不是 v2 的「国家|大区|省份|城市|ISP」），geoip.Lookup 取错字段导致 city 显示成「联通/Google LLC」之类 ISP 名；② 部署事故复盘：MCP ssh-deploy-tool 的"删除远端多余文件"机制不受 excludes 约束，会把代码仓库内的 .env 当多余删掉，永久解决方案是把 .env 搬到 `/srv/cs-data/.env`（仓库外），install.sh 同步更新，docker compose 用 `--env-file /srv/cs-data/.env`；③ 启动/重启命令变更（INSTALL.md 已更新）。
+- **[060] 2026-05-26 v0.4.0**：访客地理位置离线解析（ip2region xdb 全内存索引，毫秒查询，零外部 API）。
 - **[059] 2026-05-26**：Admin 会话列表显示访客 IP（解密 ip_cipher）+ 地理位置坑位。
-- **[035] 2026-05-24**：引入 CoTURN（WebRTC TURN/STUN relay）。解决 iPhone 挂 VPN 时通话「连接失败」问题。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）

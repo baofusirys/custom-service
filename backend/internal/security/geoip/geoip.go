@@ -8,9 +8,13 @@
 //     绝不阻塞业务流程（VisitorSession 不能因为 geoip 挂了而 500）。
 //  4. 线程安全：xdb.NewWithBuffer 返回的 Searcher 是只读的，多协程并发安全。
 //
-// ip2region.xdb 数据格式约定：
-//   - 单条记录格式："国家|区域|省份|城市|ISP"，例如 "中国|0|广东省|深圳市|电信"
-//   - 国内 IP 准确到地级市；国外 IP 通常只有国家级
+// ip2region.xdb 数据格式约定（v4.xdb，2025+ 仓库版本）：
+//   - 单条记录格式："国家|省份|城市|ISP|国家代码"，5 段，| 分隔
+//     例 "中国|河北省|石家庄市|联通|CN" / "United States|California|0|Google LLC|US"
+//   - ⚠️ 注意：这跟旧 v2 xdb 的「国家|大区|省份|城市|ISP」格式段位完全不同！
+//     旧 v2 的省份在 parts[2]、城市在 parts[3]；
+//     新 v4 的省份在 parts[1]、城市在 parts[2]。混用会导致字段错位。
+//   - 国内 IP 准确到地级市；国外 IP 通常省/市为 "0" 占位
 //   - "0" 是占位符，表示该字段无数据（业务侧需要去掉）
 package geoip
 
@@ -119,19 +123,19 @@ func (r *Resolver) Lookup(ip string) Result {
 	if err != nil || region == "" {
 		return Result{}
 	}
-	// ip2region 返回格式："国家|区域|省份|城市|ISP"
-	// 例: "中国|0|广东省|深圳市|电信"  /  "美国|0|0|0|Google"
+	// v4.xdb 返回格式："国家|省份|城市|ISP|国家代码"（5 段）
+	// 例: "中国|河北省|石家庄市|联通|CN"  /  "United States|California|0|Google LLC|US"
 	// "0" 是 ip2region 内部占位符，业务侧空字符串更友好
 	parts := strings.Split(region, "|")
 	res := Result{}
 	if len(parts) >= 1 {
 		res.Country = clean(parts[0])
 	}
-	if len(parts) >= 3 {
-		res.Province = clean(parts[2])
+	if len(parts) >= 2 {
+		res.Province = clean(parts[1])
 	}
-	if len(parts) >= 4 {
-		res.City = clean(parts[3])
+	if len(parts) >= 3 {
+		res.City = clean(parts[2])
 	}
 	return res
 }

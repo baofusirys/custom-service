@@ -67,15 +67,26 @@ chown -R 100:101 "$DATA_DIR" || warn "chown 失败（可能 SELinux），跳过"
 ok "数据目录就绪"
 
 # ---- 4. 下载部署文件 ----
-say "4/6 下载 docker-compose + .env.example 到 $INSTALL_DIR"
+say "4/6 下载 docker-compose 到 $INSTALL_DIR，.env 到 $DATA_DIR（仓库目录外）"
+# [061] .env 永久挪到 $DATA_DIR（默认 /srv/cs-data/.env），不再放代码仓库内。
+# 原因：rsync/sftp 全量同步类的部署工具（如 MCP ssh-deploy-tool）会把代码仓库目录
+# 里"远端独有"的文件当多余删掉，包含 .env，造成密码丢失服务挂掉。
+# 把 .env 搬出仓库目录后，任何代码同步操作都碰不到它，永久解决。
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
 [[ -f docker-compose.yml ]] && cp docker-compose.yml docker-compose.yml.bak.$(date +%s) && warn "备份了旧 docker-compose.yml"
 curl -fsSL "$REPO_RAW/docker-compose.production.yml" -o docker-compose.yml
-if [[ -f .env ]]; then
-  warn ".env 已存在，跳过下载（保留你现有配置）"
+
+# [061] .env 默认放 $DATA_DIR/.env；兼容老用户：如果仓库目录里有 .env，搬过来
+ENV_FILE="$DATA_DIR/.env"
+if [[ -f "$INSTALL_DIR/.env" && ! -f "$ENV_FILE" ]]; then
+  warn "检测到老路径 $INSTALL_DIR/.env，自动搬到 $ENV_FILE（避免被 deploy 误删）"
+  mv "$INSTALL_DIR/.env" "$ENV_FILE"
+fi
+if [[ -f "$ENV_FILE" ]]; then
+  warn "$ENV_FILE 已存在，跳过下载（保留你现有配置）"
 else
-  curl -fsSL "$REPO_RAW/.env.example" -o .env
+  curl -fsSL "$REPO_RAW/.env.example" -o "$ENV_FILE"
 fi
 # [047] --cn 模式：把 docker-compose.yml 里 ghcr.io 替换为反代域名
 if [[ "$USE_CN" = "1" ]]; then
@@ -92,8 +103,8 @@ gen() { openssl rand -hex 32; }
 # 只对仍是占位的字段做替换（防覆盖用户手填的真值）
 update_if_placeholder() {
   local key=$1; local placeholder=$2; local newval=$3
-  if grep -qE "^${key}=${placeholder}$" .env; then
-    sed -i.bak "s|^${key}=.*|${key}=${newval}|" .env
+  if grep -qE "^${key}=${placeholder}$" "$ENV_FILE"; then
+    sed -i.bak "s|^${key}=.*|${key}=${newval}|" "$ENV_FILE"
     ok "$key 已生成"
   else
     warn "$key 已有非占位值，跳过"
@@ -107,13 +118,13 @@ update_if_placeholder JWT_SECRET "please-change-to-64-hex-chars-random-string" "
 update_if_placeholder DATA_AES_KEY "please-change-to-exactly-64-hex-chars-aes-256-key-must-be-64hex" "$(gen)"
 update_if_placeholder TURN_STATIC_AUTH_SECRET "please-change-to-64-hex-chars-random-string" "$(gen)"
 update_if_placeholder ADMIN_BOOTSTRAP_PASSWORD "please-change-this-bootstrap-password" "$(openssl rand -base64 12 | tr -d '=+/')"
-rm -f .env.bak
+rm -f "${ENV_FILE}.bak"
 
 # 自动填入服务器公网 IP（如果还是占位）
-if grep -qE "^TURN_EXTERNAL_IP=1\.2\.3\.4$" .env; then
+if grep -qE "^TURN_EXTERNAL_IP=1\.2\.3\.4$" "$ENV_FILE"; then
   PUB_IP=$(curl -fsSL --max-time 5 ifconfig.me 2>/dev/null || curl -fsSL --max-time 5 ip.sb 2>/dev/null || echo "")
   if [[ -n "$PUB_IP" ]]; then
-    sed -i "s|^TURN_EXTERNAL_IP=.*|TURN_EXTERNAL_IP=${PUB_IP}|" .env
+    sed -i "s|^TURN_EXTERNAL_IP=.*|TURN_EXTERNAL_IP=${PUB_IP}|" "$ENV_FILE"
     ok "TURN_EXTERNAL_IP 自动填为 $PUB_IP"
   else
     warn "拿不到公网 IP，请手动改 TURN_EXTERNAL_IP=<你服务器 IP>"
@@ -123,31 +134,33 @@ fi
 # ---- 6. 提示 + 启动 ----
 say "6/6 启动前必填项检查"
 NEED_EDIT=0
-grep -qE "^PUBLIC_DOMAIN=cs\.example\.com$" .env && { warn "PUBLIC_DOMAIN 还是占位 cs.example.com，请改成你的域名"; NEED_EDIT=1; }
-grep -qE "^ACME_EMAIL=$" .env && { warn "ACME_EMAIL 空，请填你的邮箱（Let's Encrypt 证书申请必填）"; NEED_EDIT=1; }
-grep -qE "^TURN_REALM=cs\.example\.com$" .env && { warn "TURN_REALM 还是占位，建议改成跟 PUBLIC_DOMAIN 一致"; NEED_EDIT=1; }
+grep -qE "^PUBLIC_DOMAIN=cs\.example\.com$" "$ENV_FILE" && { warn "PUBLIC_DOMAIN 还是占位 cs.example.com，请改成你的域名"; NEED_EDIT=1; }
+grep -qE "^ACME_EMAIL=$" "$ENV_FILE" && { warn "ACME_EMAIL 空，请填你的邮箱（Let's Encrypt 证书申请必填）"; NEED_EDIT=1; }
+grep -qE "^TURN_REALM=cs\.example\.com$" "$ENV_FILE" && { warn "TURN_REALM 还是占位，建议改成跟 PUBLIC_DOMAIN 一致"; NEED_EDIT=1; }
 
 if [[ $NEED_EDIT -eq 1 ]]; then
-  warn "请先编辑 $INSTALL_DIR/.env 填好上面这几项，然后执行："
+  warn "请先编辑 $ENV_FILE 填好上面这几项，然后执行："
   echo
-  echo "  cd $INSTALL_DIR && docker compose pull && docker compose up -d"
+  echo "  cd $INSTALL_DIR && docker compose --env-file $ENV_FILE pull && docker compose --env-file $ENV_FILE up -d"
   echo
   warn "（暂不自动启动，避免半成品配置）"
   exit 0
 fi
 
 say "全部就绪，docker compose pull + up -d 开始拉镜像 + 启动"
-docker compose pull
-docker compose up -d
+# [061] 永远用 --env-file 指向仓库外 .env，保证后续 rsync/deploy 不会因为搬移仓库而丢密码
+docker compose --env-file "$ENV_FILE" pull
+docker compose --env-file "$ENV_FILE" up -d
 sleep 5
-docker compose ps
+docker compose --env-file "$ENV_FILE" ps
 
-ok "🎉 安装完成"
+ok "🎉 安装完成（.env 已搬到 $ENV_FILE，部署不会再误删）"
 echo
-echo "  管理后台： https://$(grep ^PUBLIC_DOMAIN= .env | cut -d= -f2)/admin/"
-echo "  访客 demo：https://$(grep ^PUBLIC_DOMAIN= .env | cut -d= -f2)/widget/demo.html"
-echo "  健康检查： https://$(grep ^PUBLIC_DOMAIN= .env | cut -d= -f2)/api/health"
-echo "  超管账号： admin / $(grep ^ADMIN_BOOTSTRAP_PASSWORD= .env | cut -d= -f2)"
+echo "  管理后台： https://$(grep ^PUBLIC_DOMAIN= "$ENV_FILE" | cut -d= -f2)/admin/"
+echo "  访客 demo：https://$(grep ^PUBLIC_DOMAIN= "$ENV_FILE" | cut -d= -f2)/widget/demo.html"
+echo "  健康检查： https://$(grep ^PUBLIC_DOMAIN= "$ENV_FILE" | cut -d= -f2)/api/health"
+echo "  超管账号： admin / $(grep ^ADMIN_BOOTSTRAP_PASSWORD= "$ENV_FILE" | cut -d= -f2)"
 echo
 warn "首次访问管理后台后，记得立刻改超管密码"
+warn "以后启动/重启 / 更新代码后，请用：cd $INSTALL_DIR && docker compose --env-file $ENV_FILE up -d --build"
 warn "完整文档：https://github.com/baofusirys/custom-service/blob/main/INSTALL.md"
