@@ -4,6 +4,82 @@
 
 ---
 
+## [052] 2026-05-26 02:00 — CreateAgent 错误文案精细化拆分 + 入参严格校验（消"或失败"歧义）
+
+**起因 / 需求**
+集成方反馈：POST `/api/admin/agents` 任何失败都返回 `{"code":40007,"msg":"用户名已存在或失败"}`，前端无法自助判断真因，必须找运维查日志。
+
+诊断验证（那个 AI 这次诊断完全准确，跟 [046] Bug 2 那次误诊不同）：
+- `backend/internal/handler/http.go` L471-474 catch all → 一刀切 40007 "用户名已存在或失败"
+- `backend/internal/store/store.go` CreateAgent L491 `return 0, err` 裸传 driver 层错误，没归类
+- 全项目无 `mapMySQLError` / sentinel error 机制（grep 验证）
+- handler 入参只校验 password 长度，未校验 username 格式 / nickname 长度 / role 白名单
+
+**改了什么**（修改 3 文件，只动 CreateAgent 不扩张）
+
+### 1. `backend/internal/store/store.go`：sentinel error + mapMySQLError
+- import `github.com/go-sql-driver/mysql`（go.mod 已依赖）
+- 新增 `var ErrDuplicateUsername = errors.New("store: duplicate username")`
+- 新增 `var ErrFieldTooLong = errors.New("store: field value too long")`
+- 新增 `mapMySQLError(err) error`：用 `errors.As(err, &*mysql.MySQLError)` 判 me.Number
+  - 1062 (Duplicate entry) → ErrDuplicateUsername
+  - 1406 (Data too long) → ErrFieldTooLong
+  - 未识别原样返回，handler 兜底成 500
+- `CreateAgent` 把 `return 0, err` 改为 `return 0, mapMySQLError(err)`
+
+### 2. `backend/internal/handler/http.go` `CreateAgent`：入参校验 + errors.Is 分支
+- import 加 `context` / `regexp` / `unicode/utf8`
+- 新增常量：`maxUsernameLen=64` / `maxNicknameLen=64` / `minPasswordLen=8`
+- 新增 `agentUsernameRegex = ^[a-zA-Z0-9_\-.]{3,64}$`（防 SQL 注入特殊字符 + 防 unicode 同形字攻击）
+- 新增 `allowedAgentRoles = {admin: true, agent: true}` 白名单
+- handler 入参校验前置（4 道关）：
+  - username regex 不通过 → `400 / 40010 用户名格式错误（3-64 位字母/数字/下划线/中划线/点）`
+  - nickname utf8.RuneCountInString > 64 → `400 / 40011 昵称过长（最多 64 个字符）`
+  - password < 8 → `400 / 40006 密码至少 8 位`（不变）
+  - role 不在白名单且非空 → `400 / 40012 角色不合法（仅支持 admin / agent）`
+- DB 错误分支 `errors.Is(err, ...)`：
+  - `ErrDuplicateUsername` → `409 / 40007 用户名已存在`（REST 标准：409 Conflict）
+  - `ErrFieldTooLong` → `400 / 40013 字段长度超限`（handler 漏校验兜底）
+  - `context.DeadlineExceeded` / `Canceled` → `504 / 50419 请求超时，请重试`
+  - default → `500 / 50019 系统繁忙，请稍后重试` + bizLog.Error 记 actor/username/err 详细服务端日志
+- 密码哈希失败文案从 `"失败"` 改为 `"密码哈希失败"`（顺手）
+
+### 3. `admin/src/views/Agents.vue` `create()`：按 code 走差异化提示
+- 加 try/catch
+- `40007` 用户名冲突 → ElMessage.warning + **清空 form.value.username** 让用户重输
+- `40010/40011/40012` 格式/长度/角色问题 → ElMessage.warning（文案精确告诉用户改哪）
+- 其他（50019 系统繁忙 / 50419 超时 / 网络异常）→ ElMessage.error
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 用户名 `张三` 已存在 | `400 / 40007 用户名已存在或失败` | `409 / 40007 用户名已存在` + 前端清 username |
+| 用户名 `<script>` | 走到 DB 才报错"或失败" | `400 / 40010 用户名格式错误（...）` handler 前置拦截 |
+| 昵称 100 个汉字 | 走到 DB 1406 才报"或失败" | `400 / 40011 昵称过长（最多 64 个字符）` |
+| role=`superadmin` | DB role VARCHAR(16) 接受了脏数据 | `400 / 40012 角色不合法` |
+| DB 连接断 | `400 / 40007 用户名已存在或失败`（完全误导） | `500 / 50019 系统繁忙` + bizLog 详细记 actor/username/err |
+| context 超时 | 同上误导 | `504 / 50419 请求超时，请重试` |
+
+**触发场景与边界 + 验证方式**
+
+- **REST 语义**：用户名冲突 409 Conflict（标准），其他参数错 400 Bad Request，DB 异常 500 Internal Server Error，超时 504 Gateway Timeout
+- **utf8.RuneCountInString**：用 rune 数不用 byte 数，1 个汉字算 1 个字符而非 3 字节
+- **regex 安全性**：仅允许 [a-zA-Z0-9_\-.] 5 类字符，阻挡 unicode 同形字攻击 + 防 SQL 注入特殊字符
+- **保留 role 默认值兼容**：role 空字符串 → 自动设 'agent'（兼容旧前端不传 role）
+- **日志**：500 错误 bizLog.Error 记 actor/username/error 详细栈，用户只看友好提示，不泄露 DB 错误内部信息（防信息泄露）
+- **不扩张范围**：mapMySQLError 函数 store 包级可复用，未来 UpdateAgent / 其他 UNIQUE 表都能用同一机制（本回合不动）
+- **不影响**：ListAgents / ToggleAgent / 登录 / 任何其他 handler 不变；前端只改 create() catch 块，其他不动
+- **GHCR 镜像**：backend + admin 两个改，push 后 Actions 重 build，其他 5 个 cache
+- **验证**：
+  1. 用已存在的 username 创建 → 应返回 409 + 文案 "用户名已存在" + 前端清 username 输入框
+  2. username 填 `a` 或 `用户名带特殊字符@#` → 应返 400/40010
+  3. nickname 填 200 个字 → 应返 400/40011
+  4. POST 时 role=`superadmin` → 应返 400/40012
+  5. 正常创建 → 应返 200/0 + 后台审计日志记录 actor/agent_id/username
+
+---
+
 ## [051] 2026-05-26 01:10 — App 点会话 1-2 秒延迟修复：即时切页 + 后台拉消息（IM 标准 0ms 感知）
 
 **起因 / 需求**

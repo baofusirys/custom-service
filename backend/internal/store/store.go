@@ -6,11 +6,41 @@ import (
 	"errors"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 )
 
 // Store 封装所有数据库操作（爷爷铁律：100% 参数化 SQL，杜绝注入）。
 // 注意：所有 SQL 都用 ? 占位符 + 显式 Exec/Query；DSN 已关 interpolateParams。
+
+// ============ [052] 业务语义错误（handler 层用 errors.Is 判断分支返不同 HTTP code） ============
+// 这些 sentinel error 配合 mapMySQLError 把 driver 层裸 *mysql.MySQLError 归类成业务概念，
+// 让 handler 不再写 if strings.Contains(err.Error(), "Duplicate") 这种脆弱判断
+var (
+	// 唯一键冲突（agents.username / 未来其他 UNIQUE KEY 都用这个，handler 按字段名给文案）
+	ErrDuplicateUsername = errors.New("store: duplicate username")
+	// 字段长度超过 schema 定义（理论上 handler 入参校验应已拦截，这是兜底）
+	ErrFieldTooLong = errors.New("store: field value too long")
+)
+
+// mapMySQLError 把 driver 层原始 *mysql.MySQLError 归类成业务 sentinel error。
+// 未识别的 MySQL 错误 / 非 MySQL 错误（context cancel / driver bad conn 等）原样返回，
+// 由 handler 层根据 errors.Is 兜底成 500。
+func mapMySQLError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var me *mysql.MySQLError
+	if errors.As(err, &me) {
+		switch me.Number {
+		case 1062: // Duplicate entry for UNIQUE KEY
+			return ErrDuplicateUsername
+		case 1406: // Data too long for column
+			return ErrFieldTooLong
+		}
+	}
+	return err
+}
 
 type Store struct {
 	db *sql.DB
@@ -489,7 +519,8 @@ INSERT INTO agents(username, pass_hash, role, nickname, active, created_at)
 VALUES(?, ?, ?, ?, 1, ?)`,
 		a.Username, a.PassHash, a.Role, a.Nickname, time.Now())
 	if err != nil {
-		return 0, err
+		// [052] 把 driver 层错误归类成业务 sentinel error，handler 可 errors.Is 分支返不同 code
+		return 0, mapMySQLError(err)
 	}
 	return res.LastInsertId()
 }

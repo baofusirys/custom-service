@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -8,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -447,31 +450,91 @@ type CreateAgentReq struct {
 	Nickname string `json:"nickname"`
 }
 
+// [052] CreateAgent 入参校验常量
+const (
+	maxUsernameLen = 64 // 跟 agents.username VARCHAR(64) 对齐
+	maxNicknameLen = 64 // 跟 agents.nickname VARCHAR(64) 对齐
+	minPasswordLen = 8  // bcrypt 安全下限
+)
+
+// [052] 用户名格式：3-64 位字母/数字/下划线/中划线/点
+// 防 SQL 注入特殊字符 / 防 unicode 同形字攻击 / 防超长占用 DB
+var agentUsernameRegex = regexp.MustCompile(`^[a-zA-Z0-9_\-.]{3,64}$`)
+
+// [052] 角色白名单（schema 是 VARCHAR(16) DEFAULT 'agent'，业务上只有 admin/agent）
+var allowedAgentRoles = map[string]bool{"admin": true, "agent": true}
+
 func (h *HTTP) CreateAgent(c *gin.Context) {
 	var r CreateAgentReq
 	if err := c.ShouldBindJSON(&r); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 40005, "msg": "参数错误"})
 		return
 	}
-	if len(r.Password) < 8 {
+
+	// === [052] 入参校验前置（拦在 handler，省一次 DB 调用 + 错误文案精准）===
+	if !agentUsernameRegex.MatchString(r.Username) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 40010,
+			"msg":  "用户名格式错误（3-64 位字母/数字/下划线/中划线/点）",
+		})
+		return
+	}
+	if utf8.RuneCountInString(r.Nickname) > maxNicknameLen {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 40011,
+			"msg":  fmt.Sprintf("昵称过长（最多 %d 个字符）", maxNicknameLen),
+		})
+		return
+	}
+	if len(r.Password) < minPasswordLen {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 40006, "msg": "密码至少 8 位"})
 		return
 	}
-	if r.Role != "admin" {
-		r.Role = "agent"
-	}
-	hash, err := security.HashPassword(r.Password)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 50017, "msg": "失败"})
+	if r.Role != "" && !allowedAgentRoles[r.Role] {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"code": 40012,
+			"msg":  "角色不合法（仅支持 admin / agent）",
+		})
 		return
 	}
+	if r.Role == "" {
+		r.Role = "agent"
+	}
+
+	// === 密码哈希 ===
+	hash, err := security.HashPassword(r.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50017, "msg": "密码哈希失败"})
+		return
+	}
+
+	// === [052] DB 写入 + 按 error 类型分支返不同 HTTP code，不再"或失败"歧义 ===
 	id, err := h.svc.Store().CreateAgent(c.Request.Context(), &store.Agent{
 		Username: r.Username, PassHash: hash, Role: r.Role, Nickname: r.Nickname,
 	})
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 40007, "msg": "用户名已存在或失败"})
+		switch {
+		case errors.Is(err, store.ErrDuplicateUsername):
+			// 409 = Conflict（REST 标准；前端按 40007 走差异化提示，如聚焦回 username）
+			c.JSON(http.StatusConflict, gin.H{"code": 40007, "msg": "用户名已存在"})
+		case errors.Is(err, store.ErrFieldTooLong):
+			// 上面 handler 校验理论应已拦截；走到这里说明有遗漏字段
+			c.JSON(http.StatusBadRequest, gin.H{"code": 40013, "msg": "字段长度超限"})
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			c.JSON(http.StatusGatewayTimeout, gin.H{"code": 50419, "msg": "请求超时，请重试"})
+		default:
+			// 真正的 DB 异常（连接断/磁盘满/权限不足等），服务端日志详细记，用户只看友好提示
+			actor, _ := c.Get("agent_username")
+			h.svc.BizLog().Error("create_agent_internal_error",
+				zap.Any("actor", actor),
+				zap.String("username", r.Username),
+				zap.Error(err))
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 50019, "msg": "系统繁忙，请稍后重试"})
+		}
 		return
 	}
+
+	// === 审计日志 + 返回 ===
 	actor, _ := c.Get("agent_username")
 	h.svc.Store().AuditLog(c.Request.Context(), fmt.Sprintf("%v", actor), "create_agent",
 		fmt.Sprintf("agent:%d", id), r.Username, security.ClientIP(c))

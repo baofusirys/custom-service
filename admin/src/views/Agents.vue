@@ -14,15 +14,33 @@ async function load() {
 }
 
 async function create() {
+  // [052] 前端宽松前置校验（后端有严格校验做最终把关）
   if (!form.value.username || (form.value.password || '').length < 8) {
     ElMessage.warning('用户名必填，密码至少 8 位')
     return
   }
-  await http.post('/admin/agents', form.value)
-  ElMessage.success('已创建')
-  dialog.value = false
-  form.value = { username: '', password: '', role: 'agent', nickname: '' }
-  load()
+  try {
+    await http.post('/admin/agents', form.value)
+    ElMessage.success('已创建')
+    dialog.value = false
+    form.value = { username: '', password: '', role: 'agent', nickname: '' }
+    load()
+  } catch (e) {
+    // [052] 按后端返回 code 走差异化提示（不再统一弹"用户名已存在或失败"歧义文案）
+    const code = e?.response?.data?.code
+    const msg = e?.response?.data?.msg || '创建失败'
+    // 40007 用户名冲突：清掉 username 提示用户改名（保留密码/昵称/角色省得重填）
+    if (code === 40007) {
+      ElMessage.warning(msg)
+      form.value.username = ''
+    } else if (code === 40010 || code === 40011 || code === 40012) {
+      // 用户名格式 / 昵称过长 / 角色不合法 → warning + 文案精确告诉用户改哪
+      ElMessage.warning(msg)
+    } else {
+      // 50019 系统繁忙 / 50419 超时 / 其他 → error
+      ElMessage.error(msg)
+    }
+  }
 }
 
 async function toggle(row) {
