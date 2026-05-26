@@ -196,12 +196,44 @@
   }
 
   function inject() {
-    document.body.appendChild(btn);
-    document.body.appendChild(wrap);
+    // [050] self-heal：每次 inject 前检查 DOM 上是否已经有同 id 元素（防 SPA 路由切换 / bfcache 恢复后重复挂）
+    // 任一缺失就把对应元素加回去；都在就 noop（幂等）
+    if (!document.getElementById('__cs_widget_btn__')) {
+      document.body.appendChild(btn);
+    }
+    if (!document.getElementById('__cs_widget_wrap__')) {
+      document.body.appendChild(wrap);
+    }
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', inject);
   } else {
     inject();
+  }
+
+  // ============ [050] self-heal：3 道防线确保 SPA/bfcache/外部清 DOM 时图标都能回来 ============
+  // 病因：访客在 SPA 网站 page A → page B → 后退回 page A，btn 不见了
+  //   - SPA 框架（Vue/React Router）切路由时把 body.innerHTML 清空 → btn/wrap DOM 被清
+  //   - 但 IIFE 已经跑过，闭包里的 btn/wrap 变量仍指向原 DOM 节点（已 orphan）
+  //   - 直接 appendChild orphan 节点 ✓ 浏览器会重新挂上 DOM
+  //
+  // 1) pageshow 事件：bfcache 恢复时触发（ev.persisted=true），同时也覆盖正常前进/后退
+  window.addEventListener('pageshow', inject);
+  // 2) popstate 事件：SPA history.pushState / popState 路由变化时触发
+  window.addEventListener('popstate', function () { setTimeout(inject, 0); });
+  // 3) MutationObserver：兜底监听 body 子节点变化（SPA 不通过 history，比如 React hash router 切路由后；
+  //    或宿主页第三方脚本误删 btn）。debounce 100ms 防抖避免高频触发。
+  var healTimer = null;
+  var observer = new MutationObserver(function () {
+    if (healTimer) return;
+    healTimer = setTimeout(function () { healTimer = null; inject(); }, 100);
+  });
+  // childList 监听直接子元素增删；不监听 subtree 节省性能（只要 btn/wrap 是 body 直接子）
+  if (document.body) {
+    observer.observe(document.body, { childList: true });
+  } else {
+    document.addEventListener('DOMContentLoaded', function () {
+      observer.observe(document.body, { childList: true });
+    });
   }
 })();

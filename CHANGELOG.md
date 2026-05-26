@@ -4,6 +4,72 @@
 
 ---
 
+## [050] 2026-05-26 00:50 — 修两个体验 bug：widget 后退/SPA 后图标消失 + App 后台回前台不自动刷新
+
+**起因 / 需求**
+爷爷反馈 2 个体验 bug：
+1. **访客 widget**：page A 看到图标 → 跳 page B 看到图标 → 浏览器后退回 page A → **图标消失**
+2. **iPhone App 客服**：进入会话列表页时希望**自动**拉最新会话和每条最近消息（不要每次手动下拉）
+
+**改了什么**（修改 2 文件）
+
+### Bug A 修复：widget loader.js 3 道 self-heal 防线
+
+诊断：
+- 现有 `__CS_WIDGET_LOADED__` guard 阻止 loader.js 重跑
+- 但 SPA 框架（Vue/React Router）切路由时把 `body.innerHTML` 清空 → btn/wrap DOM 被清
+- bfcache 恢复时 JS 不重跑、DOM 完好（这种正常）；非 bfcache 的 SPA 路由切换才有 bug
+
+修复（`widget/public/loader.js`）：
+- `inject()` 函数加幂等检查：先看 `document.getElementById('__cs_widget_btn__')` 是否在，不在才 appendChild（防重复挂）
+- **3 道 self-heal 防线**全部覆盖：
+  1. `window.addEventListener('pageshow', inject)` —— bfcache 恢复 + 正常 navigation 都触发
+  2. `window.addEventListener('popstate', inject)` —— SPA history pushState/popState 路由切换
+  3. `MutationObserver(body, {childList:true})` —— 兜底监听 body 直接子节点变化，debounce 100ms 防抖；覆盖 hash router、第三方脚本误删等所有场景
+- 闭包里的 `btn`/`wrap` 变量始终指向原 DOM 节点（即使 SPA 把它们从 DOM 移除变成 orphan，闭包仍持有），appendChild orphan 节点浏览器会重新挂上 DOM
+
+### Bug B 修复：App ConversationsPage 改 Stateful + 监听 App 生命周期
+
+诊断（`mobile_app/lib/pages/conversations_page.dart` 改前）：
+- ConversationsPage 是 StatelessWidget，无 initState
+- 仅靠 HomePage initState 中一次性 `refreshConvs()` + 用户手动下拉/点刷新
+- 无 WidgetsBindingObserver → App 从后台切回前台不自动刷新
+
+修复：
+- `ConversationsPage` 从 StatelessWidget 改为 StatefulWidget
+- `_ConversationsPageState with WidgetsBindingObserver`：
+  - `initState`：addObserver + `addPostFrameCallback(refreshConvs)` 进入此页面立刻拉一次
+  - `didChangeDependencies`：缓存 `_state = context.read<AppState>()` 避免 dispose 后 context 失效
+  - `dispose`：removeObserver
+  - `didChangeAppLifecycleState`：监听 `AppLifecycleState.resumed`（iOS/Android pause→resume）→ 自动 `refreshConvs()`
+- build/_wsBadge/_convTile/_fmt/_avatarColor 等方法保留在 _ConversationsPageState class 里（原行为不变）
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| widget 用户从 page B 后退到 page A（bfcache）| 图标在（bfcache OK，但保险）| pageshow 触发 inject 幂等检查，OK |
+| widget 用户 SPA 路由切换到 page A | **图标消失** | popstate + MutationObserver 双重触发 inject 重挂 |
+| widget 同域跨页 normal navigation | 图标在（loader.js 重跑）| 不变 |
+| App 客服打开 App | HomePage initState 拉一次 | 同上 + 进入会话列表页再拉一次 |
+| App 客服 App 后台 30 分钟切回前台 | 不刷新看旧列表 | AppLifecycleState.resumed 自动 refreshConvs |
+| App 客服手动下拉/点刷新 | 仍可用 | 仍可用，跟自动刷新互补 |
+
+**触发场景与边界 + 验证方式**
+
+- **widget inject 幂等**：getElementById 检查防止重复挂同一节点 DOM 异常
+- **MutationObserver debounce**：100ms 防抖避免 SPA 一次性大量 DOM 变化时触发几十次 inject
+- **闭包 orphan 节点**：JS 闭包持有 btn/wrap 即使 DOM 移除，节点 + 事件监听器都还在内存里，appendChild 后所有交互正常
+- **App refreshConvs 频率**：进入页面 1 次 + 后台回前台 1 次 + 用户手动 1 次，不会高频拉爆后端
+- **AppLifecycleState 事件**：iOS / Android 都支持 paused/resumed；inactive 状态（如 iOS 弹来电）不触发刷新，避免误刷
+- **不影响**：admin / backend / mobile_app 通话 / 推送 / 设置 / 消息发送等所有功能；widget 在非 SPA 网站行为完全不变（pageshow 在正常 navigation 也触发但是 inject 幂等无副作用）
+- **GHCR 镜像**：widget 改了重 build cs-widget；mobile_app 不入 GHCR 走 IPA 装机
+- **验证**：
+  1. 任意 SPA 网站（Vue/React/Angular 都行）嵌入 widget → 点路由跳来跳去 → 图标始终在右下角
+  2. iPhone App 启动 → 主屏 home 出去 5 分钟 → 切回 App → 会话列表自动更新最新会话和未读数（不需要用户操作）
+
+---
+
 ## [049] 2026-05-26 00:25 — cs-nginx 加 realip 模块：集成方多层反代下限流不再被代理容器 IP 拖死
 
 **起因 / 需求**

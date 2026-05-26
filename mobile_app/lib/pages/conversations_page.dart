@@ -5,8 +5,46 @@ import '../api/models.dart';
 import '../state/app_state.dart';
 import 'chat_page.dart';
 
-class ConversationsPage extends StatelessWidget {
+class ConversationsPage extends StatefulWidget {
   const ConversationsPage({super.key});
+
+  @override
+  State<ConversationsPage> createState() => _ConversationsPageState();
+}
+
+class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindingObserver {
+  AppState? _state;
+
+  @override
+  void initState() {
+    super.initState();
+    // [050] 监听 App 生命周期：从后台切回前台时自动 refreshConvs 拉最新会话列表 + 各最近消息
+    WidgetsBinding.instance.addObserver(this);
+    // [050] 进入这个页面立刻拉一次（不依赖 HomePage initState 只拉一次的旧逻辑）
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _state?.refreshConvs();
+    });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _state = context.read<AppState>();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState s) {
+    // [050] App 从后台切回前台 → 自动拉最新会话列表（防爷爷 App 一打开看到旧数据）
+    if (s == AppLifecycleState.resumed) {
+      _state?.refreshConvs();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
