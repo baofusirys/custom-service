@@ -3,8 +3,11 @@ package security
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io"
 
@@ -77,4 +80,18 @@ func HashPassword(p string) (string, error) {
 // CheckPassword 验证密码。
 func CheckPassword(hashed, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hashed), []byte(plain)) == nil
+}
+
+// [055] IPHash 用 HMAC-SHA256 算 IP 的确定性哈希（同 IP 同结果，可索引可查）。
+// key 复用 DATA_AES_KEY，确保不可逆 + 不能被外部碰撞猜回 IP。
+// 用途：visitors.ip_hash 字段（建索引），客服端「关联访客」面板查同 IP 历史 vid。
+// 64 hex 字符 = SHA-256 输出，跟 visitors.ip_hash CHAR(64) 字段对齐。
+// 空 ip 返回空字符串（不写哈希避免误关联，比如本地开发场景）。
+func IPHash(key []byte, ip string) string {
+	if ip == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(ip))
+	return hex.EncodeToString(mac.Sum(nil))
 }

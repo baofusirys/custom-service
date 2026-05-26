@@ -20,6 +20,28 @@ const draft = ref('')
 // [040] 待发送文件队列（粘贴 / 选附件追加；点发送时依次上传）
 // 每项：{ file: File, blobUrl: string|null, isImage: bool }
 const pendingFiles = ref([])
+
+// [055] 关联访客（同 IP 30 天内出现的其他 vid）
+const relatedDialog = ref(false)
+const relatedLoading = ref(false)
+const relatedList = ref([])      // [{vid, identifier, ip, country, city, last_seen, first_seen}]
+const relatedCount = ref({})     // { vid: count } 缓存避免每次刷新都拉
+
+async function openRelatedDialog(vid) {
+  if (!vid) return
+  relatedDialog.value = true
+  relatedLoading.value = true
+  relatedList.value = []
+  try {
+    const r = await http.get(`/agent/visitor/${vid}/related`)
+    relatedList.value = r.data || []
+    relatedCount.value[vid] = r.count || 0
+  } catch (e) {
+    relatedList.value = []
+  } finally {
+    relatedLoading.value = false
+  }
+}
 const onlineStats = ref({ visitors: 0, agents: 0 })
 const fileInput = ref(null)
 const sending = ref(false)
@@ -800,10 +822,47 @@ function voiceCleanup() {
               </el-tag>
               <el-tag size="small" effect="plain" v-if="activeConv.referer">来源：{{ activeConv.referer }}</el-tag>
               <el-tag size="small" effect="plain" v-if="activeConv.last_page">当前页：{{ activeConv.last_page }}</el-tag>
+              <!-- [055] 关联访客按钮：点开 dialog 看同 IP 30 天内其他 vid -->
+              <el-button link type="primary" size="small" @click="openRelatedDialog(activeConv.visitor_id)">
+                关联访客 <span v-if="relatedCount[activeConv.visitor_id] != null">({{ relatedCount[activeConv.visitor_id] }})</span>
+              </el-button>
             </div>
           </div>
         </div>
       </el-header>
+
+      <!-- [055] 关联访客 dialog：同 IP 30 天内出现的其他 vid 列表 -->
+      <el-dialog v-model="relatedDialog" title="关联访客（同 IP 30 天内出现）" width="640">
+        <div v-if="relatedLoading" style="text-align:center;padding:24px;color:#909399">加载中…</div>
+        <el-empty v-else-if="relatedList.length === 0" description="没有同 IP 历史访客" :image-size="80" />
+        <el-table v-else :data="relatedList" size="small" max-height="420">
+          <el-table-column prop="vid" label="访客 ID" width="180">
+            <template #default="{ row }">
+              <el-text size="small" truncated style="font-family:monospace">{{ row.vid }}</el-text>
+            </template>
+          </el-table-column>
+          <el-table-column prop="identifier" label="身份" width="160">
+            <template #default="{ row }">
+              {{ row.identifier || '—' }}
+            </template>
+          </el-table-column>
+          <el-table-column prop="ip" label="IP" width="130">
+            <template #default="{ row }">
+              <el-text size="small" style="font-family:monospace">{{ row.ip || '—' }}</el-text>
+            </template>
+          </el-table-column>
+          <el-table-column label="最近活动">
+            <template #default="{ row }">
+              {{ dayjs(row.last_seen).format('YYYY-MM-DD HH:mm') }}
+            </template>
+          </el-table-column>
+        </el-table>
+        <template #footer>
+          <span style="font-size:12px;color:#909399">
+            提示：列表仅供参考"疑似同一人"。vid 仍按浏览器维度独立。
+          </span>
+        </template>
+      </el-dialog>
 
       <el-main id="msg-list" class="msg-main">
         <el-empty v-if="!activeConv" description="请从左侧选择一个会话开始服务" :image-size="120" />

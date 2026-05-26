@@ -155,6 +155,8 @@ func main() {
 			ag.POST("/conversations/:id/close", h.CloseConv)
 			// TURN/STUN 短期凭证（客服 web/iPhone 通话前 fetch；与 visitor 接口同源 service.GenerateTurnCredential）
 			ag.GET("/turn-credential", h.TurnCredential)
+			// [055] 关联访客（同 IP 30 天内出现的其他 vid，给客服参考"疑似同一人"）
+			ag.GET("/visitor/:vid/related", h.RelatedVisitors)
 		}
 
 		// 管理（仅 admin）

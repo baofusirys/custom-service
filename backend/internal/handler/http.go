@@ -91,12 +91,15 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 
 	ip := security.ClientIP(c)
 	ipCipher, _ := h.svc.Cipher().Encrypt(ip)
+	// [055] 额外算 HMAC 哈希：写 ip_hash 字段供「关联访客」面板按 IP 查同人不同 vid
+	ipHash := security.IPHash(h.cfg.DataAESKey, ip)
 
 	now := time.Now()
 	v := &store.Visitor{
 		ID:         r.VisitorID,
 		SiteID:     r.SiteID,
 		IPCipher:   ipCipher,
+		IPHash:     ipHash,
 		UA:         r.UA,
 		Referer:    r.Referer,
 		LastPage:   r.LastPage,
@@ -284,6 +287,60 @@ func (h *HTTP) AssignSelf(c *gin.Context) {
 
 // MarkRead 标记已读（HTTP 兜底；正常实时走 WSS type=read）。
 // 同步更新 last_read_agent_at + 清零 unread_agent。
+// [055] RelatedVisitors 查同 IP 30 天内出现的其他 vid（最多 10 个），按 last_seen 倒序。
+// 给客服端访客详情页「关联访客 (N)」面板用，参考"疑似同一人"，不强行合并 vid。
+// 路径参数 :vid 是当前访客 ID，用来从 visitors 表读出 ip_hash 再反查同 hash 的别人。
+// 解密 ip_cipher 给客服看明文 IP 便于追踪；identifier/city 等已经是明文直接返。
+func (h *HTTP) RelatedVisitors(c *gin.Context) {
+	vid := c.Param("vid")
+	if vid == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40001, "msg": "vid 必填"})
+		return
+	}
+	// 先拿当前访客的 ip_hash（再查同 hash 的其他人）
+	current, err := h.svc.Store().GetVisitor(c.Request.Context(), vid)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": 40402, "msg": "访客不存在"})
+		return
+	}
+	// GetVisitor 没读 ip_hash 字段，重新算（IP 解密 + IPHash）以解耦
+	ip, _ := h.svc.Cipher().Decrypt(current.IPCipher)
+	ipHash := security.IPHash(h.cfg.DataAESKey, ip)
+	related, err := h.svc.Store().RelatedVisitorsByIPHash(c.Request.Context(), ipHash, vid, 30, 10)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50031, "msg": "查询失败"})
+		return
+	}
+	// 解密每个相关访客的 IP 返给客服（仅 agent 鉴权后能调，安全）
+	type relatedItem struct {
+		VID        string    `json:"vid"`
+		Identifier string    `json:"identifier"`
+		IP         string    `json:"ip"`
+		Country    string    `json:"country"`
+		City       string    `json:"city"`
+		LastSeen   time.Time `json:"last_seen"`
+		FirstSeen  time.Time `json:"first_seen"`
+	}
+	out := make([]relatedItem, 0, len(related))
+	for _, v := range related {
+		ipPlain, _ := h.svc.Cipher().Decrypt(v.IPCipher)
+		out = append(out, relatedItem{
+			VID:        v.ID,
+			Identifier: v.Identifier,
+			IP:         ipPlain,
+			Country:    v.Country,
+			City:       v.City,
+			LastSeen:   v.LastSeen,
+			FirstSeen:  v.FirstSeen,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"code":  0,
+		"count": len(out),
+		"data":  out,
+	})
+}
+
 func (h *HTTP) MarkRead(c *gin.Context) {
 	convID := c.Param("id")
 	if err := h.svc.Store().UpdateLastRead(c.Request.Context(), convID, "agent", time.Now()); err != nil {

@@ -4,6 +4,79 @@
 
 ---
 
+## [055] 2026-05-26 12:30 — 访客唯一性识别增强：IP 关联访客面板 + cookie 双轨防丢
+
+**起因 / 需求**
+爷爷问"访客端怎么判断访客唯一性"。现状：chat.html `localStorage['cs_visitor_<siteID>']` 存 UUID v4 → 浏览器级别识别，跟 Chatwoot/Intercom 一致。
+
+**缺点**：清缓存 / 隐私模式 / 换浏览器 → 算新访客。爷爷要求增强 + 加 IP 增强。
+
+按合规性 + ROI 排序选了 C + F 两项（指纹方案 D 拒绝因 GDPR/PIPL 红线）。
+
+**改了什么**（新增 1 migration + 修改 5 文件）
+
+### C 方案：IP 关联访客面板（HMAC-SHA256 可索引哈希）
+
+诊断阻碍：`ip_cipher` 是 AES-GCM 随机 nonce 加密（每次密文不同），`WHERE ip_cipher = ?` 查不出来。
+
+工业标准解决：**新增 `visitors.ip_hash CHAR(64)` 字段**，存 HMAC-SHA256(DATA_AES_KEY, ip) 64 hex；同 IP 同哈希可索引可查，且 HMAC 用 key 防外部碰撞猜回 IP。
+
+- **`backend/migrations/005_ip_hash.sql`**（新增）：`ALTER TABLE visitors ADD COLUMN ip_hash CHAR(64) DEFAULT '' AFTER ip_cipher, ADD KEY idx_ip_hash (ip_hash, last_seen)`
+- **`backend/internal/security/crypto.go`**：新增 `IPHash(key []byte, ip string) string` 用 `crypto/hmac` + `crypto/sha256` + `encoding/hex`；空 IP 返空避免误关联
+- **`backend/internal/store/store.go`**：
+  - `Visitor` struct 加 `IPHash string`
+  - `UpsertVisitor` SQL 加 ip_hash 字段；ON DUPLICATE KEY UPDATE 用 `COALESCE(NULLIF(ip_hash, ''), ip_hash)` 防新值空时覆盖老 hash
+  - 新增 `RelatedVisitorsByIPHash(ctx, ipHash, excludeVID, days, limit)`：SQL `WHERE ip_hash = ? AND id != ? AND last_seen > DATE_SUB(NOW(), INTERVAL ? DAY) ORDER BY last_seen DESC LIMIT ?`
+- **`backend/internal/handler/http.go`**：
+  - `VisitorSession` 加 `ipHash := security.IPHash(h.cfg.DataAESKey, ip)` 写入
+  - 新增 `RelatedVisitors(c)` handler：GetVisitor → 解密 IPCipher 拿明文 IP → 算 IPHash → RelatedVisitorsByIPHash → 解密每个相关访客 IP → 返 JSON
+- **`backend/cmd/server/main.go`**：`ag.GET("/visitor/:vid/related", h.RelatedVisitors)` 注册（agent 鉴权组）
+- **`admin/src/views/Console.vue`**：
+  - chat-header 增加「关联访客 (N)」按钮
+  - script setup 加 `relatedDialog/relatedLoading/relatedList/relatedCount` + `openRelatedDialog(vid)` 方法
+  - 加 el-dialog：表格列 vid / identifier / IP / 最近活动；空状态 el-empty；底部 footer 说明仅参考不强行合并
+
+### F 方案：cookie + localStorage 双轨防丢
+
+诊断：现状 chat.html L423 只用 localStorage，被清后 vid 丢失算新访客。
+
+- **`widget/public/chat.html`**：
+  - 新增 `readCookie/writeCookie` 工具函数（cookie 同域 365 天，SameSite=Lax，HTTPS 时 Secure）
+  - 新增 `readVisitorID()`：localStorage 主，没有走 cookie 兜底
+  - 新增 `writeVisitorID(vid)`：双写 localStorage + cookie，任一被清另一个还在
+  - 顶部 `visitorID = readVisitorID()` 替换旧 `stored?.visitor_id`
+  - VisitorSession 返回后 `writeVisitorID(visitorID)` 替换旧 `localStorage.setItem`
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| 客服看到访客详情 | 仅有 vid / IP / 地理 | 多一个「关联访客 (N)」按钮 → 看同 IP 30 天内其他历史 vid 列表 |
+| 同 IP 不同浏览器访客 | 客服看不出关联 | 客服点开按钮一眼看到「这个 IP 之前是张三访问过」 |
+| 用户清 localStorage 后回访 | 算新访客（vid 重生成）| cookie 还在 → 沿用旧 vid（除非用户连 cookie 也清）|
+| 用户隐私模式 | 算新访客 | 仍算新访客（隐私模式 cookie 也不持久化，这是预期行为）|
+| 跨浏览器 / 跨设备 | 算新访客 | 不变（但客服可通过 IP 关联面板看出疑似同人）|
+
+**触发场景与边界 + 验证方式**
+
+- **HMAC vs SHA256 直接哈希**：用 HMAC + DATA_AES_KEY 防外部彩虹表碰撞猜 IP（IP 空间小，4B = 42 亿组合，直接 SHA256 可被穷举）
+- **不强行合并 vid**：UI 仅作"疑似同一人"提示，避免误合并 NAT 后办公室同事 / 网吧用户
+- **migration 自动跑**：backend/db/migrate.go 启动时自动执行 005_ip_hash.sql；旧数据 ip_hash 默认空，新查询不显示历史关联（向下兼容）
+- **cookie 大小**：vid 是 36 字符 UUID + cookie 元数据约 100 bytes，远低于 4KB cookie 限额
+- **SameSite=Lax**：兼容跨子域 iframe（widget 嵌入第三方网站场景）；不用 Strict 避免后退/前进时 cookie 丢失
+- **Secure 条件**：HTTPS 时加 Secure 标记，HTTP 时不加（避免本地开发场景设不上）
+- **关联面板隐私边界**：仅 agent 鉴权后能查；解密 IP 在 backend 里完成不向访客泄露
+- **不影响**：VisitorSession 主流程 / WSS / 通话 / 推送 / 任何 [054] 之前的功能
+- **GHCR 镜像**：backend + admin + widget 三个改，push 后 Actions 重 build
+- **版本号**：bug fix + 增强能力 → 下次打 tag `v0.2.1`
+- **验证**：
+  1. 部署后 backend 自动跑 migration 005 → 看 schema_migrations 表应有 005 记录
+  2. 用浏览器 A 访问 widget → 后台 visitors 表新行 ip_hash 不为空
+  3. 用浏览器 B 同 IP 访问 → 客服后台点访客详情「关联访客」按钮 → 应看到浏览器 A 的 vid
+  4. 清 localStorage 重打开 widget → vid 应跟原来一样（cookie 兜底）
+
+---
+
 ## [054] 2026-05-26 11:30 — chat.html connectWS 多实例并发重连风暴修复（rl:wsh 打爆 + 误封修）
 
 **起因 / 需求**

@@ -57,6 +57,7 @@ type Visitor struct {
 	ID         string    `json:"id"`
 	SiteID     string    `json:"site_id"`
 	IPCipher   string    `json:"-"` // 永不外泄
+	IPHash     string    `json:"-"` // [055] HMAC-SHA256(IP) 不可逆但可索引，供 RelatedVisitorsByIPHash 查
 	UA         string    `json:"ua"`
 	Country    string    `json:"country"`
 	City       string    `json:"city"`
@@ -114,11 +115,13 @@ func (s *Store) UpsertVisitor(ctx context.Context, v *Visitor) error {
 	if v.ID == "" {
 		v.ID = uuid.NewString()
 	}
+	// [055] 同时写 ip_cipher（看明文用）和 ip_hash（建索引查关联访客用）
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO visitors(id, site_id, ip_cipher, ua, country, city, referer, last_page, first_seen, last_seen, identifier)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO visitors(id, site_id, ip_cipher, ip_hash, ua, country, city, referer, last_page, first_seen, last_seen, identifier)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   ip_cipher=VALUES(ip_cipher),
+  ip_hash=COALESCE(NULLIF(VALUES(ip_hash), ''), ip_hash),
   ua=VALUES(ua),
   country=COALESCE(NULLIF(VALUES(country), ''), country),
   city=COALESCE(NULLIF(VALUES(city), ''), city),
@@ -126,9 +129,47 @@ ON DUPLICATE KEY UPDATE
   last_page=VALUES(last_page),
   last_seen=VALUES(last_seen),
   identifier=COALESCE(NULLIF(VALUES(identifier), ''), identifier)`,
-		v.ID, v.SiteID, v.IPCipher, v.UA, v.Country, v.City, v.Referer, v.LastPage,
+		v.ID, v.SiteID, v.IPCipher, v.IPHash, v.UA, v.Country, v.City, v.Referer, v.LastPage,
 		v.FirstSeen, v.LastSeen, v.Identifier)
 	return err
+}
+
+// [055] 关联访客：查 30 天内同 IP（ip_hash 相等）出现的其他 vid，按 last_seen 倒序。
+// 业务用法：客服端访客详情页「关联访客 (N)」面板，给客服参考"疑似同一人"。
+// 不强行合并 vid（vid 仍是浏览器维度），仅 UI 层提示。
+// 排除自己的 vid；ip_hash 为空（旧数据 / 本地开发空 IP）不返回避免误关联。
+func (s *Store) RelatedVisitorsByIPHash(ctx context.Context, ipHash, excludeVID string, days, limit int) ([]Visitor, error) {
+	if ipHash == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 50 {
+		limit = 10
+	}
+	if days <= 0 {
+		days = 30
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, site_id, ip_cipher, ip_hash, ua, country, city, referer, last_page,
+       first_seen, last_seen, identifier
+FROM visitors
+WHERE ip_hash = ? AND id != ?
+  AND last_seen > DATE_SUB(NOW(), INTERVAL ? DAY)
+ORDER BY last_seen DESC
+LIMIT ?`, ipHash, excludeVID, days, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var list []Visitor
+	for rows.Next() {
+		var v Visitor
+		if err := rows.Scan(&v.ID, &v.SiteID, &v.IPCipher, &v.IPHash, &v.UA, &v.Country, &v.City,
+			&v.Referer, &v.LastPage, &v.FirstSeen, &v.LastSeen, &v.Identifier); err != nil {
+			return nil, err
+		}
+		list = append(list, v)
+	}
+	return list, rows.Err()
 }
 
 // GetVisitor 按 ID 读取访客。主要用于拿数据库里真实的 first_seen（UpsertVisitor

@@ -421,12 +421,33 @@
   });
 
   var STORE_KEY = 'cs_visitor_' + siteID;
-  var stored = (function () {
-    try { return JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); }
-    catch { return null; }
-  })();
 
-  var visitorID = stored?.visitor_id || '';
+  // [055-F] vid 双轨读写：localStorage 主 + cookie 兜底
+  // 防 localStorage 被用户清掉（部分隐私插件 / 浏览器设置 / 用户手动清）后 vid 丢失
+  // cookie 同域有效期 365 天，SameSite=Lax 兼容跨域 iframe；HttpOnly 不设（JS 要读）
+  function readCookie(name) {
+    var m = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)'));
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+  function writeCookie(name, val) {
+    var expires = new Date(Date.now() + 365 * 24 * 3600 * 1000).toUTCString();
+    document.cookie = name + '=' + encodeURIComponent(val) +
+      '; expires=' + expires + '; path=/; SameSite=Lax' +
+      (location.protocol === 'https:' ? '; Secure' : '');
+  }
+  function readVisitorID() {
+    var v = '';
+    try { var s = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); if (s && s.visitor_id) v = s.visitor_id; } catch {}
+    if (!v) v = readCookie(STORE_KEY);  // localStorage 没了 → 走 cookie 兜底
+    return v;
+  }
+  function writeVisitorID(vid) {
+    if (!vid) return;
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ visitor_id: vid })); } catch {}
+    writeCookie(STORE_KEY, vid);  // 双写：任一被清掉另一个还在
+  }
+
+  var visitorID = readVisitorID();
   var convID = '';
   var token = '';
   var ws = null;
@@ -1085,7 +1106,7 @@
       visitorID = data.visitor_id;
       convID = data.conversation;
       token = data.visitor_token;
-      localStorage.setItem(STORE_KEY, JSON.stringify({ visitor_id: visitorID }));
+      writeVisitorID(visitorID);  // [055-F] 双写 localStorage + cookie 兜底
       loadHistoryFromCache();
       // 注意：问候消息不在这里渲染。服务端会在我们的 WSS 上线后主动推送
       // type=chat from=sys 消息，由下面的 ws.onmessage 走完整逻辑（含播声 / 未读）
