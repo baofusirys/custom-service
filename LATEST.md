@@ -1,4 +1,4 @@
-### 当前版本：v0.5.0 · 2026-05-26
+### 当前版本：v0.5.1 · 2026-05-26
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -68,9 +68,9 @@
 ```
 
 ## 最近 3 次重大改动摘要
-- **[062] 2026-05-26 v0.5.0**：全部移除按 IP 维度的限流（爷爷决策："去掉，不要了！"）。后端删 `limiter.HTTPMiddleware`（5 处）+ `AllowWSHandshake`（2 处）+ 自动拉黑机制；config 删 `IPHTTPRPM` / `IPWSHandshakePM` / `IPBlacklistThreshold` 三字段；.env.example 同步删；nginx 删 `limit_req_zone` / `limit_conn_zone`（4 个 zone + 4 个 location 引用）。保留：per-visitor 消息限流、JWT、bcrypt cost=12、CORS、SSL、SQL 注入启发式检测、AES-GCM 加密、所有审计日志。原因：集成方 NAT 后多设备同 IP 反复误封代价过高。
-- **[061] 2026-05-26 v0.4.1**：[060] hotfix —— ip2region v4 xdb 字段位修正（5 段格式「国家\|省份\|城市\|ISP\|国家代码」）+ .env 永久搬到 `/srv/cs-data/.env`（仓库外，避免 deploy 误删）。
-- **[060] 2026-05-26 v0.4.0**：访客地理位置离线解析（ip2region xdb 全内存索引，毫秒查询，零外部 API）。
+- **[063] 2026-05-26 v0.5.1**：admin 工作台点击会话「标记已读慢 2-3 秒」体感优化。`pickConv` 旧版串行 `loadMessages → assign → unread=0`（美国服务器 RTT ~250ms × 2 RPC ≈ 600ms，体感像卡顿）。改乐观 UI：`c.unread = 0` 立刻执行（0ms badge 消失）+ `loadMessages` / `assign` 用 `Promise.all` 并行（总耗时降为 max 而非 sum）。后端 endpoint 实测各 ~90ms 不慢，问题纯在前端串行+反馈靠后。
+- **[062] 2026-05-26 v0.5.0**：全部移除按 IP 维度的限流（爷爷决策："去掉，不要了！"）。
+- **[061] 2026-05-26 v0.4.1**：[060] hotfix —— ip2region v4 xdb 字段位修正 + .env 永久搬到 `/srv/cs-data/.env`。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）

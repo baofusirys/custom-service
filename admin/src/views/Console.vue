@@ -71,10 +71,17 @@ async function loadMessages(convID) {
 }
 
 async function pickConv(c) {
+  // [063] 乐观 UI：未读 badge 立刻消失，不等任何网络 RPC
+  // 旧逻辑串行 4 步（loadMessages → assign → unread=0 → sendReadAck），美国服务器 200ms RTT 下
+  // 单次点击要 1-2 秒才让红色未读 badge 消失，体感像「卡顿」。
+  // 改：unread 先清，DB 操作后台跑；loadMessages 和 assign 是独立 RPC 可并行（少一半串行时间）。
   activeConv.value = c
-  await loadMessages(c.id)
-  await http.post(`/agent/conversations/${c.id}/assign`)
   c.unread = 0
+  // 拉消息 + 接管会话并行（两个 RPC 互相独立，时间 = max 而非 sum）
+  await Promise.all([
+    loadMessages(c.id),
+    http.post(`/agent/conversations/${c.id}/assign`),
+  ])
   // assign 后 agent 已加入 byConv[c.id]，立即发 WSS read：
   // 触发后端 UpdateLastRead + FanoutToConv 通知访客「客服已读」
   sendReadAck(c.id)

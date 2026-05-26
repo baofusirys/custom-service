@@ -4,6 +4,87 @@
 
 ---
 
+## [063] 2026-05-26 17:30 — admin 工作台「点击会话→标记已读」从 2-3s 卡顿降到 0ms · v0.5.1
+
+**起因 / 需求**
+
+爷爷反馈："web 客服工作台，点击对话列表中某个对话，进入后，标记为已读，很慢！可能需要两三秒才会标记完成。"
+
+实测后端 endpoint：
+- `GET /api/agent/conversations/:id/messages?limit=100` — 服务器内 **~90ms**
+- `POST /api/agent/conversations/:id/assign` — 服务器内 **~90ms**
+- `messages` 表 idx_conv_time (conv_id, created_at) 联合索引已存在，220 条记录扫描 < 50ms
+
+**后端无瓶颈**。慢的真正原因在前端：
+
+`Console.vue` 的 `pickConv` 函数 4 步**全串行**：
+
+```js
+async function pickConv(c) {
+  activeConv.value = c
+  await loadMessages(c.id)                  // ① 美国服务器 RTT ~250ms
+  await http.post(`.../assign`)             // ② 美国服务器 RTT ~250ms
+  c.unread = 0                              // ③ ★ 这里才让红色未读 badge 消失
+  sendReadAck(c.id)                         // ④ WSS（不阻塞）
+  for (m of messages.value) m.read = true
+}
+```
+
+国内 → 38.76.193.68 美国服务器 RTT ~250ms × 2 串行 RPC = **500-600ms**。bootstrap 重试 / 网络抖动 / TLS 握手叠加可能再放大 2-3 倍，于是体感像 **2-3 秒卡顿**。
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 修改 4 文件、修复 bug 1 个
+
+### 1. `admin/src/views/Console.vue` — pickConv 乐观 UI + 并行
+
+```js
+async function pickConv(c) {
+  activeConv.value = c
+  c.unread = 0                              // ← 立刻清未读 badge（0ms 反馈）
+  await Promise.all([                       // ← 并行而非串行（max 而非 sum）
+    loadMessages(c.id),
+    http.post(`.../assign`),
+  ])
+  sendReadAck(c.id)
+  for (m of messages.value) m.read = true
+}
+```
+
+两个关键改动：
+- **乐观 UI**：`c.unread = 0` 提到所有 `await` 之前，badge 消失不再等任何 RPC
+- **并行 RPC**：`loadMessages` 跟 `assign` 互相独立（一个查、一个写，不相互依赖），用 `Promise.all` 并行，总时间从 sum 降为 max
+
+### 2. VERSION / version.go：0.5.0 → 0.5.1（PATCH：纯体验优化无新功能）
+
+### 3. LATEST.md 最近 3 次摘要刷新
+
+**业务流程对比**
+
+| 场景 | 改前 v0.5.0 | 改后 v0.5.1 |
+|---|---|---|
+| 点击会话 → 未读 badge 消失 | 等 ① + ② 完成 ≈ 500-600ms 起步，网络抖动可达 2-3s | **0ms（点击瞬间）** |
+| 点击会话 → 消息列表渲染 | 串行 500-600ms | 并行 ~300ms（max 而非 sum） |
+| 客服端 mark 已读 → 访客侧「已读」角标 | ≥ 500ms（要先 assign） | 一样（WSS read 仍需 assign 先完成；这一步本来就走 WSS） |
+
+**触发场景与边界 + 验证方式**
+
+- **不影响**：
+  - 后端 endpoint（不动）/ DB schema（不动）/ WSS 协议（不动）
+  - 访客侧 widget / mobile_app
+  - 「已读」状态持久化（DB 通过 sendReadAck → service.PersistReadAsync 落库，跟之前一样）
+- **边界**：
+  - 极快连续切换会话（< 200ms）：旧版会触发多个未完成 assign 请求堆积；新版同样（这次改动不解决该问题，原来也有）
+  - assign 失败（网络挂 / 后端 500）：旧版会卡在第 2 个 await；新版 Promise.all 整体 reject，但 `c.unread = 0` 已经执行了 → UI 显示已读但 DB 没真 assign。这是乐观 UI 经典权衡，对用户无感（消息列表显示 OK），下次点击重试即可
+  - 用户**急速点击同一会话**：两次 unread = 0 都是幂等的，无副作用
+- **验证方式**：
+  1. 部署前 F12 → Performance 面板录制点击会话动作，看 badge 消失到 unread=0 时间
+  2. 部署后同步骤，badge 消失应该 < 50ms（仅 Vue reactive 渲染开销）
+  3. Network 面板看 `/messages` 和 `/assign` 应同时发起（不再前后）
+  4. 访客侧角标"已读"标志正常出现（验证 sendReadAck 没断）
+
+---
+
 ## [062] 2026-05-26 17:00 — 移除所有按 IP 的限流 / 拉黑机制（爷爷决策："去掉，不要了！"）· v0.5.0
 
 **起因 / 需求**
