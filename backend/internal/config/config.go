@@ -70,10 +70,16 @@ func Load() (*Config, error) {
 		HTTPPort:             defaultStr(os.Getenv("BACKEND_HTTP_PORT"), "8080"),
 		LogLevel:             defaultStr(os.Getenv("BACKEND_LOG_LEVEL"), "info"),
 		MaxUploadMB:          defaultInt(os.Getenv("BACKEND_MAX_UPLOAD_MB"), 20),
-		IPHTTPRPM:            defaultInt(os.Getenv("SECURITY_IP_HTTP_RPM"), 60),
-		IPWSHandshakePM:      defaultInt(os.Getenv("SECURITY_IP_WS_HANDSHAKE_PM"), 5),
-		VisitorMsgPM:         defaultInt(os.Getenv("SECURITY_VISITOR_MSG_PM"), 10),
-		IPBlacklistThreshold: defaultInt(os.Getenv("SECURITY_IP_BLACKLIST_THRESHOLD"), 200),
+		// [058] 默认阈值放宽：旧默认（60/5/10/200）对集成方"NAT 后多设备 + 多 tab + 同 IP
+		// 管理员同时访问"场景过严，多次实测被自动拉黑误封正常用户。新默认按实测安全余量：
+		//   IP_HTTP_RPM:            60 → 120（多 tab + bootstrap 重试 + WSS 握手 + 设置查询撞）
+		//   IP_WS_HANDSHAKE_PM:      5 → 30（[054] 修后单 chat.html 极限 8/min；3 tab 24/min）
+		//   VISITOR_MSG_PM:         10 → 20（访客连发常见）
+		//   IP_BLACKLIST_THRESHOLD:200 → 500（短时风暴 200 易误封，500 仍能挡真攻击）
+		IPHTTPRPM:            defaultInt(os.Getenv("SECURITY_IP_HTTP_RPM"), 120),
+		IPWSHandshakePM:      defaultInt(os.Getenv("SECURITY_IP_WS_HANDSHAKE_PM"), 30),
+		VisitorMsgPM:         defaultInt(os.Getenv("SECURITY_VISITOR_MSG_PM"), 20),
+		IPBlacklistThreshold: defaultInt(os.Getenv("SECURITY_IP_BLACKLIST_THRESHOLD"), 500),
 		BootstrapUsername:    defaultStr(os.Getenv("ADMIN_BOOTSTRAP_USERNAME"), "admin"),
 		BootstrapPassword:    os.Getenv("ADMIN_BOOTSTRAP_PASSWORD"),
 		TurnRealm:            os.Getenv("TURN_REALM"),

@@ -55,7 +55,10 @@ func ClientIP(c *gin.Context) string {
 	return host
 }
 
-// HTTPMiddleware：按 IP 限流；超出/被拉黑直接 429。
+// HTTPMiddleware：按 IP 限流；超出/被拉黑直接 429 + Retry-After header。
+// [058] 加 Retry-After header 让客户端不靠猜知道等多久（chat.html bootstrap 用它精确退避）
+//   - 黑名单 → Retry-After: 86400（24h，跟 bl TTL 一致）
+//   - RPM 超限 → Retry-After: 60（1 min Redis 窗口）
 func (r *RateLimiter) HTTPMiddleware(rpm int) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ip := ClientIP(c)
@@ -63,6 +66,7 @@ func (r *RateLimiter) HTTPMiddleware(rpm int) gin.HandlerFunc {
 		if r.isBlacklisted(ctx, ip) {
 			r.secLog.Warn("blacklisted ip blocked",
 				zap.String("ip", ip), zap.String("path", c.Request.URL.Path))
+			c.Header("Retry-After", "86400") // [058] 黑名单 24h
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"code": 42901, "msg": "您的 IP 已被临时限制访问，请稍后再试",
 			})
@@ -77,6 +81,7 @@ func (r *RateLimiter) HTTPMiddleware(rpm int) gin.HandlerFunc {
 		}
 		if !allowed {
 			r.recordViolation(ctx, ip, "http_rpm_exceeded", c.Request.URL.Path)
+			c.Header("Retry-After", "60") // [058] RPM 1 min 窗口
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"code": 42902, "msg": "请求过于频繁，请稍后再试",
 			})

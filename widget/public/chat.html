@@ -1060,32 +1060,71 @@
   }
 
   // ====== 启动 ======
+  // [058] settings 缓存：sessionStorage 5 分钟有效，避免 bootstrap 失败重试时反复打 /api/visitor/settings
+  var SETTINGS_CACHE_KEY = STORE_KEY + '_settings';
+  var SETTINGS_CACHE_AT_KEY = STORE_KEY + '_settings_at';
+  var SETTINGS_CACHE_TTL = 5 * 60 * 1000;
+
+  function applySettings(data) {
+    if (!data) return;
+    notifySound = data.notify_sound || 'classic';
+    if (data.widget_title) {
+      var titleEl = document.querySelector('header .header-title');
+      if (titleEl) titleEl.textContent = data.widget_title;
+    }
+    if (data.voice_call_hint) {
+      var voiceHintEl = document.getElementById('voiceBtnHint');
+      if (voiceHintEl) voiceHintEl.textContent = data.voice_call_hint;
+      var voiceBtnEl = document.getElementById('voiceBtn');
+      if (voiceBtnEl) voiceBtnEl.title = data.voice_call_hint;
+    }
+  }
+
   async function loadPublicSettings() {
+    // [058] 优先 sessionStorage 缓存（5min 内不再 fetch，省 /api/visitor/settings 请求）
+    try {
+      var cached = sessionStorage.getItem(SETTINGS_CACHE_KEY);
+      var cachedAt = sessionStorage.getItem(SETTINGS_CACHE_AT_KEY);
+      if (cached && cachedAt && (Date.now() - parseInt(cachedAt, 10) < SETTINGS_CACHE_TTL)) {
+        applySettings(JSON.parse(cached));
+        return;
+      }
+    } catch (e) {}
     try {
       var r = await fetch(httpBase + '/api/visitor/settings');
       var data = await r.json();
       if (data.code === 0 && data.data) {
-        notifySound = data.data.notify_sound || 'classic';
-        if (data.data.widget_title) {
-          var titleEl = document.querySelector('header .header-title');
-          if (titleEl) titleEl.textContent = data.data.widget_title;
-        }
-        // 语音按钮提示文字（管理员在 admin Settings 里配置）
-        if (data.data.voice_call_hint) {
-          var voiceHintEl = document.getElementById('voiceBtnHint');
-          if (voiceHintEl) voiceHintEl.textContent = data.data.voice_call_hint;
-          var voiceBtnEl = document.getElementById('voiceBtn');
-          if (voiceBtnEl) voiceBtnEl.title = data.data.voice_call_hint;
-        }
+        applySettings(data.data);
+        try {
+          sessionStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(data.data));
+          sessionStorage.setItem(SETTINGS_CACHE_AT_KEY, String(Date.now()));
+        } catch (e) {}
       }
     } catch {}
   }
 
+  // [058] bootstrap 重写：跟 [054] connectWS 同模式防多实例并发死循环打爆 backend 限流
+  // 旧版 bug：无重入锁 + 固定 setTimeout(bootstrap, 5000) + 不识别 42901/42902 → 多 chat.html 实例
+  //   各自每 5s 死循环 → 24h 累积 viol 触发自动拉黑 24h 误封正常访客/管理员
+  var bootstrapTimer = null;
+  var bootstrapRetry = 0;
+  var isBootstrapping = false;
+
+  function scheduleBootstrap(backoff) {
+    if (bootstrapTimer) return;  // 已排队跳过防多次叠加
+    bootstrapTimer = setTimeout(function () {
+      bootstrapTimer = null;
+      bootstrap();
+    }, backoff);
+  }
+
   async function bootstrap() {
-    // 启动时立即尝试自读 parent.location（同域 fallback），不等 loader.js postMessage
-    tryReadHostPageDirectly();
-    await loadPublicSettings();
+    if (isBootstrapping) return;       // [058] 重入锁
+    if (bootstrapTimer) { clearTimeout(bootstrapTimer); bootstrapTimer = null; }
+    isBootstrapping = true;
     try {
+      tryReadHostPageDirectly();
+      await loadPublicSettings();
       var resp = await fetch(httpBase + '/api/visitor/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1095,26 +1134,44 @@
           referer: document.referrer || '',
           // [046] 跨域 iframe 中读 parent.location.href 抛 SecurityError 会导致整个
           // bootstrap async 链 reject → widget 死循环"连接失败"。用 IIFE try/catch 兜底。
-          // 同域时直接读到 host URL；跨域时静默返空字符串（由 loader.js postMessage 后补 hostURL）
           last_page: (function () { try { return parent.location.href; } catch (e) { return ''; } })(),
           ua: navigator.userAgent
         })
       });
-      var data = await resp.json();
+      // [058] 优先看 HTTP 状态码 + Retry-After header 决定退避（backend 会带）
+      var retryAfter = parseInt(resp.headers.get('Retry-After') || '0', 10);
+      var data;
+      try { data = await resp.json(); } catch { data = { code: -1, msg: 'parse error' }; }
+      // [058] 限流码识别：42901 IP 已拉黑 / 42902 RPM 超限 → 长 backoff 覆盖 Redis 窗口
+      if (resp.status === 429 || data.code === 42901 || data.code === 42902) {
+        var backoff = (retryAfter > 0 ? retryAfter * 1000 : 60000);
+        setStatus('服务繁忙，' + Math.round(backoff / 1000) + 's 后重试', false);
+        scheduleBootstrap(backoff);
+        return;
+      }
       if (data.code !== 0) throw new Error(data.msg || '会话创建失败');
       visitorID = data.visitor_id;
       convID = data.conversation;
       token = data.visitor_token;
-      writeVisitorID(visitorID);  // [055-F] 双写 localStorage + cookie 兜底
+      writeVisitorID(visitorID);
       loadHistoryFromCache();
-      // 注意：问候消息不在这里渲染。服务端会在我们的 WSS 上线后主动推送
-      // type=chat from=sys 消息，由下面的 ws.onmessage 走完整逻辑（含播声 / 未读）
+      bootstrapRetry = 0;  // [058] 成功重置
       connectWS();
     } catch (e) {
+      // [058] 普通失败用指数退避（5s→8s→12.8s→20.5s→cap 30s）
+      var bf = Math.min(30000, 5000 * Math.pow(1.6, bootstrapRetry++));
       setStatus('连接失败，重试中', false);
-      setTimeout(bootstrap, 5000);
+      scheduleBootstrap(bf);
+    } finally {
+      isBootstrapping = false;
     }
   }
+
+  // [058] pagehide 清 bootstrapTimer 防 bfcache 中旧实例继续 schedule
+  window.addEventListener('pagehide', function () {
+    if (bootstrapTimer) { clearTimeout(bootstrapTimer); bootstrapTimer = null; }
+    isBootstrapping = false;
+  });
 
   function loadHistoryFromCache() {
     try {

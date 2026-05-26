@@ -4,6 +4,81 @@
 
 ---
 
+## [058] 2026-05-26 14:50 — bootstrap 死循环重试 + 默认限流阈值放宽（解集成方管理员被自动拉黑 24h）
+
+**起因 / 需求**
+集成方反馈 [054] 模式 bug 又一次：管理员登录后台立刻被自动拉黑 24h（`bl:<ip>` TTL=86384s + `viol:<ip>=298`/阈值 200）。诊断 4 真 bug 全验证：
+
+1. `chat.html bootstrap()` L1117 **无重入锁**，多实例并发跑
+2. L1115 **固定 `setTimeout(bootstrap, 5000)`**，不指数退避
+3. L1104 **不识别 42901/42902 限流码**，被限流后 catch 走 5s 又重试 → 加速 viol 累积
+4. `loadPublicSettings` 无缓存，每次 bootstrap 都 fetch
+
+爷爷判断：要同时**修代码（治本）+ 放宽默认阈值（治标）**，一劳永逸。
+
+**改了什么**（修改 5 文件）
+
+### A. chat.html bootstrap 重写（跟 [054] connectWS 同模式）
+
+- 模块级 `bootstrapTimer = null` + `bootstrapRetry = 0` + `isBootstrapping = false`
+- 新增 `scheduleBootstrap(backoff)`：去重防多 timer 叠加
+- 重写 `bootstrap()`：
+  - 进入查 `isBootstrapping` 重入锁 → 跳过
+  - 清残留 `bootstrapTimer`
+  - **HTTP 429 / code=42901 / code=42902 → 优先读 `Retry-After` header**，没 header 兜底 60s
+  - 普通失败 → 指数退避 `min(30s, 5s × 1.6^retry)`
+  - 成功重置 `bootstrapRetry = 0`
+  - `finally` 块复位 `isBootstrapping`
+- pagehide 监听清 `bootstrapTimer` 防 bfcache 中旧实例继续 schedule
+- `loadPublicSettings` 加 sessionStorage **5 min 缓存**（重试时跳过 fetch）+ 抽 `applySettings(data)` 单职责函数
+
+### B. backend ratelimit.go 加 Retry-After header
+- 黑名单返 429 时加 `Retry-After: 86400`（24h，跟 bl TTL 一致）
+- RPM 超限返 429 时加 `Retry-After: 60`（1 min Redis 窗口）
+- 让客户端不靠猜知道等多久；chat.html `resp.headers.get('Retry-After')` 直接读
+
+### C. backend config.go + .env.example 默认阈值放宽
+
+| 项 | 旧 | 新 | 理由 |
+|---|---|---|---|
+| `SECURITY_IP_HTTP_RPM` | 60 | **120** | 多 tab + bootstrap + WSS + 设置查询撞 |
+| `SECURITY_IP_WS_HANDSHAKE_PM` | 5 | **30** | [054] 修后单 chat.html 极限 8/min；3 tab 24/min |
+| `SECURITY_VISITOR_MSG_PM` | 10 | **20** | 访客连发常见 |
+| `SECURITY_IP_BLACKLIST_THRESHOLD` | 200 | **500** | 短时风暴 200 易误封，500 仍能挡真攻击 |
+
+**业务流程对比**
+
+| 场景 | 改前 | 改后 |
+|---|---|---|
+| bootstrap 失败重试节奏 | 固定 5s × 12 次/分 = 24 次 settings+session HTTP/分 | 指数退避 5→8→13→21→30s cap，单实例 ≤ 8 次/分 |
+| 多 chat.html 实例并发 | 各自 5s 死循环叠加 36+ 次/分 | isBootstrapping 重入锁，单实例独占；多实例并发自动跳过 |
+| backend 返 429 限流 | 不识别 → 5s 又试加速 viol 累积 → 24h 拉黑 | 识别 → 读 Retry-After header 退避 60s/86400s 覆盖窗口 |
+| loadPublicSettings 每次 bootstrap fetch | 1 次/重试 | sessionStorage 5min 缓存，重试 0 次 fetch |
+| 默认限流阈值 | RPM=60 / WSH=5 / viol=200 严格 | RPM=120 / WSH=30 / viol=500 放宽 2-2.5 倍 |
+| 集成方多设备同 IP 测试 | 易被自动拉黑 24h 误封 | 默认阈值足够正常 NAT 场景 |
+| 集成方 NAT 后办公室 50 人 | 严重打爆 | 50 人 × 单 chat.html 8/min = 400/min 仍 < 黑名单 500 阈值 |
+
+**触发场景与边界 + 验证方式**
+
+- **Retry-After 标准 HTTP header**：浏览器 fetch 默认不重试（不像 image），由 chat.html 自己读 + scheduleBootstrap 安排，可控
+- **指数退避 5s→30s cap**：最坏 1 分钟最多 5-6 次重试（vs 旧 12 次），单实例自然不会触发限流
+- **sessionStorage 5min 缓存**：标签关闭后清空（避免跨 session 缓存陈旧 settings），刷新仍生效
+- **重入锁 finally**：异常路径也会复位 `isBootstrapping`，不会死锁
+- **阈值放宽不破坏安全**：500 仍能挡真攻击（恶意脚本秒级几百请求会触发），且 [054] [058] 修后正常客户端不会接近这个数
+- **不影响**：admin Vue / mobile_app / 通话 / 推送 / 任何其他功能；集成方已设的 env 变量仍覆盖默认（向下兼容）
+- **GHCR 镜像**：backend + widget 两个改，push 后 Actions 重 build
+- **版本号**：bug fix + 默认值调整（无 API 改动）→ 下次 PATCH `v0.3.1` 合适
+- **验证**：
+  1. 单访客 widget 进入网页 + 后端临时挂掉 30s → 指数退避 5→8→13→21→30s，不死循环
+  2. 强制限流（临时阈值=1）+ F5 × 5 → chat.html 看 Retry-After 退避 60s，不打爆
+  3. backend 启动 → 看日志默认 `IPHTTPRPM=120 IPWSHandshakePM=30` 等
+  4. 集成方应急配置可回退到默认（或保留更严的覆盖）
+
+**给集成方的话**
+[054] + [058] 双修后，单 chat.html 单 tab bootstrap + WSS 极限合 < 20 次/min，远低于新默认 120 RPM。集成方应急的 `SECURITY_IP_HTTP_RPM=300` / `SECURITY_IP_BLACKLIST_THRESHOLD=500` 可继续保留作安全余量，也可回退到默认 120/500 让 .env 更干净。**老的 `viol:<ip>` 累计是 [049] cs-nginx realip 之前误判遗留，可手动清 `redis-cli DEL viol:*` 一次性重置。**
+
+---
+
 ## [057] 2026-05-26 13:45 — 修「访客进入网页时来电铃声自动响一次」bug（[036] 解锁试探副作用）
 
 **起因 / 需求**
