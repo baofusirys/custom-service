@@ -782,6 +782,10 @@
   }
 
   // 浏览器要求音频必须用户手势触发；用户在聊天框第一次点击时解锁所有 Audio
+  // [057] 不再解锁 voice-ring：volume=0 试播在某些浏览器/版本 pause 之前会真的发声
+  //   1-2 秒（voice-ring.mp3 比短促 visitor1.wav 长很多 + loop=true）。
+  //   而访客 widget 中访客是"主动呼叫方"（voiceStart 时点电话按钮 → 那个 click 自然
+  //   解锁 audio → 立即可播 playRingLoop），完全不需要预解锁。删掉 [036] 当年的预解锁。
   document.addEventListener('click', function () {
     Object.keys(soundCache).forEach(function (k) {
       var a = soundCache[k];
@@ -793,13 +797,8 @@
         else a.volume = 1.0;
       } catch (e) { a.volume = 1.0; }
     });
-    // [036] 顺便解锁来电铃声（同样需要用户手势）
-    try {
-      _ringAudio.volume = 0;
-      var rp = _ringAudio.play();
-      if (rp && rp.then) rp.then(function () { _ringAudio.pause(); _ringAudio.currentTime = 0; _ringAudio.volume = 1.0; })
-                          .catch(function () { _ringAudio.volume = 1.0; });
-    } catch (e) { _ringAudio.volume = 1.0; }
+    // [036] 解锁 voice-ring 段已删除（[057]）：访客 voiceStart 自己点电话按钮的 click
+    // 已经是 user gesture，那个 click 上下文里直接 playRingLoop 完全没问题，不需预解锁。
   }, { once: true, capture: true });
 
   // ====== 时间格式化 ======

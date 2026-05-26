@@ -4,6 +4,44 @@
 
 ---
 
+## [057] 2026-05-26 13:45 — 修「访客进入网页时来电铃声自动响一次」bug（[036] 解锁试探副作用）
+
+**起因 / 需求**
+爷爷自测发现访客进入网页时**自动播放一次 voice-ring.mp3**（来电铃声），跟普通 greeting visitor1.wav 一起响 = 听感 2 个声音。
+
+**根因**：`widget/public/chat.html` L797-803 是 [036] 加的"用户首次 click 时预解锁 voice-ring（同 visitor1.wav 解锁套路）"。但：
+- visitor1.wav 短促（273 KB / 1-2 秒），`volume=0; play(); .then(pause)` 在 pause 触发前播了几毫秒听不见
+- **voice-ring.mp3 较长 + `loop=true`** → Promise resolve 前实际播了几十/几百毫秒，**能被听到**
+- 爷爷感觉的"2 个声音" = greeting visitor1.wav（真业务） + voice-ring 解锁试探残响（bug）
+
+**改了什么**（修改 1 文件）
+
+`widget/public/chat.html` L797-803：删除 voice-ring 预解锁段。
+
+理由：访客 widget 中**访客是主动呼叫方**（voiceStart 时点电话按钮触发 playRingLoop）。那个 click 本身就是 user gesture，autoplay policy 直接允许同步 play()，**不需要预解锁**。删了 0 副作用。
+
+保留 visitor1/2/3.wav 的预解锁段（这些短促音听不见，且预解锁能让首次客服回复时音效零延迟）。
+
+**业务流程对比**
+
+| 时机 | 改前 | 改后 |
+|---|---|---|
+| 访客进入网页 + click 解锁 audio | voice-ring 试播一次（几十-几百 ms 听得到）+ greeting visitor1.wav 真响 = **2 个声音** | 只 greeting visitor1.wav 一次 = **1 个声音** ✓ |
+| 访客主动 voiceStart 点电话按钮 | click → playRingLoop 直接播（已解锁）| click → playRingLoop 直接播（user gesture 自然允许，跟之前一样 OK）|
+| 客服回复消息 | 收到 chat → playNotify visitor1.wav | 不变 |
+
+**触发场景与边界 + 验证方式**
+
+- **访客 widget 中 voiceStart 是访客主动 click 触发**：那个 click 是 user gesture，Web Audio API spec 规定 click 上下文里 audio.play() 一定能成功。不需要预解锁。
+- **如果未来 widget 想做"客服主动呼叫访客"**（目前不支持）：访客侧不是主动 click，确实需要预解锁。届时再加，加法用更精确的方案（如 `_ringAudio.preload = 'metadata'; src = ''; play(); src = ...` 真不播声解锁）
+- **admin 端 voice-ring 解锁**：admin Console.vue 也有 voice-ring（客服收来电时循环响），admin 端客服是接听方（被动），但 admin 端 [036] 的 unlockAudio 用 `sound.js` 的统一函数处理且只对 sound files 解锁不动 voice-ring（[036] 那时给 admin 加的是独立 playRingLoop 函数没预解锁），所以 admin 端没这个问题。本次只修 widget。
+- **不影响**：所有 visitor1/2/3 音色预解锁继续生效；voiceStart/voiceOnAccept/voiceEnd 等通话流程不变；不影响 [046]/[054] 等
+- **GHCR 镜像**：widget 改动重 build cs-widget，其他 6 镜像 cache
+- **版本号**：bug fix → 下次 PATCH `v0.3.1`
+- **验证**：访客进入网页 → 浏览器允许声音后只听到一次 greeting 音（visitor1.wav）；点电话按钮仍正常听到来电铃声 voice-ring 循环
+
+---
+
 ## [056] 2026-05-26 13:00 — 版本号升 v0.3.0：[054] PATCH + [055] MINOR 累积发版
 
 **起因 / 需求**
