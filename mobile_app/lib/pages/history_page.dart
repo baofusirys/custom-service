@@ -64,11 +64,10 @@ class _HistoryPageState extends State<HistoryPage> {
                       ),
                       trailing: Text(_fmt(c.updatedAt),
                           style: TextStyle(fontSize: 11, color: Colors.grey[600])),
-                      onTap: () async {
-                        await context.read<AppState>().openConv(c);
-                        if (context.mounted) {
-                          Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ChatPage()));
-                        }
+                      onTap: () {
+                        // [051] 同 conversations_page：openConv 已改为同步 void，立刻 push 不 await
+                        context.read<AppState>().openConv(c);
+                        Navigator.of(context).push(MaterialPageRoute(builder: (_) => const ChatPage()));
                       },
                     );
                   },
