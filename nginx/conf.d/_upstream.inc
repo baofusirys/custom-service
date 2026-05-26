@@ -6,7 +6,7 @@
     # 这样可以解决「docker compose 重启后容器换 IP，nginx upstream 静态解析旧 IP 把请求
     # 转到错误容器」的问题。
 
-    limit_conn conn_per_ip 200;
+    # [062] 移除 limit_conn（按 IP 并发连接数限制）
 
     # 管理后台静态文件：把 /admin/ 反代到 admin 容器
     # 变量 proxy_pass 时 nginx 不做 URI 重写，所以用 rewrite ... break; 去掉 /admin 前缀
@@ -45,9 +45,8 @@
         # 故意不加 X-Frame-Options（这就是这次的关键修复）
     }
 
-    # 登录接口：严格限速（防爆破）
+    # [062] 登录接口移除按 IP 限速，仅靠 bcrypt cost=12 (~250ms/次) 自然防爆破
     location = /api/agent/login {
-        limit_req zone=login_rps burst=5 nodelay;
         set $backend_host backend;
         proxy_pass http://$backend_host:8080$request_uri;
         proxy_http_version 1.1;
@@ -57,9 +56,8 @@
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # 一般 API
+    # [062] 一般 API 移除按 IP 限速
     location /api/ {
-        limit_req zone=api_rps burst=40 nodelay;
         set $backend_host backend;
         proxy_pass http://$backend_host:8080$request_uri;
         proxy_http_version 1.1;
@@ -82,9 +80,8 @@
         proxy_buffering off;
     }
 
-    # WebSocket — 必须 Upgrade + 关闭超时
+    # [062] WebSocket 移除按 IP 限速；Upgrade + 关闭超时仍保留
     location /ws/ {
-        limit_req zone=ws_rps burst=20 nodelay;
         set $backend_host backend;
         proxy_pass http://$backend_host:8080$request_uri;
         proxy_http_version 1.1;

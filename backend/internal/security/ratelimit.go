@@ -3,7 +3,6 @@ package security
 import (
 	"context"
 	"net"
-	"net/http"
 	"strings"
 	"time"
 
@@ -12,27 +11,42 @@ import (
 	"go.uber.org/zap"
 )
 
-// 防 DDoS / 防同 IP 暴力请求 / 防访客刷消息（爷爷铁律）：
+// 限流 / 安全计数（爷爷铁律 + [062] 调整后剩余防御层）：
 //
-//   1. 按 IP 的 HTTP 请求/分钟 — 超出 429
-//   2. 按 IP 的 WSS 握手/分钟  — 超出拒绝 upgrade
-//   3. 按访客 session 的消息/分钟 — 超出临时静音
-//   4. 单 IP 24h 内被拦截累计达到阈值 → 拉黑 24h（自动解封）
+// [062] 大改：移除按 IP 的所有限流机制（集成方 NAT 后多设备同 IP 误封代价过高）。
+// 当前保留的「非 IP 维度」防御：
+//   1. 按访客 session 的消息/分钟 — 超出临时静音（不影响其他访客）
+//   2. SQL 注入启发式检测（service.go 调 RecordViolation，仅写安全日志）
+//   3. 各类登录失败 / MIME 黑名单 / 异常输入（LogSecurityWarn 写日志）
 //
-// 所有计数走 Redis（带 TTL），多副本部署可天然共享。
+// 移除的功能（CHANGELOG [062] 详记）：
+//   - HTTPMiddleware（按 IP 的 HTTP RPM 限流）→ 删
+//   - AllowWSHandshake（按 IP 的 WSS 握手 PM 限流）→ 删
+//   - 自动拉黑（24h 内 viol 累计达阈值 bl:<ip>=1）→ 删
+//   - 按 IP 的 violation 计数 → 改为按业务实体（visitor: 前缀）只为审计
+//
+// 剩余仍然有效的纵深防御（不在本文件）：
+//   - Nginx：[062] 移除 limit_req / limit_conn 后仅靠 set_real_ip_from + WAF/SSL
+//   - JWT visitor / agent token（有 TTL，过期失效）
+//   - bcrypt cost=12（agent 密码 hash ≈ 250ms/次，自然防爆破）
+//   - CORS（widget 跨域请求 origin 校验）
+//   - AES-GCM 敏感字段加密 + HMAC-SHA256 IP hash 索引
+//   - SSL/TLS（HTTPS only）+ acme.sh 自动证书
 
 type RateLimiter struct {
-	rdb       *redis.Client
-	secLog    *zap.Logger
-	blacklist int // 24h 内被拦次数阈值
+	rdb    *redis.Client
+	secLog *zap.Logger
 }
 
-func NewRateLimiter(rdb *redis.Client, secLog *zap.Logger, blacklistThreshold int) *RateLimiter {
-	return &RateLimiter{rdb: rdb, secLog: secLog, blacklist: blacklistThreshold}
+// NewRateLimiter [062] 删除 blacklistThreshold 参数（不再自动拉黑）。
+func NewRateLimiter(rdb *redis.Client, secLog *zap.Logger) *RateLimiter {
+	return &RateLimiter{rdb: rdb, secLog: secLog}
 }
 
 // ClientIP 取真实 IP。Nginx 已经设置 X-Forwarded-For / X-Real-IP，
 // 我们信第一个非内网的地址，避免代理链伪造。
+// [062] 注意：IP 不再用于限流/拉黑，但仍用于审计日志、ip_cipher / ip_hash 落库、
+// 「关联访客」面板查同 IP 历史 vid，所以 ClientIP 函数保留并继续被广泛调用。
 func ClientIP(c *gin.Context) string {
 	// 1) X-Real-IP
 	if ip := strings.TrimSpace(c.GetHeader("X-Real-IP")); ip != "" {
@@ -55,52 +69,9 @@ func ClientIP(c *gin.Context) string {
 	return host
 }
 
-// HTTPMiddleware：按 IP 限流；超出/被拉黑直接 429 + Retry-After header。
-// [058] 加 Retry-After header 让客户端不靠猜知道等多久（chat.html bootstrap 用它精确退避）
-//   - 黑名单 → Retry-After: 86400（24h，跟 bl TTL 一致）
-//   - RPM 超限 → Retry-After: 60（1 min Redis 窗口）
-func (r *RateLimiter) HTTPMiddleware(rpm int) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		ip := ClientIP(c)
-		ctx := c.Request.Context()
-		if r.isBlacklisted(ctx, ip) {
-			r.secLog.Warn("blacklisted ip blocked",
-				zap.String("ip", ip), zap.String("path", c.Request.URL.Path))
-			c.Header("Retry-After", "86400") // [058] 黑名单 24h
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"code": 42901, "msg": "您的 IP 已被临时限制访问，请稍后再试",
-			})
-			return
-		}
-		allowed, err := r.allow(ctx, "rl:http:"+ip, rpm, time.Minute)
-		if err != nil {
-			// Redis 异常时 fail-open，但记到安全日志
-			r.secLog.Error("ratelimit redis err", zap.Error(err), zap.String("ip", ip))
-			c.Next()
-			return
-		}
-		if !allowed {
-			r.recordViolation(ctx, ip, "http_rpm_exceeded", c.Request.URL.Path)
-			c.Header("Retry-After", "60") // [058] RPM 1 min 窗口
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"code": 42902, "msg": "请求过于频繁，请稍后再试",
-			})
-			return
-		}
-		c.Next()
-	}
-}
-
-// AllowWSHandshake 检查单 IP 的 WSS 握手频率。
-func (r *RateLimiter) AllowWSHandshake(ctx context.Context, ip string, pm int) (bool, error) {
-	if r.isBlacklisted(ctx, ip) {
-		return false, nil
-	}
-	return r.allow(ctx, "rl:wsh:"+ip, pm, time.Minute)
-}
-
-// AllowVisitorMessage 检查单访客消息频率。
+// AllowVisitorMessage 检查单访客消息频率（per-visitor，不是 per-IP）。
 // 约定：pm <= 0 表示「不限制」（用户可在 .env 把 SECURITY_VISITOR_MSG_PM 设为 0 关闭此限流）。
+// [062] 保留此函数 —— 单访客限流不影响其他访客，跟 IP 维度无关。
 func (r *RateLimiter) AllowVisitorMessage(ctx context.Context, visitorID string, pm int) (bool, error) {
 	if pm <= 0 {
 		return true, nil
@@ -119,51 +90,30 @@ func (r *RateLimiter) allow(ctx context.Context, key string, limit int, window t
 	return incr.Val() <= int64(limit), nil
 }
 
-// 拉黑
-func (r *RateLimiter) isBlacklisted(ctx context.Context, ip string) bool {
-	v, err := r.rdb.Get(ctx, "bl:"+ip).Result()
-	if err != nil {
-		return false
-	}
-	return v == "1"
-}
-
-func (r *RateLimiter) recordViolation(ctx context.Context, ip, kind, path string) {
-	key := "viol:" + ip
+// RecordViolation 上报真实攻击行为（SQL 注入嫌疑、访客刷消息等）。
+// [062] 重大变更：不再触发自动拉黑（24h bl:<ip>=1），改为只写安全日志 + 累计计数。
+// 24h 计数 viol:<key> 仍然保留，方便事后审计追溯，但**不再有任何阻断行为**。
+// 调用方传入的 key 通常是 "visitor:<vid>" 等业务实体，不再按 IP 拉黑。
+func (r *RateLimiter) RecordViolation(ctx context.Context, key, kind, detail string) {
+	violKey := "viol:" + key
 	pipe := r.rdb.TxPipeline()
-	v := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, 24*time.Hour)
+	v := pipe.Incr(ctx, violKey)
+	pipe.Expire(ctx, violKey, 24*time.Hour)
 	_, _ = pipe.Exec(ctx)
 
 	r.secLog.Warn("security violation",
-		zap.String("ip", ip),
+		zap.String("key", key),
 		zap.String("kind", kind),
-		zap.String("path", path),
+		zap.String("detail", detail),
 		zap.Int64("count_24h", v.Val()))
-
-	if v.Val() >= int64(r.blacklist) {
-		if err := r.rdb.Set(ctx, "bl:"+ip, "1", 24*time.Hour).Err(); err == nil {
-			r.secLog.Error("ip auto-blacklisted",
-				zap.String("ip", ip),
-				zap.Int64("violations", v.Val()),
-				zap.String("ttl", "24h"))
-		}
-	}
-}
-
-// RecordViolation 暴露给外部主动上报（SQL 注入嫌疑、WSS 握手洪水等真攻击行为）。
-// 会累计 24h 计数，达到阈值自动拉黑。
-func (r *RateLimiter) RecordViolation(ctx context.Context, ip, kind, detail string) {
-	r.recordViolation(ctx, ip, kind, detail)
 }
 
 // LogSecurityWarn 只写安全日志，不计入 violation 累计（不会拉黑）。
 // 适用于"用户失误而非攻击"的场景：密码输错、上传不支持的文件类型等。
-// 防爆破靠 Nginx 登录限速 + bcrypt cost=12（每次 ~250ms），不靠拉黑机制。
+// 防爆破靠 bcrypt cost=12（每次 ~250ms），不靠拉黑机制。
 func (r *RateLimiter) LogSecurityWarn(ip, kind, detail string) {
 	r.secLog.Warn("security warn",
 		zap.String("ip", ip),
 		zap.String("kind", kind),
 		zap.String("detail", detail))
 }
-

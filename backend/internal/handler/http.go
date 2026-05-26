@@ -155,14 +155,9 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 }
 
 // VisitorWS 访客的 WSS 入口。query: token=<visitor_token>
+// [062] 移除按 IP 的 WSS 握手限流（爷爷决策）；防御层缩窄为：visitor JWT token 校验 + WSS 自身 origin / SSL
 func (h *HTTP) VisitorWS(c *gin.Context) {
-	ip := security.ClientIP(c)
 	ctx := c.Request.Context()
-	if ok, _ := h.svc.Limiter().AllowWSHandshake(ctx, ip, h.cfg.IPWSHandshakePM); !ok {
-		h.svc.Limiter().RecordViolation(ctx, ip, "ws_handshake_flood", "/ws/visitor")
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"code": 42903, "msg": "握手太频繁"})
-		return
-	}
 	tok := c.Query("token")
 	if tok == "" {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40103, "msg": "缺少 token"})
@@ -233,13 +228,8 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 }
 
 // AgentWS 客服的 WSS 入口。query: token=<agent_token>
+// [062] 移除按 IP 的 WSS 握手限流（爷爷决策）；防御层：agent JWT token 校验 + WSS origin / SSL
 func (h *HTTP) AgentWS(c *gin.Context) {
-	ip := security.ClientIP(c)
-	ctx := c.Request.Context()
-	if ok, _ := h.svc.Limiter().AllowWSHandshake(ctx, ip, h.cfg.IPWSHandshakePM); !ok {
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"code": 42904, "msg": "握手太频繁"})
-		return
-	}
 	tok := c.Query("token")
 	if tok == "" {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40106, "msg": "缺少 token"})

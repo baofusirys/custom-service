@@ -81,7 +81,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("[FATAL] 加密器初始化失败: %v", err)
 	}
-	limiter := security.NewRateLimiter(rdb, secLog, cfg.IPBlacklistThreshold)
+	// [062] NewRateLimiter 去掉拉黑阈值参数（不再自动拉黑），仅给 service 提供
+	// AllowVisitorMessage / RecordViolation / LogSecurityWarn 三个日志/per-visitor 维度方法
+	limiter := security.NewRateLimiter(rdb, secLog)
 
 	// === [060] GeoIP 解析器（ip2region xdb v2，~11MB 全内存索引）===
 	// 失败不 fatal：xdb 文件挂了不能拖垮主业务，VisitorSession 会拿到空 country/city 仍正常落库。
@@ -149,9 +151,10 @@ func main() {
 		api.GET("/health", h.Health)
 		api.GET("/version", h.Version) // [053] 集成方对比 deployed vs upstream 最新版用
 
-		// 访客侧（无需登录，限流靠 IP + visitor token）
+		// 访客侧（无需登录，靠 visitor JWT token + CORS + SSL；
+		// [062] 移除按 IP 限流中间件——爷爷决策：所有 IP 维度限流去掉，避免集成方
+		// NAT 后多设备同 IP 误封；剩余防御层：per-visitor 消息限流 / JWT / SQL 注入启发式检测 / agent auth）
 		visitor := api.Group("/visitor")
-		visitor.Use(limiter.HTTPMiddleware(cfg.IPHTTPRPM))
 		{
 			visitor.POST("/session", h.VisitorSession)
 			visitor.GET("/settings", h.VisitorPublicSettings)
@@ -159,11 +162,11 @@ func main() {
 			visitor.GET("/turn-credential", h.TurnCredential)
 		}
 
-		// 客服登录
-		api.POST("/agent/login", limiter.HTTPMiddleware(cfg.IPHTTPRPM), h.AgentLogin)
+		// 客服登录（[062] 不再走 IP HTTP 限流，靠 bcrypt cost=12 ~ 250ms/次自然防爆破）
+		api.POST("/agent/login", h.AgentLogin)
 
 		// 客服已登录
-		ag := api.Group("/agent", limiter.HTTPMiddleware(cfg.IPHTTPRPM), middleware.AgentAuth(cfg.JWTSecret))
+		ag := api.Group("/agent", middleware.AgentAuth(cfg.JWTSecret))
 		{
 			ag.GET("/conversations", h.ListConversations)
 			ag.GET("/conversations/:id/messages", h.ListMessages)
@@ -177,8 +180,7 @@ func main() {
 		}
 
 		// 管理（仅 admin）
-		adm := api.Group("/admin", limiter.HTTPMiddleware(cfg.IPHTTPRPM),
-			middleware.AgentAuth(cfg.JWTSecret), middleware.AdminOnly())
+		adm := api.Group("/admin", middleware.AgentAuth(cfg.JWTSecret), middleware.AdminOnly())
 		{
 			adm.GET("/agents", h.ListAgents)
 			adm.POST("/agents", h.CreateAgent)
@@ -188,7 +190,7 @@ func main() {
 		}
 
 		// 文件上传 / 下载
-		api.POST("/upload", limiter.HTTPMiddleware(cfg.IPHTTPRPM), h.Upload)
+		api.POST("/upload", h.Upload)
 	}
 
 	// WSS endpoint

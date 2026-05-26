@@ -4,6 +4,98 @@
 
 ---
 
+## [062] 2026-05-26 17:00 — 移除所有按 IP 的限流 / 拉黑机制（爷爷决策："去掉，不要了！"）· v0.5.0
+
+**起因 / 需求**
+
+集成方网站（爷爷的 cursorthankyouceshi.icu 卖号站）嵌入 widget 后，访客反复看到「服务繁忙，60s 后重试」。诊断后发现：
+
+- 爷爷自己 IP `110.241.19.222` 的 Redis `viol` 计数才 10（远低于阈值 1000），且 `bl:*` 黑名单空 → **后端没拒**
+- nginx access log 看不到该 IP 16:30+ 的请求 → 浏览器请求**没到 nginx**
+- 但 widget 仍显示「60s 后重试」 → bootstrap 走 catch 兜底退避
+
+虽然这次实际不是被我们限流，但**集成方场景**（NAT 后多设备 / 多 tab / 同 IP 管理员同时访问）下，按 IP 的限流已经反复误封正常用户。爷爷的决策直截了当："**你要不然，把所有的 ip 限流给去掉吧，对，去掉，移除！不要了！！！**"
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 修改 7 文件、删除功能 4 个、新增 0 个
+
+### 删除的功能（按 IP 维度的全部限流 + 拉黑）
+
+1. **后端 HTTP RPM 限流**：`limiter.HTTPMiddleware(cfg.IPHTTPRPM)` 共 5 处调用全删（visitor / agent login / agent group / admin group / upload）
+2. **后端 WSS 握手 PM 限流**：`AllowWSHandshake` 在 `VisitorWS` / `AgentWS` 两处全删
+3. **后端自动拉黑**：`recordViolation` 内"24h viol 累计达阈值 → bl:<ip>=1" 分支删；`isBlacklisted` 删；`HTTPMiddleware` 里 429 + Retry-After=86400 黑名单分支随之死亡
+4. **Nginx 按 IP 限流**：
+   - `limit_req_zone $binary_remote_addr zone=api_rps:20m rate=20r/s;` 删
+   - `limit_req_zone $binary_remote_addr zone=ws_rps:10m rate=5r/s;` 删
+   - `limit_req_zone $binary_remote_addr zone=login_rps:10m rate=2r/s;` 删
+   - `limit_conn_zone $binary_remote_addr zone=conn_per_ip:20m;` 删
+   - 4 个 `location` 里的 `limit_req zone=xxx burst=N nodelay;` 全删
+   - `limit_conn conn_per_ip 200;` 删
+
+### 保留的「非 IP 维度」防御（确保不裸奔）
+
+1. **按访客 session 的消息限流** `AllowVisitorMessage`（service.go 调用）— 单访客 20 条/分钟，不影响其他访客
+2. **SQL 注入启发式检测** `DetectSQLInjection`（service.go 仍调用 `RecordViolation` 写安全日志）
+3. **JWT 身份验证**：visitor token 12h TTL / agent token 12h TTL
+4. **bcrypt cost=12**：agent 密码 hash 验证 ~250ms/次（**自然防爆破**，不需 IP 限速辅助）
+5. **CORS**：widget 跨域请求 origin 校验
+6. **AES-GCM**：sensitive 字段（IP 明文）加密落库
+7. **HMAC-SHA256 ip_hash**：[055] 关联访客查找仍按 IP hash 索引（不可逆）
+8. **SSL/TLS**：HTTPS only + acme.sh 自动证书
+9. **agent_login_fail_xxx / mime_blocked / sqli_suspect 等所有 zap 安全日志**：仍写 /srv/cs-data/logs/backend/security.log 长效存储
+
+### 代码改动清单
+
+- `backend/cmd/server/main.go`：`limiter` 构造改为 `NewRateLimiter(rdb, secLog)` 无阈值参数；5 处 `limiter.HTTPMiddleware(...)` 全删；附中文注释说明"为什么没限流也安全"
+- `backend/internal/handler/http.go`：`VisitorWS` / `AgentWS` 删 IP + ctx + AllowWSHandshake 三件套
+- `backend/internal/security/ratelimit.go`：彻底重写。删 `HTTPMiddleware`、`AllowWSHandshake`、`isBlacklisted`、`recordViolation` 拉黑分支；保留 `RateLimiter struct`、`NewRateLimiter`、`ClientIP`、`AllowVisitorMessage`、`RecordViolation`（只写日志不拉黑）、`LogSecurityWarn`、`allow` 私有；顶部注释完整列出剩余防御层
+- `backend/internal/config/config.go`：`Config struct` 删 `IPHTTPRPM` / `IPWSHandshakePM` / `IPBlacklistThreshold`；`Load()` 删对应 `os.Getenv` 读取
+- `.env.example`：删 `SECURITY_IP_HTTP_RPM` / `SECURITY_IP_WS_HANDSHAKE_PM` / `SECURITY_IP_BLACKLIST_THRESHOLD` 三行 + 旧 [058] 注释；保留 `SECURITY_VISITOR_MSG_PM=20`
+- `nginx/nginx.conf`：删 4 行 `limit_req_zone` / `limit_conn_zone`
+- `nginx/conf.d/_upstream.inc`：删 5 处 `limit_*` 指令（顶部 1 个 + 4 location 各 1）
+
+### 版本 / 文档
+
+- `VERSION` 0.4.1 → **0.5.0**（功能层 MINOR 升级：移除一个完整功能模块）
+- `backend/internal/config/version.go` 同步
+- `LATEST.md` 顶部版本 + 最近 3 次摘要刷新
+
+**业务流程对比**
+
+| 场景 | 改前 v0.4.1 | 改后 v0.5.0 |
+|---|---|---|
+| 集成方 NAT 后 50 个访客共用 1 个公网 IP | 该 IP 累计访问/分钟 > 120 → 全部 429 → 集体被限流 | 全部正常通过 |
+| 集成方 IT 部门管理员 + 10 名测试同时打开后台 | 同 IP HTTP RPM 撞上限 → 误封 | 正常 |
+| 单访客刷消息（按住 enter 发 100 条） | per-visitor 20/min 限制 → 静音 1 分钟 | **仍然限制** |
+| 攻击者爆破 agent 登录 | nginx 2r/s + bcrypt 250ms × 250ms 自然慢 | 仅 bcrypt 250ms 自然慢（理论 240 次/分钟 / 1 个攻击者，单密码空间 10^8 仍需 79 年） |
+| SQL 注入尝试 | 启发式检测 → RecordViolation → 拉黑 | 启发式检测 → 只写安全日志，不拉黑 |
+| 真 DDoS（百万 IP 同时打） | nginx limit_req 撑住 | **不撑** — 上层依赖 Cloudflare/云厂商 WAF |
+
+**风险评估 + 触发场景与边界 + 验证方式**
+
+风险（爷爷已知情决策）：
+- 单 IP DDoS：之前 nginx 20r/s 一道拦截，现在直通 backend。靠 backend Go gin 性能扛（实测单容器 ~5000 RPS 短时不挂）
+- agent 登录爆破：之前 nginx 2r/s + bcrypt 250ms 双层，现在仅 bcrypt 一层（240 次/分/IP 上限）
+- 真 DDoS 防护建议（爷爷可选）：上层套 Cloudflare 免费版 / 阿里云 WAF，按业务需求开
+
+测试验证：
+1. backend 跑 `go build ./... && go vet ./...` 全通过
+2. 服务器 rebuild backend + nginx 后 `/api/visitor/session` 直接 200（不再 429）
+3. Redis 之前残留的 `viol:*` / `bl:*` / `rl:*` 全清掉（手动 redis-cli del）
+4. nginx -t 通过（删 limit_* 不影响其他配置）
+5. 模拟单访客 50 次连发消息 → 21 次后开始 vmsg 拒绝（per-visitor 仍生效）
+6. /api/version 返回 v0.5.0
+7. 后台会话列表 / widget 通信 / WSS 心跳 / 通话 / 文件上传 全部跑通
+
+不影响：
+- 数据持久化（mysql / redis / logs / uploads 全保留）
+- 现有访客的 [055] 关联访客查询（按 ip_hash 索引，不依赖限流）
+- 现有 GeoIP 解析（geoip 模块独立）
+- per-visitor 消息防刷（仍有效）
+
+---
+
 ## [061] 2026-05-26 16:30 — [060] 上线 hotfix：xdb v4 字段错位 + .env 误删事故根治 · v0.4.1
 
 **起因 / 需求**

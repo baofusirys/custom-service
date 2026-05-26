@@ -26,10 +26,9 @@ type Config struct {
 	MaxUploadMB int
 
 	// 安全
-	IPHTTPRPM            int
-	IPWSHandshakePM      int
-	VisitorMsgPM         int
-	IPBlacklistThreshold int
+	// [062] 移除 IPHTTPRPM / IPWSHandshakePM / IPBlacklistThreshold（按 IP 限流全部撤掉）
+	// 保留 VisitorMsgPM（按访客 session 限流，跟 IP 无关）
+	VisitorMsgPM int
 
 	// Bootstrap 超管
 	BootstrapUsername string
@@ -69,18 +68,11 @@ func Load() (*Config, error) {
 		Timezone:             tz,
 		HTTPPort:             defaultStr(os.Getenv("BACKEND_HTTP_PORT"), "8080"),
 		LogLevel:             defaultStr(os.Getenv("BACKEND_LOG_LEVEL"), "info"),
-		MaxUploadMB:          defaultInt(os.Getenv("BACKEND_MAX_UPLOAD_MB"), 20),
-		// [058] 默认阈值放宽：旧默认（60/5/10/200）对集成方"NAT 后多设备 + 多 tab + 同 IP
-		// 管理员同时访问"场景过严，多次实测被自动拉黑误封正常用户。新默认按实测安全余量：
-		//   IP_HTTP_RPM:            60 → 120（多 tab + bootstrap 重试 + WSS 握手 + 设置查询撞）
-		//   IP_WS_HANDSHAKE_PM:      5 → 30（[054] 修后单 chat.html 极限 8/min；3 tab 24/min）
-		//   VISITOR_MSG_PM:         10 → 20（访客连发常见）
-		//   IP_BLACKLIST_THRESHOLD:200 → 500（短时风暴 200 易误封，500 仍能挡真攻击）
-		IPHTTPRPM:            defaultInt(os.Getenv("SECURITY_IP_HTTP_RPM"), 120),
-		IPWSHandshakePM:      defaultInt(os.Getenv("SECURITY_IP_WS_HANDSHAKE_PM"), 30),
-		VisitorMsgPM:         defaultInt(os.Getenv("SECURITY_VISITOR_MSG_PM"), 20),
-		IPBlacklistThreshold: defaultInt(os.Getenv("SECURITY_IP_BLACKLIST_THRESHOLD"), 500),
-		BootstrapUsername:    defaultStr(os.Getenv("ADMIN_BOOTSTRAP_USERNAME"), "admin"),
+		MaxUploadMB: defaultInt(os.Getenv("BACKEND_MAX_UPLOAD_MB"), 20),
+		// [062] 仅保留按访客 session 的消息限流（per-visitor，跟 IP 无关），不会因为 NAT 后多设备同 IP 误封；
+		// 0 = 不限制
+		VisitorMsgPM:      defaultInt(os.Getenv("SECURITY_VISITOR_MSG_PM"), 20),
+		BootstrapUsername: defaultStr(os.Getenv("ADMIN_BOOTSTRAP_USERNAME"), "admin"),
 		BootstrapPassword:    os.Getenv("ADMIN_BOOTSTRAP_PASSWORD"),
 		TurnRealm:            os.Getenv("TURN_REALM"),
 		TurnSecret:           os.Getenv("TURN_STATIC_AUTH_SECRET"),

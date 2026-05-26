@@ -1,4 +1,4 @@
-### 当前版本：v0.4.1 · 2026-05-26
+### 当前版本：v0.5.0 · 2026-05-26
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -68,9 +68,9 @@
 ```
 
 ## 最近 3 次重大改动摘要
-- **[061] 2026-05-26 v0.4.1**：[060] 上线 hotfix 三件事 —— ① ip2region v4 xdb 真实格式是「国家|省份|城市|ISP|国家代码」5 段（不是 v2 的「国家|大区|省份|城市|ISP」），geoip.Lookup 取错字段导致 city 显示成「联通/Google LLC」之类 ISP 名；② 部署事故复盘：MCP ssh-deploy-tool 的"删除远端多余文件"机制不受 excludes 约束，会把代码仓库内的 .env 当多余删掉，永久解决方案是把 .env 搬到 `/srv/cs-data/.env`（仓库外），install.sh 同步更新，docker compose 用 `--env-file /srv/cs-data/.env`；③ 启动/重启命令变更（INSTALL.md 已更新）。
+- **[062] 2026-05-26 v0.5.0**：全部移除按 IP 维度的限流（爷爷决策："去掉，不要了！"）。后端删 `limiter.HTTPMiddleware`（5 处）+ `AllowWSHandshake`（2 处）+ 自动拉黑机制；config 删 `IPHTTPRPM` / `IPWSHandshakePM` / `IPBlacklistThreshold` 三字段；.env.example 同步删；nginx 删 `limit_req_zone` / `limit_conn_zone`（4 个 zone + 4 个 location 引用）。保留：per-visitor 消息限流、JWT、bcrypt cost=12、CORS、SSL、SQL 注入启发式检测、AES-GCM 加密、所有审计日志。原因：集成方 NAT 后多设备同 IP 反复误封代价过高。
+- **[061] 2026-05-26 v0.4.1**：[060] hotfix —— ip2region v4 xdb 字段位修正（5 段格式「国家\|省份\|城市\|ISP\|国家代码」）+ .env 永久搬到 `/srv/cs-data/.env`（仓库外，避免 deploy 误删）。
 - **[060] 2026-05-26 v0.4.0**：访客地理位置离线解析（ip2region xdb 全内存索引，毫秒查询，零外部 API）。
-- **[059] 2026-05-26**：Admin 会话列表显示访客 IP（解密 ip_cipher）+ 地理位置坑位。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）
