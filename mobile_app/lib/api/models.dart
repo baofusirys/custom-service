@@ -37,6 +37,11 @@ class Conversation {
   // 最后一条消息预览（拉列表时填，WSS 实时也会维护）
   String lastMessageSender;  // 'agent' / 'visitor' / 'sys' / ''
   String lastMessagePreview; // 文本预览（图片/文件已替换为 [图片]/[文件]）
+  // [066] 同步后端 [065]：访客是否真正发过消息或拨打过 voice_call。
+  //   true  = 访客主动联系过（文字消息 or voice 通话 sys 事件）
+  //   false = 仅浏览 / 仅 page_navigation 等系统事件
+  // 后端 ListOpenConversations EXISTS 子查询给出，WSS chat fromVisitor 时本地也会置 true。
+  bool hasVisitorMsg;
 
   Conversation({
     required this.id,
@@ -51,6 +56,7 @@ class Conversation {
     this.referer = '',
     this.lastMessageSender = '',
     this.lastMessagePreview = '',
+    this.hasVisitorMsg = false,
   });
 
   factory Conversation.fromJson(Map<String, dynamic> j) {
@@ -74,8 +80,63 @@ class Conversation {
       referer: j['referer']?.toString() ?? '',
       lastMessageSender: lmSender,
       lastMessagePreview: lmContent,
+      // [066] snake_case → camelCase；后端旧版无此字段时默认 false（fallback 兜底见 isContacted）
+      hasVisitorMsg: j['has_visitor_msg'] == true,
     );
   }
+
+  /// [066] 可选输出（当前 mobile_app 无本地缓存场景，预留给未来持久化）。
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'visitor_id': visitorId,
+        'unread': unread,
+        'started_at': startedAt.toIso8601String(),
+        'updated_at': updatedAt.toIso8601String(),
+        'identifier': identifier,
+        'country': country,
+        'city': city,
+        'last_page': lastPage,
+        'referer': referer,
+        'has_visitor_msg': hasVisitorMsg,
+      };
+
+  /// [066] 复制并覆盖部分字段。注意 unread / hasVisitorMsg 是可变字段，
+  /// copyWith 仅在需要"快照式"克隆时使用；运行中通常直接改对象本身（与现有 openConv 等保持一致）。
+  Conversation copyWith({
+    String? id,
+    String? visitorId,
+    int? unread,
+    DateTime? startedAt,
+    DateTime? updatedAt,
+    String? identifier,
+    String? country,
+    String? city,
+    String? lastPage,
+    String? referer,
+    String? lastMessageSender,
+    String? lastMessagePreview,
+    bool? hasVisitorMsg,
+  }) {
+    return Conversation(
+      id: id ?? this.id,
+      visitorId: visitorId ?? this.visitorId,
+      unread: unread ?? this.unread,
+      startedAt: startedAt ?? this.startedAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      identifier: identifier ?? this.identifier,
+      country: country ?? this.country,
+      city: city ?? this.city,
+      lastPage: lastPage ?? this.lastPage,
+      referer: referer ?? this.referer,
+      lastMessageSender: lastMessageSender ?? this.lastMessageSender,
+      lastMessagePreview: lastMessagePreview ?? this.lastMessagePreview,
+      hasVisitorMsg: hasVisitorMsg ?? this.hasVisitorMsg,
+    );
+  }
+
+  /// [066] 与 admin Console.vue isContacted(c) 完全一致的兜底规则：
+  /// 后端 [065] 部署后 has_visitor_msg 字段权威；旧版接口期 unread>0 也归入「已联系」防误漏。
+  bool get isContacted => hasVisitorMsg || unread > 0;
 
   String get displayName => identifier.isNotEmpty
       ? identifier

@@ -49,6 +49,13 @@ class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindi
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    // [066] 同步 [065] admin Console「全部 / 已联系」过滤 tab。
+    final totalCount = state.convs.length;
+    final contactedCount = state.contactedCount;
+    final filterMode = state.filterMode.value;
+    final filtered = state.filteredConvs;
+    final isContactedMode = filterMode == 'contacted';
+
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -61,22 +68,58 @@ class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindi
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: () => state.refreshConvs()),
         ],
+        // [066] Material 3 原生 SegmentedButton，不写任何自定义样式
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(52),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<String>(
+                segments: [
+                  ButtonSegment<String>(
+                    value: 'all',
+                    label: Text('全部 ($totalCount)'),
+                    icon: const Icon(Icons.list_alt),
+                  ),
+                  ButtonSegment<String>(
+                    value: 'contacted',
+                    label: Text('已联系 ($contactedCount)'),
+                    icon: const Icon(Icons.chat_bubble_outline),
+                  ),
+                ],
+                selected: <String>{filterMode},
+                showSelectedIcon: false,
+                onSelectionChanged: (s) {
+                  if (s.isNotEmpty) state.setFilterMode(s.first);
+                },
+              ),
+            ),
+          ),
+        ),
       ),
       body: RefreshIndicator(
         onRefresh: () => state.refreshConvs(),
-        child: state.convs.isEmpty
+        child: filtered.isEmpty
             ? ListView(
-                children: const [
-                  SizedBox(height: 160),
-                  Center(child: Icon(Icons.inbox_outlined, size: 64, color: Colors.grey)),
-                  SizedBox(height: 12),
-                  Center(child: Text('暂无进行中的会话', style: TextStyle(color: Colors.grey))),
+                children: [
+                  const SizedBox(height: 160),
+                  const Center(child: Icon(Icons.inbox_outlined, size: 64, color: Colors.grey)),
+                  const SizedBox(height: 12),
+                  Center(
+                    child: Text(
+                      isContactedMode
+                          ? '暂无已联系访客（访客发首条消息后会出现）'
+                          : '暂无进行中的会话',
+                      style: const TextStyle(color: Colors.grey),
+                    ),
+                  ),
                 ],
               )
             : ListView.separated(
-                itemCount: state.convs.length,
+                itemCount: filtered.length,
                 separatorBuilder: (_, __) => const Divider(height: 1, indent: 72),
-                itemBuilder: (ctx, i) => _convTile(context, state.convs[i]),
+                itemBuilder: (ctx, i) => _convTile(context, filtered[i]),
               ),
       ),
     );

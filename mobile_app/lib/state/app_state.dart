@@ -25,6 +25,32 @@ class AppState extends ChangeNotifier {
   Conversation? activeConv;
   final List<Message> messages = [];
 
+  // [066] 「全部 / 已联系」过滤模式（同步 [065] admin Console 行为）。
+  //   'all'       : 所有进行中会话
+  //   'contacted' : 仅 hasVisitorMsg=true 或 unread>0 的会话（c.isContacted）
+  // 用 ValueNotifier 让 SegmentedButton 可以单独监听切换、避免整页 rebuild；
+  // 同时 AppState 改变时也会触发 ConversationsPage 的 Consumer 重渲染。
+  final ValueNotifier<String> filterMode = ValueNotifier<String>('all');
+
+  /// [066] 按 filterMode 过滤后的会话列表（UI 列表的真实数据源）。
+  List<Conversation> get filteredConvs {
+    if (filterMode.value == 'contacted') {
+      return convs.where((c) => c.isContacted).toList(growable: false);
+    }
+    return convs;
+  }
+
+  /// [066] 「已联系」计数（用于 SegmentedButton 上的 `已联系 (M)` 标签）。
+  int get contactedCount => convs.where((c) => c.isContacted).length;
+
+  /// [066] 切换 filter 并通知 UI；放在 AppState 上保持与 openConv 等行为一致。
+  void setFilterMode(String mode) {
+    if (mode != 'all' && mode != 'contacted') return;
+    if (filterMode.value == mode) return;
+    filterMode.value = mode;
+    notifyListeners();
+  }
+
   // ===== WSS =====
   AgentWS? _ws;
   bool get wsAlive => _ws?.isAlive ?? false;
@@ -66,6 +92,7 @@ class AppState extends ChangeNotifier {
   void dispose() {
     _authFailedSub?.cancel();
     _authFailedSub = null;
+    filterMode.dispose();
     super.dispose();
   }
 
@@ -370,12 +397,21 @@ class AppState extends ChangeNotifier {
     else if (preview.isEmpty && m.mediaUrl.isNotEmpty) preview = '[文件]';
     final senderTag = fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor');
 
+    // [066] 同步 [065] admin Console 规则：
+    //   - 访客文字 (fromVisitor)              → hasVisitorMsg=true（+ unread++ 仍走原逻辑）
+    //   - 访客 voice 通话事件 (fromSys + kind='voice') → hasVisitorMsg=true（不累计 unread）
+    //   - 其余 sys（page_navigation 等）        → 不动 hasVisitorMsg、不动 unread
+    final isVoiceSys = fromSys && kind == 'voice';
+
     if (activeConv != null && convId == activeConv!.id) {
       messages.add(m);
       // 同步更新当前会话的 lastMessage 预览
       activeConv!.lastMessageSender = senderTag;
       activeConv!.lastMessagePreview = preview;
       activeConv!.updatedAt = m.createdAt;
+      if (fromVisitor || isVoiceSys) {
+        activeConv!.hasVisitorMsg = true;
+      }
       if (fromVisitor) {
         _sendRead(convId);
         snd.playSound(agentSound);
@@ -390,7 +426,10 @@ class AppState extends ChangeNotifier {
       final c = convs[idx];
       if (fromVisitor) {
         c.unread++;
+        c.hasVisitorMsg = true;
         snd.playSound(agentSound);
+      } else if (isVoiceSys) {
+        c.hasVisitorMsg = true;
       }
       c.updatedAt = m.createdAt;
       c.lastMessageSender = senderTag;
@@ -401,6 +440,7 @@ class AppState extends ChangeNotifier {
       }
       notifyListeners();
     } else if (fromVisitor || fromSys) {
+      // 列表里还没有这个 conv → 拉接口（后端会带 has_visitor_msg=true 给前端）
       refreshConvs();
       if (fromVisitor) snd.playSound(agentSound);
     }

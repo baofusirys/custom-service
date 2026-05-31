@@ -4,6 +4,105 @@
 
 ---
 
+## [066] 2026-06-01 09:30 — mobile_app 同步「已联系」过滤 + has_visitor_msg 字段（对齐 [065]）· v0.6.2
+
+**起因 / 需求**
+
+[065] 已经在 backend + admin 落地「has_visitor_msg + 已联系 tab」，但 iOS / Android 客服 App（`mobile_app/`）还没跟上：
+
+1. mobile_app 调 `/api/agent/conversations` 拿到的 JSON 已经带 `has_visitor_msg` 字段，但 Dart 端 `Conversation` 模型不解析，字段被丢弃。
+2. App 工作台只能看到「全部进行中会话」，没有「已联系」过滤入口，跟 admin web 行为不一致——爷爷在手机上一样要扫一长串「沉默观察者」。
+3. WSS 实时收到访客首条消息时，本地 `Conversation` 对象不会同步置 `has_visitor_msg=true`，导致即便 App 后续支持过滤，新会话也不会立刻出现在「已联系」tab。
+
+不动 backend / admin / widget，只在 mobile_app 内三个文件实施。
+
+**根因分析**
+
+mobile_app 跟 admin 的状态层不一样：
+- admin Console.vue 直接读 `convs[i].has_visitor_msg`（JS 弱类型，后端字段 snake_case 直接用）
+- Dart 是强类型，需要在 model fromJson 里显式声明 + 解析 + 维护一个 camelCase 镜像字段
+- mobile_app **不依赖后端 `unread` 字段累计**，是 WSS 自己累的（`if (fromVisitor) c.unread++`，无 [065] 那个 sys 算未读的 bug），所以 `unread` 部分完全无需修——这是与 [065] backend 不同的地方
+- 客户端唯一需要新加的就是「在已有 fromVisitor 分支内追加 `c.hasVisitorMsg=true`」+「sys voice 事件也置 true」
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 新增功能 3 个（hasVisitorMsg 字段 / filterMode 状态 / SegmentedButton UI），修改文件 3 个
+
+### A. `mobile_app/lib/api/models.dart` —— Conversation 模型扩字段
+
+- 新增可变字段 `bool hasVisitorMsg`（默认 false）
+- 构造函数加 named 参数 `this.hasVisitorMsg = false`
+- `fromJson` 解析 `j['has_visitor_msg'] == true`（snake → camel，旧版后端没下发也兼容回 false）
+- 新增 `toJson()`（为未来本地缓存预留，当前无消费方）
+- 新增 `copyWith(...)`（含全部字段，符合 Dart 不可变约定）
+- 新增 getter `bool get isContacted => hasVisitorMsg || unread > 0`，与 admin Console.vue `isContacted(c)` 兜底逻辑完全一致
+
+### B. `mobile_app/lib/state/app_state.dart` —— 过滤状态 + WSS 维护 hasVisitorMsg
+
+- 新增 `ValueNotifier<String> filterMode`（'all' / 'contacted'）
+- 新增 getter `List<Conversation> filteredConvs`、`int contactedCount`
+- 新增 `void setFilterMode(String mode)`（带白名单校验 + notifyListeners）
+- `dispose()` 中清理 filterMode
+- WSS `_onEnvelope` type=chat 分支：在当前会话 + 非当前会话两个 branch 的 `fromVisitor` 块都追加 `conv.hasVisitorMsg = true`
+- 新增 `isVoiceSys = fromSys && kind == 'voice'` 判定：voice 通话事件也置 `hasVisitorMsg=true`（**不**累计 unread，与 [065] 后端 EXISTS 子查询规则一致）
+- 不动 unread 累计逻辑（mobile_app 本来就只在 fromVisitor 才 ++，无 [065] 那个 bug）
+- 不动 read 同步、不动 multi-device 去重、不动 [051] 0ms 切换体验
+
+### C. `mobile_app/lib/pages/conversations_page.dart` —— SegmentedButton UI
+
+- build() 顶部新增 `totalCount / contactedCount / filterMode / filtered / isContactedMode` 局部变量
+- `AppBar.bottom` 加 `PreferredSize` 装 Material 3 原生 `SegmentedButton<String>`（**零自定义样式**，符合爷爷铁律）
+- 两个 segment：`全部 (N)` / `已联系 (M)`，运行时实数
+- `onSelectionChanged` → `state.setFilterMode(...)`
+- ListView 数据源由 `state.convs` 改成 `filtered`
+- 空态文案根据 `isContactedMode` 切换：「暂无已联系访客（访客发首条消息后会出现）」/「暂无进行中的会话」
+- 保持 [050] 生命周期 refresh、[051] 0ms openConv、[063] mark-read 不变
+
+### 未改动文件（严格边界）
+
+- backend / admin / widget / nginx / docker-compose 全部不动
+- mobile_app 其他页面（chat_page、history_page、me_page、agents_page、settings_page、voice 等）不动
+- 当前会话 `activeConv` 详情页（chat_page）不动，因为已联系状态只影响列表过滤
+
+**业务流程对比**
+
+| 场景 | 改动前 mobile_app | 改动后 mobile_app |
+| --- | --- | --- |
+| App 启动 → 拉 `/api/agent/conversations` | 解析 unread / location / lastMessage，丢弃 has_visitor_msg | 解析全部字段，hasVisitorMsg 进入内存 |
+| 工作台只想看「主动联系过的」 | 无此功能，必须人工扫整个列表 | 顶部 SegmentedButton 切「已联系 (M)」，0 网络请求 |
+| 访客发首条文字 | unread+1 + 上浮（已正确） | unread+1 + 上浮 + hasVisitorMsg=true，立刻出现在「已联系」tab |
+| 访客 voice 通话 sys 事件 | 不动 unread（正确）但 hasVisitorMsg 也不会变 true | 不动 unread + hasVisitorMsg=true，进入「已联系」tab |
+| 访客只浏览触发 page_navigation | 仅刷 updatedAt（正确） | 仅刷 updatedAt，hasVisitorMsg 保持 false，「已联系」tab 看不见 |
+| App 切到「已联系」后下拉刷新 | N/A | filter 存内存 ValueNotifier，refresh 不丢状态 |
+
+**触发场景与边界 + 验证方式**
+
+**触发场景**：
+- 拉接口：`Conversation.fromJson` 解析 `has_visitor_msg` → 列表立刻知道哪些访客「已联系」
+- WSS chat fromVisitor：本地 hasVisitorMsg=true → 「已联系 (M)」计数 +1（即便后端 EXISTS 慢一拍）
+- WSS chat from sys + kind=voice：同上（与 [065] 后端 EXISTS 子查询的 `sender_ref='voice'` 对齐）
+
+**不触发**：
+- agent 自己发消息 → hasVisitorMsg 不变（设计上「已联系」只看访客侧动作）
+- page_navigation / visitor_enter / 其他 sys 事件 → hasVisitorMsg 不变
+- 历史 closed 会话列表不显示（已由后端 ListOpenConversations 过滤）
+
+**边界**：
+- 后端旧版未升 [065]：`has_visitor_msg` 字段缺失，Dart 默认 false → `isContacted` getter 回落到 `unread > 0` 兜底，仍能基本工作
+- 多端同步：filter 状态只存内存（与 admin 行为一致），不上 storage，App 重启回到「全部」
+- 多端 read 同步、unread 同步、0ms 切换、12h token 刷新（[064]）一律不受影响
+- copyWith 加上但 mobile_app 当前没人用，给未来本地缓存留接口
+
+**验证方式**：
+1. `cd mobile_app && flutter analyze` —— 期望零 error / 零 warning（本地 Windows 若无 flutter 工具链则在 Mac/CI 上跑）
+2. 拉接口后断点看 `state.convs[0].hasVisitorMsg`：后端 [065] 部署后应能拿到 true/false
+3. UI 看 SegmentedButton：`全部 (N)` 与 `已联系 (M)` 数字会随 WSS 消息实时变化
+4. 切「已联系」tab：列表只剩 `isContacted == true` 的会话
+5. 访客只浏览不发消息 → App 「已联系」tab 看不到该 conv，「全部」tab 看得到
+6. 访客发首条「你好」→ 「已联系」tab 立刻多一条（不等 HTTP refresh）
+
+---
+
 ## [065] 2026-05-27 04:00 — 修复未读 badge=2 但实际只有 1 条访客消息 + 新增「已联系」过滤 tab · v0.6.1
 
 **起因 / 需求**
