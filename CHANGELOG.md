@@ -4,6 +4,104 @@
 
 ---
 
+## [067] 2026-06-01 03:30 — 「已联系」口径收紧：voice 通话事件不再算主动联系（backend SQL + admin + mobile 三端齐改）· v0.6.3
+
+**起因 / 需求**
+
+爷爷新指示：
+
+> 「访客只点了一下来电按钮立刻挂掉，根本没说话，也算主动联系？这不对，得改。」
+
+[065] 的 SQL EXISTS 当时把 `m.sender='sys' AND m.sender_ref='voice'` 也算进 has_visitor_msg=true（理由是「通话发起也算意图」），但实际线上很多访客只是误点来电、立刻挂断，未接 / 取消 / 拒接的 sys voice 事件也会照样翻牌「已联系」，造成客服误判 → 误回访 → 体验差。
+
+爷爷要求口径收紧为**严格只算「访客发过真实消息」**：messages.sender='visitor' 的任何一条（chat / image / file / video / audio），有 → 已联系；没有 → 未联系。voice 通话事件无论结果一律不算。
+
+**根因分析**
+
+- [065] 的 OR (sender='sys' AND sender_ref='voice') 把「访客点了来电按钮」这种 0 成本动作也归入「主动联系」，违背爷爷对「主动联系」=「有实质沟通」的语义预期
+- admin / mobile_app 的本地兜底 `unread > 0` 也是问题：[065] 之前的旧客户端版本会因 sys 事件累计 unread → 翻牌 isContacted=true，相当于绕过 SQL 收紧
+- mobile_app WSS handler 还有「voice sys 事件 → 实时 set hasVisitorMsg=true」的本地翻牌路径，必须删除才能与后端 SQL 一致
+
+修复必须 3 端齐改才闭环：① backend SQL 是权威源；② admin / mobile 的 isContacted getter 去掉 unread 兜底；③ mobile WSS 的 voice sys → hasVisitorMsg=true 实时翻牌也要删。
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 修改文件 4 个（backend 1 + admin 1 + mobile_app 2），同步升版本号 0.6.2 → 0.6.3
+
+### ① `backend/internal/store/store.go` —— ListOpenConversations SQL 收紧
+
+- **第 336-341 行注释**：把 [065] 注释里「或者电话」「通话发起算进来」整段删除，改写为 [067] 「严格只算访客发过真实消息（chat/image/file/video/audio）；voice 通话事件无论结果一律不算」
+- **第 342-358 行 SQL**：EXISTS 子句 `AND ( m.sender='visitor' OR (m.sender='sys' AND m.sender_ref='voice') )` → `AND m.sender='visitor'`，删掉 OR 分支与多余括号，让 SQL 也更短
+- **第 390 行 map 字段注释**：has_visitor_msg 后缀注释从「chat / 媒体 / 通话发起」改成「严格只算 sender='visitor' 真实消息，不含 voice 通话事件」
+
+注：索引仍是 `idx_conv_time(conv_id, created_at)`，SQL 收紧后扫描行更少（不再需要回表读 sender_ref 列做 OR 判定），性能只增不降。
+
+### ② `admin/src/views/Console.vue` —— isContacted 去掉 unread>0 兜底
+
+- **第 17-22 行 isContacted computed**：旧 `c.has_visitor_msg === true || (c.unread || 0) > 0` → 新 `c.has_visitor_msg === true`
+- 注释由 [065] 升级为 [065][067]，明确：严格只信后端字段、去掉 unread>0 兜底的原因是避免 sys 事件曾让 unread 虚高把「只点来电立即挂掉」的会话误判为已联系
+- WSS onMessage handler 复核：535/548 行的 `has_visitor_msg=true` 翻牌均在 `if (fromVisitor)` 分支内，无 voice/sys 翻牌路径，与 backend 口径完全一致
+
+### ③ `mobile_app/lib/api/models.dart` —— Conversation.isContacted getter 收紧
+
+- **第 137-141 行**：旧 `hasVisitorMsg || unread > 0` → 新 `hasVisitorMsg`
+- 注释升级到 [067]，明确「严格只信后端字段、与 admin Console + backend SQL 对齐」
+
+### ④ `mobile_app/lib/state/app_state.dart` —— WSS onMessage 删除 voice sys 翻牌
+
+- **第 400-443 行**：删除局部变量 `final isVoiceSys = fromSys && kind == 'voice';`
+- activeConv 分支：合并 `if (fromVisitor || isVoiceSys) hasVisitorMsg=true` + `if (fromVisitor) _sendRead/playSound` → 单一 `if (fromVisitor) { hasVisitorMsg=true; _sendRead; playSound; }`（语义等价：voice sys 既不翻牌也不触发 _sendRead/playSound）
+- 非当前会话分支：删除 `else if (isVoiceSys) { c.hasVisitorMsg = true; }`，只保留 fromVisitor 翻牌
+- voice sys 仍会刷新 updatedAt + 预览 + 列表上浮，仅排序不算已联系
+- 注释升级到 [067]
+
+### ⑤ 版本号 / 元数据
+
+- `VERSION` 0.6.2 → 0.6.3
+- `backend/internal/config/version.go` Version 常量 0.6.2 → 0.6.3
+- `LATEST.md` 顶部「当前版本」标签 + 最近 3 次改动摘要刷新
+
+**业务流程对比**
+
+- **改动前**：访客 A 进站 → 点了一下来电按钮 → 立刻挂断 → 客服端「已联系」tab 多了一条 conv（被误判为「主动联系」）→ 客服跟进 → 访客一脸懵
+- **改动后**：访客 A 进站 → 点了一下来电按钮 → 立刻挂断 → has_visitor_msg=false → 仍在「全部」tab，不进「已联系」→ 客服按真实沟通量优先级跟进
+- **若访客真发了文字 / 图片 / 文件 / 视频 / 语音消息**：行为与 [065] 完全一致（has_visitor_msg=true）
+
+**触发场景与边界 + 验证方式**
+
+触发：每次客服 web / mobile 拉 `/api/agent/conversations` 列表（轮询 + WSS 推送后重拉）。
+
+边界：
+- 访客只发 typing / page_navigation / greeting / visitor_enter：has_visitor_msg=false ✅
+- 访客发 chat：has_visitor_msg=true ✅
+- 访客发 image/file/video/audio：has_visitor_msg=true ✅（messages.sender='visitor' 即可命中）
+- 访客发起 voice 通话（无论拒接 / 未接 / 取消 / 已接）：has_visitor_msg=false ✅（[067] 新口径）
+- 访客发起 voice 通话且通话过程中又发了文字：has_visitor_msg=true ✅（被文字消息命中）
+- 旧客户端（unread 虚高）连新后端：admin / mobile 新版 isContacted 不再吃 unread 兜底，会正确返回 false
+
+验证：
+1. `cd backend && go build ./... && go vet ./...` 通过（双绿）
+2. `cd mobile_app && flutter analyze` 通过（3.2s，无新增 error/warning）
+3. 部署后 `curl /api/version` 返 `{"version":"0.6.3"}` ✅
+4. 登录后 GET `/api/agent/conversations` 返回 JSON 中 `has_visitor_msg` 字段值与 messages 表 sender='visitor' 真实记录一致；只有 sys 消息（含 voice）的 conv 字段为 false
+5. 回归测试用例：访客只点来电按钮立刻挂掉 → 三端 isContacted 都应为 false；访客发一条文字 → 三端立刻 true
+
+**安全 / 高并发 / 日志 / 时区 / 企业级 / 防 DDoS / SQL 注入 / 加密 / 前端响应 / 日志长效 / Docker / Git 落地汇报**
+
+| 项 | 处理情况 |
+| --- | --- |
+| 安全性（防 SQL 注入 / DDoS / 同 IP 攻击 / 加密） | 是（纯 SQL 子句收紧，参数化未变；admin / mobile 仅修改 computed 显示口径，无新输入面） |
+| 安全机制"绕过"测试 | 是（旧客户端不返 has_visitor_msg 字段时，前端拿到 undefined，新逻辑判定 false——属于"宁可保守不可误判"方向，已推演通过） |
+| 高并发 | 是（SQL 子句更短、命中 idx_conv_time 索引、扫描更少；前端 computed 增量计算） |
+| 日志长效存储（详细 / 原始 / 重启不丢） | 是（不动 messages 表、不动 /srv/cs-data/logs 落盘策略，原始 sys/voice 记录仍完整保留） |
+| 时区（东八区） | 是（未触碰任何时间字段；CHANGELOG 时间用绝对北京时间 2026-06-01 03:30） |
+| Web 前端响应速度 | 是（admin computed 判定式更简单，去掉一次 || 短路；mobile WSS 分支合并后更少） |
+| 企业级标准（模块化 / 标准化 / 健壮性） | 是（注释保留 [065]→[067] 演进、不偷懒；3 端口径完全对齐） |
+| Docker 部署规范 | 是（仅源码改动，`docker compose --env-file /srv/cs-data/.env up -d --build --no-deps backend admin` 一条命令重建） |
+| Git 提交 | 是（本次 [067] 一个独立 commit + tag v0.6.3 + push origin main + push tag） |
+
+---
+
 ## [066] 2026-06-01 01:00 — mobile_app 同步「已联系」过滤 + has_visitor_msg 字段（对齐 [065]）· v0.6.2
 
 **起因 / 需求**

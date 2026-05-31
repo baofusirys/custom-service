@@ -134,9 +134,11 @@ class Conversation {
     );
   }
 
-  /// [066] 与 admin Console.vue isContacted(c) 完全一致的兜底规则：
-  /// 后端 [065] 部署后 has_visitor_msg 字段权威；旧版接口期 unread>0 也归入「已联系」防误漏。
-  bool get isContacted => hasVisitorMsg || unread > 0;
+  /// [067] 口径收紧：「已主动联系」严格只信后端 has_visitor_msg 字段。
+  /// 与 admin Console.vue isContacted(c) 完全对齐 — 只有访客真实发言（messages.sender='visitor'）
+  /// 才算「已联系」；voice 通话事件（含拒接 / 未接 / 取消）和 unread 兜底都不再计入。
+  /// 原因：sys 事件曾导致 unread 虚高 → 误判已联系；现已严格收口到访客真消息。
+  bool get isContacted => hasVisitorMsg;
 
   String get displayName => identifier.isNotEmpty
       ? identifier

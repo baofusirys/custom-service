@@ -14,12 +14,12 @@ dayjs.locale('zh-cn')
 
 const session = useSession()
 const convs = ref([])
-// [065] 客服列表过滤模式：'all' 全部 / 'contacted' 已主动联系
-// 「已主动联系」判定：后端字段 has_visitor_msg（兜底用 unread > 0 也算）
-// 由后端 SQL EXISTS 计算（messages.sender='visitor' OR sender='sys' AND sender_ref='voice'）
+// [065][067] 客服列表过滤模式：'all' 全部 / 'contacted' 已主动联系
+// 「已主动联系」判定：严格只信后端字段 has_visitor_msg
+// 由后端 SQL EXISTS 计算（[067] 收紧为 messages.sender='visitor' 真实消息，voice/sys 事件不再算）
+// [067] 去掉 unread>0 兜底：避免 sys 事件曾让 unread 虚高 → 把"只点了来电立即挂掉"的会话误判为已联系
 const filterMode = ref('all')
-const isContacted = (c) =>
-  c.has_visitor_msg === true || (c.unread || 0) > 0
+const isContacted = (c) => c.has_visitor_msg === true
 const contactedCount = computed(
   () => convs.value.filter(isContacted).length
 )

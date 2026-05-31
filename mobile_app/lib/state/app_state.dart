@@ -397,11 +397,11 @@ class AppState extends ChangeNotifier {
     else if (preview.isEmpty && m.mediaUrl.isNotEmpty) preview = '[文件]';
     final senderTag = fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor');
 
-    // [066] 同步 [065] admin Console 规则：
+    // [067] 口径收紧：voice 通话事件不再算「已主动联系」。
     //   - 访客文字 (fromVisitor)              → hasVisitorMsg=true（+ unread++ 仍走原逻辑）
-    //   - 访客 voice 通话事件 (fromSys + kind='voice') → hasVisitorMsg=true（不累计 unread）
+    //   - 访客 voice 通话事件 (fromSys + kind='voice') → 仅刷新预览/排序，不动 hasVisitorMsg、不动 unread
     //   - 其余 sys（page_navigation 等）        → 不动 hasVisitorMsg、不动 unread
-    final isVoiceSys = fromSys && kind == 'voice';
+    // 与 admin Console + 后端 SQL EXISTS 严格对齐：只有 messages.sender='visitor' 才翻牌。
 
     if (activeConv != null && convId == activeConv!.id) {
       messages.add(m);
@@ -409,10 +409,8 @@ class AppState extends ChangeNotifier {
       activeConv!.lastMessageSender = senderTag;
       activeConv!.lastMessagePreview = preview;
       activeConv!.updatedAt = m.createdAt;
-      if (fromVisitor || isVoiceSys) {
-        activeConv!.hasVisitorMsg = true;
-      }
       if (fromVisitor) {
+        activeConv!.hasVisitorMsg = true;
         _sendRead(convId);
         snd.playSound(agentSound);
       }
@@ -428,9 +426,8 @@ class AppState extends ChangeNotifier {
         c.unread++;
         c.hasVisitorMsg = true;
         snd.playSound(agentSound);
-      } else if (isVoiceSys) {
-        c.hasVisitorMsg = true;
       }
+      // [067] voice sys 不再翻 hasVisitorMsg；只走下面的 updatedAt / 预览刷新 + 上浮
       c.updatedAt = m.createdAt;
       c.lastMessageSender = senderTag;
       c.lastMessagePreview = preview;

@@ -334,21 +334,18 @@ func (s *Store) ListOpenConversations(ctx context.Context, limit int) ([]map[str
 	// [059] 顺手把 v.ip_cipher 也 SELECT 出来（handler 层解密成明文 IP 给客服看
 	// 「访客 IP + 地理位置」一目了然，会话列表选客户体验提升）
 	// [065] 增加 has_visitor_msg 字段：访客是否「主动联系过客服」
-	//   判定 = messages 表中存在 sender='visitor'（真实发言）或 sender='sys' AND sender_ref='voice'
-	//          （访客发起的语音通话结束消息：含拒接 / 未接 / 取消）。
+	// [067] 口径收紧：严格只算「访客发过真实消息」（messages.sender='visitor'，
+	//   即 chat / image / file / video / audio 任一访客侧消息），
+	//   不再把 sys voice 通话事件（拒接 / 未接 / 取消 / 已接）算成「主动联系」。
+	//   理由：访客只是点了来电按钮立刻挂掉，不应被视为已联系；爷爷新需求明确收紧。
 	//   EXISTS + idx_conv_time(conv_id, created_at) 索引命中：O(log N)，200 conv 毫秒级。
-	//   爷爷需求："主动给客服发了消息或者电话" — "或者电话"明确要求把通话发起算进来。
-	//   排除：page_navigation / greeting / visitor_enter / typing / voice 信令（不算主动联系）。
+	//   排除：page_navigation / greeting / visitor_enter / typing / voice 信令与通话事件（均不算主动联系）。
 	rows, err := s.db.QueryContext(ctx, `
 SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_at,
        v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher,
        EXISTS(
          SELECT 1 FROM messages m
-         WHERE m.conv_id = c.id
-           AND (
-             m.sender = 'visitor'
-             OR (m.sender = 'sys' AND m.sender_ref = 'voice')
-           )
+         WHERE m.conv_id = c.id AND m.sender = 'visitor'
          LIMIT 1
        ) AS has_visitor_msg
 FROM conversations c
@@ -387,7 +384,7 @@ LIMIT ?`, limit)
 			"last_page":       nullStr(page),
 			"referer":         nullStr(ref),
 			"ip_cipher":       nullStr(ipCipher), // [059] handler 层会解密成 ip 明文并删掉这个字段
-			"has_visitor_msg": hasVisitorMsg,     // [065] 访客是否主动联系过（chat / 媒体 / 通话发起）
+			"has_visitor_msg": hasVisitorMsg,     // [065][067] 访客是否主动联系过（严格只算 sender='visitor' 真实消息，不含 voice 通话事件）
 		})
 	}
 	if err := rows.Err(); err != nil {
