@@ -1,4 +1,4 @@
-### 当前版本：v0.6.0 · 2026-05-27
+### 当前版本：v0.6.1 · 2026-05-27
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -68,9 +68,9 @@
 ```
 
 ## 最近 3 次重大改动摘要
+- **[065] 2026-05-27 v0.6.1**：修复 admin 未读 badge=2 但实际只有 1 条访客消息的虚高问题 + 新增「已联系」过滤 tab。根因：`store.InsertMessage` 默认把所有非 agent 消息（包含 sys 类型的 page_navigation / voice_call 状态事件）都累加到 `unread_agent`，导致客服看到 badge 数字比真实访客消息多。改动：① `backend/internal/store/store.go InsertMessage` 末尾改成 switch m.Sender 显式三分支（visitor / agent / sys / default），sys 只刷 updated_at 不算未读；② 新建 `backend/migrations/006_recalibrate_unread_agent.sql` 用 LEFT JOIN 子查询按 last_read_agent_at 之后的真实 visitor 消息数校准历史数据，启动时自动跑；③ `ListOpenConversations` SELECT 加 EXISTS 子查询返 `has_visitor_msg` 字段透传到 `/api/agent/conversations` JSON；④ `admin/src/views/Console.vue` 加 filterMode ref + 「全部 / 已联系」segmented el-radio-group + computed filteredConvs 客户端过滤 0 网络请求；WSS 收 fromVisitor chat 时实时 set has_visitor_msg=true。边界：部署后 badge 可能从虚高 5 突降到真实 1，正常修正。
 - **[064] 2026-05-27 v0.6.0**：解决集成方 fakami 商城反馈 [068] iOS 客服 App 12h token 过期后 401 死循环 7 小时不停的严重问题。同模式 [054]/[058] 的 token 续期版。改动：① backend 新增 `/api/agent/login/refresh` endpoint（grace 24h，agent 仍 active 校验，audit log）+ `security.ParseAgentTokenAllowExpired` + 区分 `ErrTokenExpired/ErrTokenInvalid/ErrTokenMalformed` 错误类型，middleware/AgentAuth/AgentWS handler 返回 code=40102（expired）/40103（invalid）让客户端区分；② mobile_app `http_client.dart` 加 Dio 401 interceptor + refresh lock + authFailedStream；③ `ws_client.dart` token 改可变 + 连接前主动检查 exp < 5min refresh + isConnecting 锁；④ `app_state.dart` 订阅 authFailedStream 自动 logout 走 Consumer 路由跳 LoginPage；⑤ admin Vue `http.js` / `ws.js` 同样模式 401 interceptor + refresh。
 - **[063] 2026-05-26 v0.5.1**：admin 工作台点击会话「标记已读慢 2-3 秒」体感优化（乐观 UI + 并行 RPC）。
-- **[062] 2026-05-26 v0.5.0**：全部移除按 IP 维度的限流（爷爷决策："去掉，不要了！"）。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）

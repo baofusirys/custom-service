@@ -4,6 +4,140 @@
 
 ---
 
+## [065] 2026-05-27 04:00 — 修复未读 badge=2 但实际只有 1 条访客消息 + 新增「已联系」过滤 tab · v0.6.1
+
+**起因 / 需求**
+
+爷爷 2026-05-27 03:50 反馈两条关联问题：
+
+1. **badge 数字虚高**：admin 工作台某会话 unread badge 显示 `2`，但点进去发现真实访客消息只有 1 条文字，另外一条是 `sys` 类型的「访客访问了 Cursor账号」页面跳转事件——客服看到 badge=2 会以为「漏看了一条」，实际并没有漏。
+2. **想看「主动联系过客服」的访客分类**：工作台「进行中」tab 里现在把所有 `status='open'` 的会话都列出来（包含访客只是打开了 widget 还没说话的「沉默观察者」）。爷爷想要一个开关，只看「真正发过消息或拨打过 voice_call 的」访客，省时间。
+
+**根因分析**
+
+`backend/internal/store/store.go` 的 `InsertMessage` 末尾用字符串拼接判定写哪个未读列：
+
+```go
+col := "unread_visitor"   // 旧代码默认
+if m.Sender == "visitor" {
+    col = "unread_agent"  // 旧代码只判定 visitor，其余统统走 unread_agent
+}
+```
+
+→ 当 `sender='sys'`（页面跳转、voice_call 状态等系统事件）时，`m.Sender != "visitor"` 条件不成立，于是 col 保持默认 `unread_visitor`——**等等，看反了**，重新读代码：原代码实际是 `col := "unread_agent"; if m.Sender == "agent" { col = "unread_visitor" }`，所以 sys 走 `unread_agent +1`，**这才是 badge 虚高的根因**。
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 新增功能 2 个（has_visitor_msg 字段 / 已联系过滤 tab），修改文件 2 个，新增迁移 1 个
+
+### A. backend：`store.go` 显式 switch 三分支 + 历史数据迁移 SQL
+
+#### A1. `backend/internal/store/store.go` `InsertMessage` 末尾
+
+把 col 字符串拼接重写成显式 switch，**sys 不再累加未读**：
+
+```go
+switch m.Sender {
+case "visitor":
+    // 访客发的消息 → 客服侧未读 +1
+case "agent":
+    // 客服发的消息 → 访客侧未读 +1
+case "sys":
+    // 系统事件（页面跳转 / voice_call 状态 / 通知）只刷新 updated_at，不算未读
+default:
+    // 防御性兜底：未来新增 sender 类型默认不算未读，避免污染
+}
+```
+
+- 全程参数化 SQL（`?` 占位符），杜绝注入。
+- default 分支防御性兜底：未来新增 sender 类型不会再静默污染未读计数。
+
+#### A2. `backend/migrations/006_recalibrate_unread_agent.sql`（新建）
+
+两条对称 `UPDATE...LEFT JOIN` 子查询脚本，**修复历史虚算数据**：
+
+- 第一条：按「`last_read_agent_at`（NULL → started_at）之后的真实 visitor 消息条数」校准 `unread_agent`
+- 第二条：对称校准 `unread_visitor` 防对称 bug
+- 仅处理 `status='open'`（量级 < 1000，毫秒级），无 DDL，幂等
+
+迁移机制确认：`backend/internal/db/migrate.go` 启动时按文件名字典序扫描 `migrations/*.sql`，`schema_migrations` 表记录已应用版本，自动跳过；`006_` 文件名排在 `005_` 之后，启动会自动执行 → docker compose up -d --build 一条命令搞定。
+
+### B. backend：`ListOpenConversations` 加 `has_visitor_msg` 字段
+
+#### B1. `backend/internal/store/store.go` `ListOpenConversations`
+
+SELECT 子句追加 `EXISTS` 子查询计算 `has_visitor_msg`：
+
+```sql
+EXISTS (
+  SELECT 1 FROM messages m
+  WHERE m.conv_id = c.id
+    AND (m.sender = 'visitor' OR (m.sender = 'sys' AND m.sender_ref = 'voice'))
+) AS has_visitor_msg
+```
+
+- 走 `idx_conv_time(conv_id, created_at)` 索引，单会话 O(log N)
+- Scan 增加 `hasVisitorMsg bool` 接收 TINYINT(1)
+- map 透传 `has_visitor_msg` 给 handler → 自动出现在 `/api/agent/conversations` JSON 响应
+
+#### B2. handler 无需改
+
+`backend/internal/handler/http.go` 用的是 `map[string]any` 透传，自动包含新字段。
+
+### C. admin Vue：「全部 / 已联系」segmented filter tab
+
+#### C1. `admin/src/views/Console.vue`
+
+- script setup 新增：
+  - `filterMode` ref（`'all'` / `'contacted'`）
+  - `isContacted(c)` 函数：`c.has_visitor_msg === true || (c.unread || 0) > 0`（兜底防后端旧版没下发字段）
+  - `contactedCount` / `filteredConvs` computed
+- WSS `onMessage` 两个分支（`inCurrent` / 非当前会话）的 `fromVisitor` 块追加 `conv.has_visitor_msg = true`，让 `contactedCount` 实时 +1
+- 模板 aside-header 在 stats 之后插入 segmented `el-radio-group` + `el-radio-button`（Element Plus 2.x 原生样式，零自定义 CSS）
+- 列表 `v-for` 渲染源 `convs` → `filteredConvs`
+- `el-empty` 描述按 filterMode 动态切换为「暂无主动联系过客服的访客」或「暂无进行中的会话」
+
+### 未改动文件（严格边界）
+
+- `backend/cmd/server/main.go` / `backend/internal/service/*.go` / `backend/internal/ws/hub.go` 不动
+- `backend/internal/handler/http.go` 不动（map[string]any 自动透传）
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 访客只打开 widget 没说话，但页面跳转触发 sys 消息 | badge=1（虚高）+ 会话进「进行中」列表 | badge=0 + 会话默认在「全部」tab，「已联系」tab 不显示 |
+| 访客发 1 条「你好」 | badge=2（实际只看到 1 条） | badge=1（一致）+ 会话进「已联系」tab |
+| 访客拨打 voice_call（接通 / 未接） | badge=N（sys 事件计入） | badge 只算真实 visitor 文字消息 + 会话进「已联系」tab（voice 通话也算「主动联系」） |
+| 客服切到「已联系」tab | 无此功能，必须人工扫整个列表 | 一键过滤，只看真正发过消息或打过电话的访客 |
+
+**触发场景与边界 + 验证方式**
+
+**触发场景**：
+- 访客在 widget 输入文字（sender='visitor'）→ unread_agent +1，has_visitor_msg=true
+- 客服发消息（sender='agent'）→ unread_visitor +1，has_visitor_msg 不变
+- 系统事件 page_navigation / voice_call 状态（sender='sys'）→ 不累加未读
+- 访客发起 voice_call（sender='sys', sender_ref='voice'）→ has_visitor_msg=true（算主动联系）
+
+**不触发**：
+- 历史 closed 会话的 unread 字段不动（客服不再看）
+- agent 自己发消息不会让 has_visitor_msg 变 true
+
+**边界**：
+- 部署后客服 badge 数字可能突然变小（5 → 1）→ **属正常修正历史虚算，不是丢数据**
+- has_visitor_msg=false 但 unread>0 的「中间态」走 fallback 兜底，仍归入「已联系」（防后端旧版兼容期错分类）
+- 迁移脚本只校准 status='open'，已 closed 历史会话不动
+
+**验证方式**：
+1. `go build ./... && go vet ./...` 在 backend 目录执行：零输出零警告
+2. 部署后 `GET /api/version` 返 `0.6.1`
+3. `SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 3` 包含 `006`
+4. `GET /api/agent/conversations` JSON 每个 conv 含 `has_visitor_msg: true|false`
+5. admin Console 切「已联系」tab，列表只剩 has_visitor_msg=true 或 unread>0 的会话
+6. 真实访客只发 page_navigation（sys）不发消息 → badge 保持 0
+
+---
+
 ## [064] 2026-05-27 03:30 — 修复 [068] iOS 客服 App 12h token 过期后 401 死循环（同模式 [054]/[058] 的 token 续期版）· v0.6.0
 
 **起因 / 需求**

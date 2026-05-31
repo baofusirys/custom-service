@@ -14,6 +14,20 @@ dayjs.locale('zh-cn')
 
 const session = useSession()
 const convs = ref([])
+// [065] 客服列表过滤模式：'all' 全部 / 'contacted' 已主动联系
+// 「已主动联系」判定：后端字段 has_visitor_msg（兜底用 unread > 0 也算）
+// 由后端 SQL EXISTS 计算（messages.sender='visitor' OR sender='sys' AND sender_ref='voice'）
+const filterMode = ref('all')
+const isContacted = (c) =>
+  c.has_visitor_msg === true || (c.unread || 0) > 0
+const contactedCount = computed(
+  () => convs.value.filter(isContacted).length
+)
+const filteredConvs = computed(() =>
+  filterMode.value === 'contacted'
+    ? convs.value.filter(isContacted)
+    : convs.value
+)
 const activeConv = ref(null)
 const messages = ref([])
 const draft = ref('')
@@ -518,6 +532,7 @@ onMounted(async () => {
         }
         // 访客发到当前会话：发 WSS read 通知访客「客服已读」+ 播声
         if (fromVisitor) {
+          activeConv.value.has_visitor_msg = true   // [065] 当前会话也实时翻成「已联系」
           sendReadAck(env.conv)
           playSound(agentSound.value)
         }
@@ -530,6 +545,7 @@ onMounted(async () => {
         // 只有访客的消息才 +1 未读 + 播声；其他客服/sys 发的只更新活动时间 + 上浮
         if (fromVisitor) {
           conv.unread = (conv.unread || 0) + 1
+          conv.has_visitor_msg = true   // [065] 实时把会话从「未联系」翻成「已联系」
           playSound(agentSound.value)
         }
         conv.updated_at = new Date(env.ts || Date.now()).toISOString()
@@ -794,13 +810,27 @@ function voiceCleanup() {
             <el-statistic title="在线客服" :value="onlineStats.agents" />
           </el-col>
         </el-row>
+        <!-- [065] 会话过滤 tab：全部 / 仅主动联系过的访客 -->
+        <div class="aside-filter" style="margin-top:8px">
+          <el-radio-group v-model="filterMode" size="small" style="width:100%">
+            <el-radio-button value="all" style="width:50%;text-align:center">
+              全部 ({{ convs.length }})
+            </el-radio-button>
+            <el-radio-button value="contacted" style="width:50%;text-align:center">
+              已联系 ({{ contactedCount }})
+            </el-radio-button>
+          </el-radio-group>
+        </div>
       </div>
       <el-divider style="margin:0" />
       <el-scrollbar class="conv-scroll">
-        <el-empty v-if="!convs.length" description="暂无进行中的会话" :image-size="80" />
+        <el-empty
+          v-if="!filteredConvs.length"
+          :description="filterMode==='contacted' ? '暂无主动联系过客服的访客' : '暂无进行中的会话'"
+          :image-size="80" />
         <template v-else>
           <div
-            v-for="c in convs"
+            v-for="c in filteredConvs"
             :key="c.id"
             class="conv-item"
             :class="{ 'conv-item--active': activeConv?.id === c.id }"

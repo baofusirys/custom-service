@@ -333,9 +333,24 @@ func (s *Store) ListOpenConversations(ctx context.Context, limit int) ([]map[str
 	}
 	// [059] 顺手把 v.ip_cipher 也 SELECT 出来（handler 层解密成明文 IP 给客服看
 	// 「访客 IP + 地理位置」一目了然，会话列表选客户体验提升）
+	// [065] 增加 has_visitor_msg 字段：访客是否「主动联系过客服」
+	//   判定 = messages 表中存在 sender='visitor'（真实发言）或 sender='sys' AND sender_ref='voice'
+	//          （访客发起的语音通话结束消息：含拒接 / 未接 / 取消）。
+	//   EXISTS + idx_conv_time(conv_id, created_at) 索引命中：O(log N)，200 conv 毫秒级。
+	//   爷爷需求："主动给客服发了消息或者电话" — "或者电话"明确要求把通话发起算进来。
+	//   排除：page_navigation / greeting / visitor_enter / typing / voice 信令（不算主动联系）。
 	rows, err := s.db.QueryContext(ctx, `
 SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_at,
-       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher
+       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher,
+       EXISTS(
+         SELECT 1 FROM messages m
+         WHERE m.conv_id = c.id
+           AND (
+             m.sender = 'visitor'
+             OR (m.sender = 'sys' AND m.sender_ref = 'voice')
+           )
+         LIMIT 1
+       ) AS has_visitor_msg
 FROM conversations c
 JOIN visitors v ON v.id = c.visitor_id
 WHERE c.status='open'
@@ -353,24 +368,26 @@ LIMIT ?`, limit)
 			unread                                    int
 			started, updated                          time.Time
 			ident, country, city, page, ref, ipCipher sql.NullString
+			hasVisitorMsg                             bool // [065] EXISTS 子查询结果，MySQL TINYINT(1) 可直接 Scan 到 bool
 		)
 		if err := rows.Scan(&id, &vid, &aid, &unread, &started, &updated,
-			&ident, &country, &city, &page, &ref, &ipCipher); err != nil {
+			&ident, &country, &city, &page, &ref, &ipCipher, &hasVisitorMsg); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
-			"id":         id,
-			"visitor_id": vid,
-			"agent_id":   nullInt(aid),
-			"unread":     unread,
-			"started_at": started,
-			"updated_at": updated,
-			"identifier": nullStr(ident),
-			"country":    nullStr(country),
-			"city":       nullStr(city),
-			"last_page":  nullStr(page),
-			"referer":    nullStr(ref),
-			"ip_cipher":  nullStr(ipCipher), // [059] handler 层会解密成 ip 明文并删掉这个字段
+			"id":              id,
+			"visitor_id":      vid,
+			"agent_id":        nullInt(aid),
+			"unread":          unread,
+			"started_at":      started,
+			"updated_at":      updated,
+			"identifier":      nullStr(ident),
+			"country":         nullStr(country),
+			"city":            nullStr(city),
+			"last_page":       nullStr(page),
+			"referer":         nullStr(ref),
+			"ip_cipher":       nullStr(ipCipher), // [059] handler 层会解密成 ip 明文并删掉这个字段
+			"has_visitor_msg": hasVisitorMsg,     // [065] 访客是否主动联系过（chat / 媒体 / 通话发起）
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -440,14 +457,40 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	if err != nil {
 		return err
 	}
-	// 更新会话 updated_at + 未读
-	col := "unread_agent"
-	if m.Sender == "agent" {
-		col = "unread_visitor"
+
+	// ===== [065] 修复：sys 消息不再错算 unread_agent =====
+	// 业务规则：
+	//   visitor 发消息  → 客服未读 +1 (unread_agent)
+	//   agent 发消息    → 访客未读 +1 (unread_visitor)
+	//   sys（系统消息） → 只刷 updated_at（让会话上浮），不累加任何一端的未读
+	//                    例：访客访问页面横幅、自动问候、语音转文字结果
+	// 设计要点：
+	//   1. 用 switch 显式枚举三种 sender，default 兜底（防止未来悄悄混进新类型又走错分支）
+	//   2. sys 类消息只刷新 updated_at 让会话在客服列表「按最近活跃」排序时上浮，
+	//      但绝不累加 unread_agent —— 因为 sys 不是访客主动发的内容，客服无需「读」它，
+	//      当成未读会让 badge 虚高（爷爷之前发现的 bug：badge=2 但实际只有 1 条访客消息）
+	//   3. 两条 UPDATE 路径都只走一次 SQL（避免一次 InsertMessage 两次往返 DB）
+	//   4. 全程参数化 SQL（占位符 ?），杜绝注入
+	switch m.Sender {
+	case "visitor":
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE conversations SET updated_at=?, unread_agent=unread_agent+1 WHERE id=?`,
+			m.CreatedAt, m.ConvID)
+	case "agent":
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE conversations SET updated_at=?, unread_visitor=unread_visitor+1 WHERE id=?`,
+			m.CreatedAt, m.ConvID)
+	case "sys":
+		// 系统消息：仅刷新 updated_at（客服会话列表按 updated_at 倒序，让有最新活动的会话排前面）
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE conversations SET updated_at=? WHERE id=?`,
+			m.CreatedAt, m.ConvID)
+	default:
+		// 防御性：未来万一引入新 sender 类型却忘了改这里，兜底只刷 updated_at，不污染 unread
+		_, err = s.db.ExecContext(ctx,
+			`UPDATE conversations SET updated_at=? WHERE id=?`,
+			m.CreatedAt, m.ConvID)
 	}
-	_, err = s.db.ExecContext(ctx,
-		`UPDATE conversations SET updated_at=?, `+col+`=`+col+`+1 WHERE id=?`,
-		m.CreatedAt, m.ConvID)
 	return err
 }
 
