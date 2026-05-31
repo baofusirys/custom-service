@@ -13,4 +13,4 @@ package config
 //   4. gh release create v0.2.x --notes-from-tag  → 生成 GitHub Release
 //
 // 后续可优化为 Go embed VERSION 文件自动同步（暂不做避免改 backend Dockerfile context）。
-const Version = "0.6.1"
+const Version = "0.6.2"
