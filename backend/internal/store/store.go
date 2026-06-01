@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -410,9 +411,11 @@ func (s *Store) getLastMessagePreview(ctx context.Context, convID string) (map[s
 	var sender, content string
 	var mediaKind sql.NullString
 	var createdAt time.Time
+	// [072] 侧边「最新消息预览」跳过 page_navigation（访客浏览动作），显示真正的最后一句对话。
 	err := s.db.QueryRowContext(ctx, `
 SELECT sender, content, media_kind, created_at
-FROM messages WHERE conv_id=? ORDER BY created_at DESC LIMIT 1`, convID).Scan(
+FROM messages WHERE conv_id=? AND NOT (sender='sys' AND sender_ref LIKE 'page:%')
+ORDER BY created_at DESC LIMIT 1`, convID).Scan(
 		&sender, &content, &mediaKind, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -481,10 +484,14 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			`UPDATE conversations SET updated_at=?, unread_visitor=unread_visitor+1 WHERE id=?`,
 			m.CreatedAt, m.ConvID)
 	case "sys":
-		// 系统消息：仅刷新 updated_at（客服会话列表按 updated_at 倒序，让有最新活动的会话排前面）
-		_, err = s.db.ExecContext(ctx,
-			`UPDATE conversations SET updated_at=? WHERE id=?`,
-			m.CreatedAt, m.ConvID)
+		// 系统消息：仅刷新 updated_at（客服会话列表按 updated_at 倒序，让有最新活动的会话排前面）。
+		// [072] 例外：page_navigation（访客浏览动作，sender_ref="page:<url>"）只落库展示、不刷 updated_at，
+		//   不让「访客访问了 X 页面」顶起会话列表的时间和排序；voice 来电(voice:*)/问候等其他 sys 照旧上浮。
+		if !strings.HasPrefix(m.SenderRef, "page:") {
+			_, err = s.db.ExecContext(ctx,
+				`UPDATE conversations SET updated_at=? WHERE id=?`,
+				m.CreatedAt, m.ConvID)
+		}
 	default:
 		// 防御性：未来万一引入新 sender 类型却忘了改这里，兜底只刷 updated_at，不污染 unread
 		_, err = s.db.ExecContext(ctx,

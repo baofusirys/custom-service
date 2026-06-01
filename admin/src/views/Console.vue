@@ -695,6 +695,8 @@ onMounted(async () => {
 
       // 非当前会话的新消息：本地实时更新（WSS，0 延迟）
       const conv = convs.value.find(x => x.id === env.conv)
+      // [072] 页面访问（浏览动作）不更新列表时间/不上浮，只在聊天记录显示
+      const isPageNav = fromSys && env.extra?.kind === 'page_navigation'
       if (conv) {
         // 只有访客的消息才 +1 未读 + 播声；其他客服/sys 发的只更新活动时间 + 上浮
         if (fromVisitor) {
@@ -706,23 +708,27 @@ onMounted(async () => {
         if (fromSys && env.extra?.kind === 'voice_finished') {
           conv.has_visitor_msg = true
         }
-        conv.updated_at = new Date(env.ts || Date.now()).toISOString()
-        // 实时更新最后一条消息预览（WSS 本地维护，跟服务端 last_message 字段一致）
-        let preview = env.content || ''
-        if (!preview && env.mkind === 'image') preview = '[图片]'
-        else if (!preview && env.media) preview = '[文件]'
-        conv.last_message = {
-          sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
-          content: preview,
-          created_at: new Date(env.ts || Date.now()).toISOString(),
+        // [072] page_navigation 不动时间/预览/排序——浏览动作不该顶起会话
+        if (!isPageNav) {
+          conv.updated_at = new Date(env.ts || Date.now()).toISOString()
+          // 实时更新最后一条消息预览（WSS 本地维护，跟服务端 last_message 字段一致）
+          let preview = env.content || ''
+          if (!preview && env.mkind === 'image') preview = '[图片]'
+          else if (!preview && env.media) preview = '[文件]'
+          conv.last_message = {
+            sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
+            content: preview,
+            created_at: new Date(env.ts || Date.now()).toISOString(),
+          }
+          const idx = convs.value.indexOf(conv)
+          if (idx > 0) {
+            convs.value.splice(idx, 1)
+            convs.value.unshift(conv)
+          }
         }
-        const idx = convs.value.indexOf(conv)
-        if (idx > 0) {
-          convs.value.splice(idx, 1)
-          convs.value.unshift(conv)
-        }
-      } else if (fromVisitor || fromSys) {
-        // 全新访客（或新会话的系统问候）—— 会话还没在客服当前列表里，触发一次防抖刷新
+      } else if (fromVisitor || (fromSys && !isPageNav)) {
+        // 全新访客（或新会话的系统问候/来电）—— 会话还没在客服当前列表里，触发一次防抖刷新
+        // [072] 纯页面访问不触发刷新：避免把「只浏览没联系」的会话拉进列表上浮
         scheduleConvsRefresh()
         if (fromVisitor) playSound(agentSound.value)
       }

@@ -509,10 +509,12 @@ class AppState extends ChangeNotifier {
 
     if (activeConv != null && convId == activeConv!.id) {
       messages.add(m);
-      // 同步更新当前会话的 lastMessage 预览
-      activeConv!.lastMessageSender = senderTag;
-      activeConv!.lastMessagePreview = preview;
-      activeConv!.updatedAt = m.createdAt;
+      // [072] 页面访问只显示在聊天记录，不更新会话预览/时间（不影响列表排序）
+      if (!isPageNav) {
+        activeConv!.lastMessageSender = senderTag;
+        activeConv!.lastMessagePreview = preview;
+        activeConv!.updatedAt = m.createdAt;
+      }
       if (fromVisitor) {
         activeConv!.hasVisitorMsg = true;
         _sendRead(convId);
@@ -539,16 +541,20 @@ class AppState extends ChangeNotifier {
       if (fromSys && kind == 'voice_finished') {
         c.hasVisitorMsg = true;
       }
-      c.updatedAt = m.createdAt;
-      c.lastMessageSender = senderTag;
-      c.lastMessagePreview = preview;
-      if (idx > 0) {
-        convs.removeAt(idx);
-        convs.insert(0, c);
+      // [072] 页面访问不更新时间/预览/不上浮（浏览动作不顶起会话）
+      if (!isPageNav) {
+        c.updatedAt = m.createdAt;
+        c.lastMessageSender = senderTag;
+        c.lastMessagePreview = preview;
+        if (idx > 0) {
+          convs.removeAt(idx);
+          convs.insert(0, c);
+        }
       }
       notifyListeners();
-    } else if (fromVisitor || fromSys) {
+    } else if (fromVisitor || (fromSys && !isPageNav)) {
       // 列表里还没有这个 conv → 拉接口（后端会带 has_visitor_msg=true 给前端）
+      // [072] 纯页面访问不触发刷新（只浏览没联系的会话不拉进列表）
       refreshConvs();
       if (fromVisitor) snd.playSound(agentSound);
     }

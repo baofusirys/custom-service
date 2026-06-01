@@ -4,6 +4,41 @@
 
 ---
 
+## [072] 2026-06-01 19:52 — 页面访问不再顶起会话列表的时间和排序 · v0.6.8
+
+**起因 / 需求**
+
+爷爷截图反馈：访客的「访客访问了 XX 页面」这种浏览动作（page_navigation，橙色横幅）该显示在聊天记录里没问题，但**不该影响**会话列表侧边栏的「最新消息时间」和「排序」。现在访客每访问一个 URL，对应会话就被顶到列表最上、时间也改成访问时刻，挤掉了真正的最后一句对话。
+
+**根因**
+
+`store.go` InsertMessage 对**所有 sys 消息**（含 page_navigation）都执行 `UPDATE conversations SET updated_at=?`，而会话列表 `ORDER BY c.updated_at DESC` + 侧边显示 updated_at + getLastMessagePreview 取最后一条消息（含 page_nav）。三处叠加 → 页面访问顶起时间和排序、还可能占据预览。
+
+**改了什么（三端齐改，精确只动 page_navigation，不碰 voice 来电等其他 sys）**
+
+> 修改文件 3 个（backend 1 + admin 1 + mobile_app 1），升版本号 0.6.7 → 0.6.8
+
+- **后端** `store.go`：① InsertMessage case sys —— sender_ref 以 "page:" 开头（页面访问）时**只落库、不刷 updated_at**，voice 来电(voice:*)/问候等其他 sys 照旧上浮（加 import strings）；② getLastMessagePreview SQL 加 `AND NOT (sender='sys' AND sender_ref LIKE 'page:%')`，侧边预览跳过页面访问、显示真正最后一句对话。
+- **admin** `Console.vue` WSS onMessage 非当前会话分支：加 `isPageNav` 判断，page_navigation 不更新 updated_at/last_message/不上浮；新会话的纯页面访问也不触发 scheduleConvsRefresh。
+- **App** `app_state.dart` _onEnvelope 当前+非当前两分支：page_navigation 仍 messages.add 显示在聊天记录，但不更新 lastMessage*/updatedAt/不上浮；新会话纯页面访问不 refreshConvs。
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 访客访问一个页面 | 会话被顶到列表最上、时间改成访问时刻 | 会话**纹丝不动**，时间/排序保持最后一句对话 |
+| 页面访问横幅 | 显示在聊天记录 | 仍显示（橙色横幅，不变） |
+| 侧边最新消息预览 | 可能显示「访客访问了 X」 | 显示真正最后一句对话 |
+| 访客来电(voice) | 上浮 | 仍上浮（来电是真实活动，不受本次影响） |
+
+**触发场景与边界 + 验证方式**
+
+触发：访客在网站翻页（page_navigation）→ 会话列表的该会话时间/排序不变。
+边界：只认 sender_ref 前缀 "page:"（页面访问专属），voice:*/问候等其他 sys 不受影响仍正常上浮；当前会话打开时页面访问横幅照常显示在聊天记录。
+验证：后端 `go build/vet` PASS；App `flutter analyze` 零新增 error/warning（仅既有 info）；Web `vite build` PASS（✓ 7.99s）。手测：访客连续翻几页 → 客服端该会话在列表的位置和时间都不动；访客发文字/来电 → 正常上浮。
+
+---
+
 ## [071] 2026-06-01 18:32 — 「已联系」口径放宽：访客来电也算（含秒挂）· v0.6.7
 
 **起因 / 需求**
