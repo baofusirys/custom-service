@@ -44,6 +44,31 @@ type Hub struct {
 	// 双方同时挂断时，第二个 voice_end 凭这里的标志跳过，避免重复写 sys。
 	finishedCalls sync.Map // map[callID(string)]time.Time
 
+	// [069] pendingAccepts: agent 已 voice_accept 但还没回 voice_answer 的中间态。
+	// 关键场景：客服点了「接听」按钮，hub 已把 voice_accept 转发给 visitor，但 agent 端
+	// WebRTC SDP 协商（setRemoteDescription/createAnswer/setLocalDescription 三段）任一抛错、
+	// 或麦克风未授权、或 PC 创建失败，都会导致 voice_answer 永远不来，visitor 端原本要等
+	// 30 秒 ringing 超时才弹「未接听」，体验极差。
+	//
+	// 解决方案：voice_accept 到达时 Store(callID) + AfterFunc(5s) 启动看门狗；
+	// 5 秒内若没收到 voice_answer，主动 fanout voice_finished(reason=agent_no_answer_5s)，
+	// 双方 UI 在 5 秒内关闭通话浮窗 + 显示「客服 5 秒未应答自动挂断」。
+	//
+	// reason enum（与 service.codeToText / mobile_app voice_controller 三端对齐）：
+	//   - agent_no_answer_5s   客服 accept 后 5s 内未回 voice_answer（本看门狗触发）
+	//   - mic_permission_denied 客服麦克风权限被拒（agent 上报 voice_accept_failed）
+	//   - mic_busy             麦克风被占用
+	//   - mic_hardware_error   麦克风硬件异常
+	//   - no_audio_tracks      未能获取音频通道
+	//   - signal_exception     WebRTC 信令异常（agent 上报 voice_signal_error）
+	//   - no_answer_sdp        应答 SDP 解析失败
+	//   - no_ice_candidate     ICE 候选超时
+	//   - ice_disconnected     网络中断
+	//   - normal_hangup        正常挂断（兼容老路径，等价于无 reason）
+	pendingAccepts sync.Map // map[callID(string)]*pendingAccept
+	// [069] acceptTimers: 持有 5s 看门狗 timer 句柄；voice_answer 到达时 Stop，避免误触发。
+	acceptTimers sync.Map // map[callID(string)]*time.Timer
+
 	register   chan *Client
 	unregister chan *Client
 	incoming   chan incoming
@@ -110,8 +135,10 @@ type MessageSink interface {
 	// OnVoiceCallFinished 语音通话终结（任何一方挂断 / 拒绝 / 未接 / 失败）时触发：
 	// service 写一条 sys 系统消息到该 visitor 的当前会话 + WSS 广播给会话成员实时显示。
 	// code: no_answer / rejected / busy / cancel / hangup / failed
+	// reason: 细化原因 enum（见 [069] pendingAccepts 上方注释），空串表示无细化原因。
+	//   service 层会优先按 reason 渲染中文文本；reason 为空时 fallback 到 code 的旧文案。
 	// durSec: 仅 code=hangup 时有意义（通话时长）
-	OnVoiceCallFinished(visitorID, callID, code string, durSec int)
+	OnVoiceCallFinished(visitorID, callID, code, reason string, durSec int)
 }
 
 const broadcastChannel = "cs:bcast"
@@ -379,13 +406,58 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			}
 		case "voice_accept":
 			// 接听后通话可能很长，buffer TTL 延到 30 分钟，避免 voice_end 来时找不到 visitorID
+			cid := extractCallID(e)
+			if cid == "" {
+				break
+			}
+			var visitorID string
+			if v, ok := h.pendingCalls.Load(cid); ok {
+				pc := v.(*pendingCall)
+				pc.expires = time.Now().Add(callTalkingTTL)
+				visitorID = pc.visitorID
+			}
+			// [069] 启动 5s 看门狗：voice_accept 之后等 voice_answer
+			// 5 秒内没回 answer 即视为客服端 SDP 协商失败，主动 fanout finished 让 visitor
+			// 端瞬间显示「客服 5 秒未应答自动挂断」，告别原 30s 等 ringing 超时的死等体验
+			pa := &pendingAccept{
+				callID:    cid,
+				visitorID: visitorID,
+				agentFrom: e.From,
+				startedAt: time.Now(),
+			}
+			h.pendingAccepts.Store(cid, pa)
+			// dedup 保险：同 callID 重复 voice_accept（agent 多端同时点接听）先 Stop 旧 timer
+			if oldT, ok := h.acceptTimers.LoadAndDelete(cid); ok {
+				oldT.(*time.Timer).Stop()
+			}
+			timer := time.AfterFunc(acceptAnswerTimeout, func() {
+				h.fireAcceptWatchdog(cid)
+			})
+			h.acceptTimers.Store(cid, timer)
+			h.bizLog.Info("voice_accept watchdog armed",
+				zap.String("call_id", cid),
+				zap.String("agent_from", e.From),
+				zap.String("visitor_id", visitorID),
+				zap.Duration("timeout", acceptAnswerTimeout))
+		case "voice_answer":
+			// [069] 答应到了：Stop 看门狗，清 pendingAccepts
 			if cid := extractCallID(e); cid != "" {
-				if v, ok := h.pendingCalls.Load(cid); ok {
-					pc := v.(*pendingCall)
-					pc.expires = time.Now().Add(callTalkingTTL)
+				if t, ok := h.acceptTimers.LoadAndDelete(cid); ok {
+					t.(*time.Timer).Stop()
+				}
+				if _, ok := h.pendingAccepts.LoadAndDelete(cid); ok {
+					h.bizLog.Info("voice_answer arrived, watchdog cancelled",
+						zap.String("call_id", cid))
 				}
 			}
 		case "voice_end", "voice_reject":
+			// [069] 任何一方主动挂断 / 拒绝 → 取消看门狗（避免 5s 后误触发又 fanout 一次 finished）
+			if cid := extractCallID(e); cid != "" {
+				if t, ok := h.acceptTimers.LoadAndDelete(cid); ok {
+					t.(*time.Timer).Stop()
+				}
+				h.pendingAccepts.Delete(cid)
+			}
 			// 第一次到达 → 调 service 写 sys 消息 + 记 finishedCalls；后续 5 分钟内重复来的跳过
 			if cid := extractCallID(e); cid != "" {
 				// dedup：双方同时挂断时第二个 voice_end 在这里被拦截
@@ -418,7 +490,12 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 					h.finishedCalls.Delete(cid)
 				})
 				h.pendingCalls.Delete(cid)
-				h.sink.OnVoiceCallFinished(visitorID, cid, code, extractDurationSec(e))
+				// [069] reason 取自 envelope.Extra.reason；客户端没传走 normal_hangup（向后兼容）
+				reason := extractReason(e)
+				if reason == "" {
+					reason = "normal_hangup"
+				}
+				h.sink.OnVoiceCallFinished(visitorID, cid, code, reason, extractDurationSec(e))
 			}
 		}
 	default:
@@ -435,9 +512,24 @@ type pendingCall struct {
 	expires   time.Time
 }
 
+// [069] pendingAccept 记录 agent voice_accept 已到但 voice_answer 未到的中间态。
+// 5 秒看门狗超时即 fanout voice_finished(reason=agent_no_answer_5s)，写 sys 消息让访客
+// 端立刻关浮窗 + 显示「客服 5 秒未应答自动挂断」，取代原 30s ringing 超时的死等体验。
+type pendingAccept struct {
+	callID    string
+	visitorID string    // 找会话用；voice_accept 时从 pendingCalls 同步
+	agentFrom string    // "agent:xxx"，看门狗触发时回推给 agent
+	startedAt time.Time // accept 到达时刻
+}
+
 // 初始 TTL = 30 秒（等待接听窗口）；voice_accept 后延长到 30 分钟（通话进行中）
 const callBufferTTL = 30 * time.Second
 const callTalkingTTL = 30 * time.Minute
+
+// [069] acceptAnswerTimeout: voice_accept 后等 voice_answer 的最大时长。
+// 超时即视为客服端 SDP 协商挂死（mic 未授权 / setRemoteDescription 抛错 / PC 创建失败等），
+// 主动 fanout voice_finished 让双方瞬间结束通话流程。
+const acceptAnswerTimeout = 5 * time.Second
 
 // extractCallID 从 envelope 的 Extra 里取 call_id
 func extractCallID(e *Envelope) string {
@@ -447,6 +539,100 @@ func extractCallID(e *Envelope) string {
 		}
 	}
 	return ""
+}
+
+// [069] extractReason 从 envelope.Extra 取 reason（voice_signal_error / voice_accept_failed /
+// voice_end 都可携带；语音通话终结的细化原因 enum，详见 Hub.pendingAccepts 上方注释）。
+func extractReason(e *Envelope) string {
+	if m, ok := e.Extra.(map[string]any); ok {
+		if v, ok := m["reason"].(string); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// [069] fireAcceptWatchdog 5 秒看门狗到期回调。
+//
+// 触发路径：voice_accept 到达 → AfterFunc(5s) → 此函数。
+// 行为：
+//  1. 用 LoadAndDelete 同时检查并取消 pendingAccepts；若已被 voice_answer / voice_end /
+//     voice_signal_error 清掉则 no-op（race-safe）。
+//  2. 通过 finishedCalls dedup：本看门狗触发后写入 finishedCalls，后续晚到的 voice_answer /
+//     voice_end 会被 dedup 拦截，不会再次落 sys 消息。
+//  3. fanout voice_finished(reason=agent_no_answer_5s, code=no_answer) 给访客 + 客服两端，
+//     UI 立刻关通话浮窗 + 弹中文原因。
+//  4. 调 sink.OnVoiceCallFinished 落 sys 消息到会话历史（reason 进 SenderRef "voice:reason"）。
+func (h *Hub) fireAcceptWatchdog(callID string) {
+	v, stillPending := h.pendingAccepts.LoadAndDelete(callID)
+	h.acceptTimers.Delete(callID)
+	if !stillPending {
+		return // voice_answer 已到，或 voice_end 已拆，已被取消
+	}
+	pa := v.(*pendingAccept)
+	// dedup 保险：voice_end 已处理过就别再写一次（双保险，正常路径下 LoadAndDelete 已挡住）
+	if _, done := h.finishedCalls.Load(callID); done {
+		return
+	}
+	h.bizLog.Warn("voice_accept watchdog fired (agent_no_answer_5s)",
+		zap.String("call_id", callID),
+		zap.String("visitor_id", pa.visitorID),
+		zap.String("agent_from", pa.agentFrom),
+		zap.Duration("waited", time.Since(pa.startedAt)))
+	// 写 finishedCalls 防 voice_end / voice_answer 晚到再次重复处理
+	h.finishedCalls.Store(callID, time.Now())
+	time.AfterFunc(5*time.Minute, func() {
+		h.finishedCalls.Delete(callID)
+	})
+	h.pendingCalls.Delete(callID)
+
+	const (
+		code   = "no_answer"
+		reason = "agent_no_answer_5s"
+		phase  = "await_voice_answer"
+	)
+	// 1) fanout 给 visitor（关浮窗 + 弹中文原因）
+	if pa.visitorID != "" {
+		envV := &Envelope{
+			Type: "voice_finished",
+			From: "sys",
+			To:   "visitor:" + pa.visitorID,
+			TS:   NowMS(),
+			Extra: map[string]any{
+				"call_id":  callID,
+				"code":     code,
+				"reason":   reason,
+				"phase":    phase,
+				"duration": 0,
+			},
+		}
+		ctxV, cancelV := context.WithTimeout(context.Background(), 2*time.Second)
+		h.fanoutVoice(ctxV, envV)
+		cancelV()
+	}
+	// 2) fanout 给 agent（关来电浮窗）
+	if pa.agentFrom != "" {
+		envA := &Envelope{
+			Type: "voice_finished",
+			From: "sys",
+			To:   pa.agentFrom,
+			TS:   NowMS(),
+			Extra: map[string]any{
+				"call_id":  callID,
+				"code":     code,
+				"reason":   reason,
+				"phase":    phase,
+				"duration": 0,
+			},
+		}
+		ctxA, cancelA := context.WithTimeout(context.Background(), 2*time.Second)
+		h.fanoutVoice(ctxA, envA)
+		cancelA()
+	}
+	// 3) 落 sys 消息到会话历史
+	if h.sink != nil && pa.visitorID != "" {
+		h.sink.OnVoiceCallFinished(pa.visitorID, callID, code, reason, 0)
+	}
 }
 
 // extractCode 从 envelope.Extra 取 code（voice_end / voice_reject 用，决定 sys 消息文字）

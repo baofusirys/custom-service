@@ -4,6 +4,91 @@
 
 ---
 
+## [069] 2026-06-01 12:40 — iOS 客服 App 接听后 17s 无声→修复 race / 异常静默 + backend 5s 看门狗 + voice_finished reason · v0.6.5
+
+**起因 / 需求**
+
+集成方 [073] 工单反馈：iOS 客服 App 收到来电浮窗 → 客服点「接听」→ 浮窗显示「通话中」但访客端**完全听不到客服声音**，访客端 17 秒后被 ICE 心跳超时强制断线，客服 App 端始终停留在「通话中」状态不返回任何错误提示。爷爷原话「这种沉默挂死最恶心，必须修，而且必须给前端落实文案让客服知道是哪一步炸了」。
+
+**根因分析（三层叠加）**
+
+1. **mobile `_onOffer` 异常静默吞**：`voice_controller.dart` 的 `setRemoteDescription / createAnswer / setLocalDescription` 三步合在一个 try/catch 里，任意一步抛错都被外层 catch 静默吞掉，既不上报后端、也不弹 UI、PC 状态机半死不活 → 访客 17s 后 ICE 超时才间接发现
+2. **APNs 冷启 race（关键修复）**：iOS 推送唤醒 → flutter engine 重启 → `voice_offer` 信令先到 → 此时 `_pc==null`，`_onIce` 收到对端 ICE candidate 直接 drop（旧代码 `if(_pc==null) return`）→ 等 accept() 真正 createPeerConnection 时早期 ICE 已永久丢失 → DTLS 永远握不上 → 单向静音
+3. **mic preflight 缺失**：accept() 直接 `getUserMedia` 失败（权限拒/被占用/硬件故障）只在 `try{...}catch` 里 debugPrint 一行就 return，后端从未感知，看门狗也没启动 → 服务端以为「客服已 accept 进入通话」、访客端 UI 显示「通话中」、实际啥都没发生
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 修改文件 3 个（mobile_app 1 + backend 2），同步升版本号 0.6.4 → 0.6.5
+> 新增功能 4 个（5s 看门狗 / voice_signal_error 上报 / voice_accept_failed 上报 / voice_finished reason 中文文案）/ 删除功能 0 个 / 修改功能 6 个（_onOffer 三阶段独立 try/catch、accept() mic preflight、_prepareForIncomingCall + _earlyIceQueue、hub.go voice_accept/answer/end/reject、service.codeToText 签名、OnVoiceCallFinished 签名）
+
+### Patch 1 — `mobile_app/lib/state/voice_controller.dart` `_onOffer` 三阶段独立 try/catch
+
+- 入口先做 sdp 空值校验，缺失立即 `sendEnvelope('voice_signal_error', {phase: 'parse_offer', reason: 'empty_sdp', call_id, agent_id})` + 终止
+- `setRemoteDescription` / `createAnswer` / `setLocalDescription` 各自独立 try/catch，每个 catch 块都 `debugPrint('[voice] phase=X err=$e\n$st')` + `sendEnvelope('voice_signal_error', {phase, reason, call_id, agent_id})`
+- 新增 `create_pc` 兜底 try/catch（_prepareForIncomingCall 复用同一路径）
+
+### Patch 2 — `mobile_app/lib/state/voice_controller.dart` `accept()` mic preflight
+
+- accept() 顶部立即 `getUserMedia({audio: true})` preflight；失败立刻 `sendEnvelope('voice_accept_failed', {reason, detail, agent_id})` 然后 `_end()` + return
+- 新增 `_classifyMicError(e)` 把多平台异常归一到 5 种 reason：`mic_permission_denied / mic_busy / mic_hardware_error / no_audio_tracks / mic_unknown`（兼容 iOS PlatformException / Android SecurityException / Web NotAllowedError 字符串差异）
+
+### Patch 4 — `mobile_app/lib/state/voice_controller.dart` APNs 冷启 race 修复
+
+- 新增 `_prepareForIncomingCall()`：来电信令一到立即 `createPeerConnection` + 注册 `onIceCandidate / onTrack / onConnectionState / onIceConnectionState` 回调 + 置 `_pcReady = true`
+- 新增 `_earlyIceQueue` List 缓存早到 candidate；`_onIce` 在 `_pc==null` 时改为入队不丢
+- `setRemoteDescription` 成功后立即 flush 队列：`for c in _earlyIceQueue: await _pc!.addCandidate(c)`
+- `_onIncoming` 末尾自动 `catchError` 调 `_prepareForIncomingCall`；`accept()` 与 `_onOffer` 入口幂等再创（_pcReady 守卫）
+- 防御性硬化：所有 `await _pc!.xxx`（addTrack / addCandidate / setRemote / createAnswer / setLocalDescription）全部包独立 try/catch + debugPrint；`_cleanup` 内 `pc.close` 与 `track.stop` 也包 try/catch；非致命错误降级为日志不击穿状态机
+- 新增 `_sendSignalError / _onRemoteFinished / _reasonToText` 辅助：`voice_finished` 远端下发立刻关浮窗 + 中文文案（9 种 reason enum 跟 backend `codeToText` 对齐）；`handleSignal` 新增 `case 'voice_finished'`
+
+### Patch 3 — `backend/internal/ws/hub.go` 5s 看门狗 + voice_signal_error/voice_accept_failed 处理
+
+- Hub struct 新增 `pendingAccepts sync.Map` + `acceptTimers sync.Map`（复用现有 `finishedCalls` 模式）
+- 新增 `pendingAccept` struct + `acceptAnswerTimeout = 5 * time.Second` 常量
+- `case voice_accept` 末尾：`pendingAccepts.Store(callID, …)` + `time.AfterFunc(5s, fireAcceptWatchdog)`；重复 accept 先 `Stop` 旧 timer
+- `case voice_answer`：立刻 `acceptTimers.LoadAndDelete` + `Stop` + `pendingAccepts.Delete`，正常握手分支
+- `case voice_end / voice_reject`：同样取消看门狗；并把 `envelope.Extra.reason` 抽出（缺失走 `normal_hangup`）传给 sink
+- 新增 `fireAcceptWatchdog`：`LoadAndDelete` dedup + `finishedCalls` 二次 dedup + 同时 fanout `voice_finished` 给 visitor 和 agent + 调 `sink.OnVoiceCallFinished(visitorID, callID, code, reason, durSec)`
+- 新增 `extractReason` 辅助函数
+
+### Patch 5 — `backend/internal/service/service.go` `codeToText` / `OnVoiceCallFinished` 加 reason
+
+- `codeToText` 签名扩展为 `(code, reason, durSec)`：优先按 reason 渲染 9 种中文（`agent_no_answer_5s / mic_permission_denied / mic_busy / mic_hardware_error / no_audio_tracks / signal_exception / no_answer_sdp / no_ice_candidate / ice_disconnected`）；`reason=normal_hangup` 或空 → 走 code 旧文案（no_answer / rejected / busy / cancel / failed / hangup）；未知 reason 兜底带括号显示原 enum
+- `OnVoiceCallFinished` 签名加 `reason string` 参数；`SenderRef` 从固定 `voice` 升级到 `voice:reason`（normal_hangup 走 code），admin REST 历史回放可以基于 `SenderRef startsWith voice:` 做正则识别
+- `Envelope.Extra` 新增 `reason` 字段透传给前端，前端可直接读 `env.extra.reason`
+- bizLog 增加 `reason` 字段
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 客服点接听但 mic 权限拒 | UI 显示「通话中」，访客 17s 后 ICE 超时强断，客服端永不弹错 | accept() 入口立即弹「未授予麦克风权限」+ 后端 `voice_accept_failed` 落库 + 立即关浮窗 |
+| iOS APNs 冷启接到来电 | offer 早到 + PC 未 ready + ICE candidate 静默 drop → DTLS 永远握不上 → 17s 单向静音 | `_prepareForIncomingCall` 立即建 PC + `_earlyIceQueue` 缓存 → setRemote 后 flush → 正常握手 |
+| `createAnswer` 抛错 | 外层 catch 吞掉，无任何提示 | 三阶段独立 catch，每步上报 `voice_signal_error{phase, reason}` + 后端 5s 看门狗到点 fanout `voice_finished` |
+| 客服按接听 5s 内没回 answer | 访客端等到 17s ICE 超时才断 | 后端 5s 看门狗到点 fanout `voice_finished{reason: agent_no_answer_5s}` + 双端中文文案「客服 5 秒未应答」+ 落库 |
+
+**触发场景与边界 + 验证方式**
+
+触发场景：
+- 真机复现 iOS 客服 App 关后台 → 访客发起 voice 来电 → APNs 唤醒 → 客服点接听 → 期望 5s 内必有结果（成功通话 / 明确文案错误）
+- 真机 mic 权限关闭 → 客服点接听 → 立刻弹「未授予麦克风权限」
+- 真机 mic 被其他 app 占用 → 立刻弹「麦克风被占用」
+- 真机正常通话中互相挂断 → reason=normal_hangup → 走旧文案不带括号 enum
+
+边界：
+- 客服重复点接听：`pendingAccepts.Store` 覆盖 + `Stop` 旧 timer，5s 重新计时（幂等）
+- voice_answer / voice_end / 5s timer 三方竞争同一 callID：`LoadAndDelete` 原子保证只有一方走 fanout，`finishedCalls` 5min dedup 二次保险
+- voice_finished envelope.Extra 缺失 reason：走 normal_hangup 旧文案兼容旧前端
+- _earlyIceQueue 在 _cleanup 时 `.clear()` + `_pcReady=false`，避免下次来电脏数据
+
+验证方式：
+- `go build ./... && go vet ./...` PASS（exit 0，无 warning）
+- mobile 端 685 行手工 grep 验证：5 处 `await _pc!.xxx` 全部包 try/catch 保护
+- 真机脚本：① 关 mic 权限点接听 → 看 `/srv/cs-data/logs/biz/*.jsonl` 应有 `voice_accept_failed reason=mic_permission_denied` 一行；② kill iOS App 后访客拨 → 接听 → 后台日志应看到 `voice_signal_error phase=…` 或正常握手；③ accept 后 backend 故意丢 answer → 5s 看门狗触发 → 双端弹「客服 5 秒未应答」
+- admin REST 历史回放：会话消息 `sender_ref` 应为 `voice:agent_no_answer_5s` 形式可被前端识别
+
+---
+
 ## [068] 2026-06-01 05:10 — 客服发消息串台 bug：敏感账密泄露给陌生访客（严重）· v0.6.4
 
 **起因 / 需求**

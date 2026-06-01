@@ -306,8 +306,49 @@ func (s *Service) pushVisitorMessageAPNs(content, vid string) {
 	)
 }
 
-// codeToText 把通话结束 code 翻译成 sys 消息显示文字
-func codeToText(code string, durSec int) string {
+// [069] codeToText 把通话结束 (code, reason, durSec) 三元组翻译成 sys 消息显示文字。
+//
+// 优先级：reason > code。
+//   - 当 reason 是细化原因 enum（agent_no_answer_5s / mic_permission_denied / ...）时，
+//     直接渲染该 reason 对应中文，让用户立刻看到"为什么挂了"。
+//   - 当 reason="normal_hangup" / "" 时（旧路径、客户端没传），fallback 到 code 的旧文案。
+//
+// reason enum（与 ws/hub.go pendingAccepts 上方注释、mobile_app voice_controller 三端对齐）：
+//   - agent_no_answer_5s   客服 accept 后 5s 内未回 voice_answer（hub 看门狗触发）
+//   - mic_permission_denied 客服麦克风权限被拒
+//   - mic_busy             麦克风被占用
+//   - mic_hardware_error   麦克风硬件异常
+//   - no_audio_tracks      未能获取音频通道
+//   - signal_exception     WebRTC 信令异常（agent 上报 voice_signal_error）
+//   - no_answer_sdp        应答 SDP 解析失败
+//   - no_ice_candidate     ICE 候选超时
+//   - ice_disconnected     网络中断
+//   - normal_hangup / ""   正常挂断（走 code 旧文案）
+func codeToText(code, reason string, durSec int) string {
+	switch reason {
+	case "agent_no_answer_5s":
+		return "客服 5 秒未应答自动挂断"
+	case "mic_permission_denied":
+		return "对方麦克风权限被拒，通话失败"
+	case "mic_busy":
+		return "对方麦克风被占用，通话失败"
+	case "mic_hardware_error":
+		return "对方麦克风硬件异常，通话失败"
+	case "no_audio_tracks":
+		return "对方未能获取音频通道，通话失败"
+	case "signal_exception":
+		return "信令异常，通话已中止"
+	case "no_answer_sdp":
+		return "应答 SDP 解析失败，通话失败"
+	case "no_ice_candidate":
+		return "ICE 候选超时，通话失败"
+	case "ice_disconnected":
+		return "网络中断，通话结束"
+	case "normal_hangup", "":
+		// 走下面 code 渲染
+	default:
+		// 未知 reason 不直接返回兜底文本——继续走 code，能给出更具体的 "对方已拒绝/呼叫未接听" 等
+	}
 	switch code {
 	case "no_answer":
 		return "呼叫未接听"
@@ -327,6 +368,10 @@ func codeToText(code string, durSec int) string {
 		}
 		return fmt.Sprintf("通话结束（%d 秒）", ss)
 	default:
+		// 走到这里说明 reason 也不是已知 enum，code 也不是已知枚举；兜底但带上 reason 让排查更容易
+		if reason != "" {
+			return fmt.Sprintf("通话已结束（%s）", reason)
+		}
 		return "通话已结束"
 	}
 }
@@ -334,11 +379,19 @@ func codeToText(code string, durSec int) string {
 // OnVoiceCallFinished 实现 ws.MessageSink 接口：通话终结时写一条 sys 消息到 conv +
 // FanoutToConv 广播给会话所有客户端（访客 + 客服）实时显示。
 // 用 visitor 自己的 site_id 找他的 open conversation。
-func (s *Service) OnVoiceCallFinished(visitorID, callID, code string, durSec int) {
+//
+// [069] 签名扩展：新增 reason 参数（细化原因 enum，详见 codeToText 上方注释）。
+//   - reason 传入 hub 侧的细化原因（agent_no_answer_5s / mic_permission_denied / ...）；
+//     正常挂断老路径传 "normal_hangup" 或 ""。
+//   - SenderRef 改为 "voice:" + reason / code（eg "voice:agent_no_answer_5s"），让
+//     admin REST 历史消息列表 + 统计能基于 SenderRef 前缀精准识别"未接 / 麦克风失败 /
+//     信令异常"分布，不再依赖正则解析中文 content。
+//   - Envelope.Extra 新增 reason 字段透传给在线访客 / 客服 UI 渲染特殊图标。
+func (s *Service) OnVoiceCallFinished(visitorID, callID, code, reason string, durSec int) {
 	if visitorID == "" || code == "" {
 		return
 	}
-	text := codeToText(code, durSec)
+	text := codeToText(code, reason, durSec)
 	if text == "" {
 		return
 	}
@@ -364,11 +417,20 @@ func (s *Service) OnVoiceCallFinished(visitorID, callID, code string, durSec int
 				zap.String("vid", visitorID), zap.Error(err))
 			return
 		}
+		// [069] SenderRef = "voice:" + reason（细化原因），让 REST 历史拉取 + admin 统计
+		// 能基于 SenderRef 前缀精准识别。reason 为空 / normal_hangup 时退回 "voice:" + code。
+		senderRef := "voice"
+		switch {
+		case reason != "" && reason != "normal_hangup":
+			senderRef = "voice:" + reason
+		case code != "":
+			senderRef = "voice:" + code
+		}
 		msg := &store.Message{
 			ID:        uuid.NewString(),
 			ConvID:    conv.ID,
 			Sender:    "sys",
-			SenderRef: "voice",
+			SenderRef: senderRef,
 			Content:   text,
 			CreatedAt: time.Now(),
 		}
@@ -389,6 +451,7 @@ func (s *Service) OnVoiceCallFinished(visitorID, callID, code string, durSec int
 				Extra: map[string]any{
 					"kind":     "voice_finished",
 					"code":     code,
+					"reason":   reason, // [069] 透传给在线 UI 渲染特殊图标
 					"duration": durSec,
 					"call_id":  callID,
 				},
@@ -397,7 +460,8 @@ func (s *Service) OnVoiceCallFinished(visitorID, callID, code string, durSec int
 		}
 		s.bizLog.Info("voice_finished",
 			zap.String("vid", visitorID), zap.String("conv", conv.ID),
-			zap.String("code", code), zap.Int("dur", durSec))
+			zap.String("code", code), zap.String("reason", reason),
+			zap.Int("dur", durSec))
 	}()
 }
 
