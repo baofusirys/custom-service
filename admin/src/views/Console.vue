@@ -31,6 +31,67 @@ const filteredConvs = computed(() =>
 const activeConv = ref(null)
 const messages = ref([])
 // ============================================================
+// [070] 消息本地缓存（进会话秒显，刷新页面/重开也不丢）—— 对齐 App 端方案
+//   msgCache[convId]：内存消息数组（当前会话时与 messages.value 同引用）
+//   localStorage 'cs_msgs:<convId>'：持久化最近 N 条；'cs_msgs:_index' 维护 LRU 顺序
+//   进会话先显缓存（0 转圈），再后台增量(after)补新消息；乐观 local- 消息按内容去重
+// ============================================================
+const msgCache = {}
+const MSG_PREFIX = 'cs_msgs:'
+const MSG_INDEX = 'cs_msgs:_index'
+const MSG_MAX_CONVS = 60
+const MSG_MAX_PER_CONV = 200
+function mediaUrlOf(m) {
+  const u = m && m.media_url
+  return (u && typeof u === 'object') ? (u.String || '') : (u || '')
+}
+function loadCachedMsgs(convId) {
+  try {
+    const v = JSON.parse(localStorage.getItem(MSG_PREFIX + convId) || '[]')
+    return Array.isArray(v) ? v : []
+  } catch { return [] }
+}
+function saveCachedMsgs(convId) {
+  const list = (msgCache[convId] || [])
+    .filter(m => !String(m.id).startsWith('local-'))
+    .slice(-MSG_MAX_PER_CONV)
+  try {
+    localStorage.setItem(MSG_PREFIX + convId, JSON.stringify(list))
+    let idx = []
+    try { idx = JSON.parse(localStorage.getItem(MSG_INDEX) || '[]') } catch {}
+    idx = [convId, ...idx.filter(c => c !== convId)]
+    while (idx.length > MSG_MAX_CONVS) { const e = idx.pop(); localStorage.removeItem(MSG_PREFIX + e) }
+    localStorage.setItem(MSG_INDEX, JSON.stringify(idx))
+  } catch {}
+}
+function lastRealId(convId) {
+  const list = msgCache[convId] || []
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (!String(list[i].id).startsWith('local-')) return list[i].id
+  }
+  return null
+}
+// 合并服务器消息到会话缓存：replace=全量以服务器为权威 / 否则增量并入。
+// 去重按 id；乐观 local- 消息已被服务器确认(同 agent+content+media+时间≈)的丢弃，未确认的保留。
+function mergeMessages(convId, incoming, replace) {
+  const cur = msgCache[convId] || []
+  const localPending = cur.filter(m => String(m.id).startsWith('local-'))
+  const byId = new Map()
+  if (!replace) {
+    for (const m of cur) if (!String(m.id).startsWith('local-')) byId.set(m.id, m)
+  }
+  for (const m of incoming) byId.set(m.id, m)
+  const tsOf = x => new Date(x).getTime()
+  const realList = [...byId.values()].sort((a, b) => tsOf(a.created_at) - tsOf(b.created_at))
+  const confirmed = lo => realList.some(r =>
+    r.sender === 'agent' && (r.content || '') === (lo.content || '') &&
+    mediaUrlOf(r) === mediaUrlOf(lo) && Math.abs(tsOf(r.created_at) - tsOf(lo.created_at)) <= 120000)
+  const stillPending = localPending.filter(lo => !confirmed(lo))
+  const merged = [...realList, ...stillPending].sort((a, b) => tsOf(a.created_at) - tsOf(b.created_at))
+  msgCache[convId] = merged
+  if (activeConv.value?.id === convId) messages.value = merged
+}
+// ============================================================
 // [068] per-conv 草稿 / 附件隔离 —— 防"切会话串台"导致敏感账密泄露
 // ------------------------------------------------------------
 // 历史 bug：旧版 draft = ref('') 是单例全局变量。客服在访客 A 输入框
@@ -109,10 +170,26 @@ async function refreshConvs() {
 }
 
 async function loadMessages(convID) {
-  const r = await http.get(`/agent/conversations/${convID}/messages?limit=100`)
-  messages.value = (r.data || []).slice().reverse()
-  await nextTick()
-  scrollToBottom()
+  // [070] 1) 缓存秒显：内存没有就读 localStorage，立即铺到 UI（0 转圈）
+  let cached = msgCache[convID]
+  if (!cached) {
+    cached = loadCachedMsgs(convID).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    msgCache[convID] = cached
+  }
+  if (activeConv.value?.id === convID) {
+    messages.value = cached
+    if (cached.length) { await nextTick(); scrollToBottom() }
+  }
+  // [070] 2) 后台同步：有本地真实消息走增量(after) 只补新的，否则全量首拉
+  const lastReal = lastRealId(convID)
+  const q = lastReal ? `?limit=200&after=${encodeURIComponent(lastReal)}` : `?limit=100`
+  const r = await http.get(`/agent/conversations/${convID}/messages${q}`)
+  // 全量接口返回 DESC（最新在前）→ reverse 成 ASC；增量 after 已是 ASC
+  const fetched = r.data || []
+  const norm = lastReal ? fetched : fetched.slice().reverse()
+  mergeMessages(convID, norm, !lastReal)
+  saveCachedMsgs(convID)
+  if (activeConv.value?.id === convID) { await nextTick(); scrollToBottom() }
 }
 
 async function pickConv(c) {
@@ -590,6 +667,7 @@ onMounted(async () => {
           page_title: isPageNav ? env.extra.title : ''
         })
         nextTick(scrollToBottom)
+        saveCachedMsgs(env.conv)  // [070] 实时收到的消息也落盘，刷新页面/重开不丢
         // 同步更新当前会话的 last_message 预览（保持左侧列表跟实时一致）
         if (activeConv.value && !isPageNav) {
           let preview = env.content || ''

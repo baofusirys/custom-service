@@ -4,6 +4,45 @@
 
 ---
 
+## [070] 2026-06-01 17:59 — 进会话不再转圈：三端消息本地缓存 + 增量同步（微信级秒显）· v0.6.6
+
+**起因 / 需求**
+
+爷爷反馈：iOS 客服 App 和 web 客服工作台，每次点进某个会话，都要先转几秒「加载消息中…」才显示聊天记录，跟微信那种「点进去立刻看到历史、再悄悄同步新消息」完全不一样，要求改成秒显。
+
+**根因分析（三端代码 + 索引坐实，非凭印象）**
+
+1. 后端不慢：messages 表有 `idx_conv_time(conv_id, created_at)` 索引（001_init.sql），单会话查最近 50 条毫秒级。
+2. 慢在前端架构 + 跨境网络：服务器在东京/美国，App/web 每次进会话都同步发一次 HTTP 到海外（RTT 几百 ms ~ 1-2s），且前端**无本地缓存**——App `openConv` 一进来 `messages.clear()` 清空再拉（app_state.dart），web `loadMessages` 每次 `http.get` 整个替换（Console.vue），网络稍慢必然白屏转圈。
+
+爷爷拍板「B 档：微信级，冷启动也秒显」。持久化选型复用 App 已有 shared_preferences、Web 的 localStorage，**不引入 Hive/IndexedDB native 依赖**（避免给 iOS 签名/Pods build 添雷）。
+
+**改了什么 / 加了什么 / 删了什么**
+
+> 修改文件 8 个（backend 2 + mobile_app 4 + admin 2），升版本号 0.6.5 → 0.6.6
+> 新增：消息接口 after 增量参数 / App 消息按会话缓存+持久化 / Web 消息缓存+持久化 / 三端进会话秒显。按「最近 60 会话 × 每会话 200 条」+ LRU 淘汰防膨胀。
+
+- **后端**：`store.go` ListMessages 签名加 afterID + after 分支 SQL（`created_at >= (子查询 afterID 的 created_at) ORDER BY ASC`，秒级精度用 >= 防漏同秒、重复交前端 id 去重，走 idx_conv_time）；`http.go` handler 读 after query。向后兼容。
+- **App**：`models.dart` Message 加 toCacheJson；`http_client.dart` listMessages 加 after；`settings.dart` 加 getCachedMessages/setCachedMessages(LRU)/clearMessageCache（shared_preferences，key 前缀 msgs:）；`app_state.dart` messages 单例→指向 _msgCache[convId] 字典，openConv 三段式（内存秒显→持久化垫底→后台增量/全量 merge+落盘）、_mergeMessages（id 去重 + 乐观 local- 按 agent+content+media+时间≈120s 确认清理）、_persist（只落真实消息）、closeActive 保留缓存+落盘、logout/setBackend 清缓存。
+- **Web**：`Console.vue` 加缓存层（msgCache + localStorage cs_msgs: + LRU + mergeMessages + lastRealId）、loadMessages 三段式、WSS onMessage 当前会话 push 后 saveCachedMsgs 实时落盘；`session.js` clear() 登出清 cs_msgs:。
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 进进过的会话 | 清空→转几秒「加载消息中」→才显示 | 立刻显示缓存历史（0 转圈），后台只拉增量 |
+| 杀进程/刷新页面后再进 | 同样从零拉、白屏转圈 | 读持久化缓存立刻显示，再增量同步 |
+| 网络慢/海外 RTT 高 | 转圈时间随网络拉长 | 首屏不受网络影响，同步在后台 |
+| 自己刚发的消息 | 仅本地乐观显示 | 乐观显示不变；增量拉到真实消息后按内容去重，不重复 |
+
+**触发场景与边界 + 验证方式**
+
+触发：App/web 点进任一会话；切走再切回；杀进程/刷新后重进。
+边界：乐观 local- 持久化不存、merge 时已确认的丢弃未确认的保留（防重复）；after 用 >= 多带回同秒消息由 id 去重；LRU 60 会话×200 条防膨胀；换账号/换服务器清内存+持久化缓存（延续 [068] 防串台铁律）；App openConv 用 reqConvId 快照守卫、merge 只动目标 convId 缓存。
+验证：后端 `go build ./... && go vet ./...` PASS；App `flutter analyze`（4 文件）零新增 error/warning（仅既有 info）；Web 本地 `npm install && vite build` PASS（vite ✓ built 9.97s）；串台「绕过」自测：A 会话发消息途中切 B → 消息落 A 缓存、B 视图不污染、切回 A 秒显不重复。
+
+---
+
 ## [069] 2026-06-01 12:40 — iOS 客服 App 接听后 17s 无声→修复 race / 异常静默 + backend 5s 看门狗 + voice_finished reason · v0.6.5
 
 **起因 / 需求**

@@ -72,6 +72,58 @@ class Settings {
     await sp.remove(_keyAgentJson);
   }
 
+  // ===== [070] 消息本地缓存（进会话秒显，冷启动也不丢）=====
+  // 每会话一个 key 'msgs:<convId>' 存最近 N 条消息 JSON；另用 'msgs:_index'
+  // 维护 convId 的 LRU 顺序，超过 _maxCachedConvs 个会话就淘汰最旧的，防止
+  // shared_preferences 无限膨胀。客服场景会话/消息量可控，够用且零额外依赖。
+  static const _msgCachePrefix = 'msgs:';
+  static const _msgIndexKey = 'msgs:_index';
+  static const _maxCachedConvs = 60;
+  static const _maxMsgsPerConv = 200;
+
+  static Future<List<Map<String, dynamic>>> getCachedMessages(String convId) async {
+    final raw = (await _sp).getString('$_msgCachePrefix$convId');
+    if (raw == null) return const [];
+    try {
+      final v = jsonDecode(raw);
+      if (v is List) return v.cast<Map<String, dynamic>>();
+    } catch (_) {}
+    return const [];
+  }
+
+  static Future<void> setCachedMessages(String convId, List<Map<String, dynamic>> msgs) async {
+    final sp = await _sp;
+    final trimmed = msgs.length > _maxMsgsPerConv
+        ? msgs.sublist(msgs.length - _maxMsgsPerConv)
+        : msgs;
+    await sp.setString('$_msgCachePrefix$convId', jsonEncode(trimmed));
+    // 更新 LRU index + 淘汰最旧会话缓存
+    List<String> idx = const [];
+    final idxRaw = sp.getString(_msgIndexKey);
+    if (idxRaw != null) {
+      try { idx = (jsonDecode(idxRaw) as List).cast<String>(); } catch (_) {}
+    }
+    final next = <String>[convId, ...idx.where((c) => c != convId)];
+    while (next.length > _maxCachedConvs) {
+      final evict = next.removeLast();
+      await sp.remove('$_msgCachePrefix$evict');
+    }
+    await sp.setString(_msgIndexKey, jsonEncode(next));
+  }
+
+  static Future<void> clearMessageCache() async {
+    final sp = await _sp;
+    final idxRaw = sp.getString(_msgIndexKey);
+    if (idxRaw != null) {
+      try {
+        for (final c in (jsonDecode(idxRaw) as List).cast<String>()) {
+          await sp.remove('$_msgCachePrefix$c');
+        }
+      } catch (_) {}
+    }
+    await sp.remove(_msgIndexKey);
+  }
+
   /// 把 http://host:port → ws://host:port 转换（用于 WSS endpoint）
   static String httpToWs(String backendUrl) {
     if (backendUrl.startsWith('https://')) {

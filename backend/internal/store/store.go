@@ -529,7 +529,7 @@ func (s *Store) GetLastReadTimes(ctx context.Context, convID string) (lastAgent,
 	return
 }
 
-func (s *Store) ListMessages(ctx context.Context, convID string, beforeID string, limit int) ([]Message, error) {
+func (s *Store) ListMessages(ctx context.Context, convID string, beforeID string, afterID string, limit int) ([]Message, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -537,15 +537,25 @@ func (s *Store) ListMessages(ctx context.Context, convID string, beforeID string
 		rows *sql.Rows
 		err  error
 	)
-	if beforeID == "" {
+	switch {
+	case afterID != "":
+		// [070] 增量同步：拉比 afterID 更新的消息，用于进会话后台静默刷新（前端先显本地缓存，再补这段增量）。
+		// 注意 messages.created_at 是 DATETIME 秒级精度，同一秒可能有多条 → 用 >= 而非 >，
+		// 避免漏掉与 afterID 同一秒的后续消息；带回的 afterID 自身那几条由前端按 message.id 去重丢弃。
+		// ASC 从旧到新，便于前端往列表尾部顺序追加。走 idx_conv_time(conv_id, created_at) 索引，O(log N)。
 		rows, err = s.db.QueryContext(ctx, `
 SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
-FROM messages WHERE conv_id=? ORDER BY created_at DESC LIMIT ?`, convID, limit)
-	} else {
+FROM messages WHERE conv_id=? AND created_at >= (SELECT created_at FROM messages WHERE id=?)
+ORDER BY created_at ASC LIMIT ?`, convID, afterID, limit)
+	case beforeID != "":
 		rows, err = s.db.QueryContext(ctx, `
 SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
 FROM messages WHERE conv_id=? AND created_at < (SELECT created_at FROM messages WHERE id=?)
 ORDER BY created_at DESC LIMIT ?`, convID, beforeID, limit)
+	default:
+		rows, err = s.db.QueryContext(ctx, `
+SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
+FROM messages WHERE conv_id=? ORDER BY created_at DESC LIMIT ?`, convID, limit)
 	}
 	if err != nil {
 		return nil, err

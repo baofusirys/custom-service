@@ -17,6 +17,12 @@ export const useSession = defineStore('session', {
       this.agent = null
       localStorage.removeItem('cs_admin_token')
       localStorage.removeItem('cs_admin_agent')
+      // [070] 登出清掉本地消息缓存（换账号不串数据）
+      try {
+        const idx = JSON.parse(localStorage.getItem('cs_msgs:_index') || '[]')
+        for (const c of idx) localStorage.removeItem('cs_msgs:' + c)
+      } catch {}
+      localStorage.removeItem('cs_msgs:_index')
     }
   }
 })

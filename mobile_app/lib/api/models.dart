@@ -227,6 +227,22 @@ class Message {
     );
   }
 
+  /// [070] 序列化给本地缓存用（shared_preferences）。字段名对齐后端 JSON，
+  /// 这样读回来能直接走 Message.fromJson。pageUrl/pageTitle 不存——
+  /// fromJson 会从 sender_ref="page:<url>" 重新解析重建。
+  Map<String, dynamic> toCacheJson() => {
+        'id': id,
+        'conv_id': convId,
+        'sender': sender,
+        'sender_ref': senderRef,
+        'content': content,
+        'media_url': mediaUrl,
+        'media_kind': mediaKind,
+        'media_name': mediaName,
+        'created_at': createdAt.toIso8601String(),
+        'read': read,
+      };
+
   bool get isPageNavigation => sender == 'sys' && pageUrl.isNotEmpty;
   bool get isSys => sender == 'sys';
 }

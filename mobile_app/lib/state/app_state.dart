@@ -23,7 +23,11 @@ class AppState extends ChangeNotifier {
   // ===== Conversation list =====
   final List<Conversation> convs = [];
   Conversation? activeConv;
-  final List<Message> messages = [];
+  // [070] messages = 「当前活动会话的消息列表」，运行时指向 _msgCache[activeConv.id]。
+  //   进会话先用缓存秒显、再后台增量补；不再每次 clear→空转圈。去 final 以便切会话换引用。
+  List<Message> messages = [];
+  // [070] 按会话的内存消息缓存：convId → 消息列表（与持久化 Settings.getCachedMessages 配合）。
+  final Map<String, List<Message>> _msgCache = {};
 
   // [066] 「全部 / 已联系」过滤模式（同步 [065] admin Console 行为）。
   //   'all'       : 所有进行中会话
@@ -120,7 +124,9 @@ class AppState extends ChangeNotifier {
     stopWs();
     convs.clear();
     activeConv = null;
-    messages.clear();
+    messages = [];
+    _msgCache.clear();                   // [070] 清内存缓存
+    await Settings.clearMessageCache();  // [070] 清持久化缓存（换账号不串数据）
     await Settings.clearSession();
     Api.invalidate();
     token = null;
@@ -135,7 +141,9 @@ class AppState extends ChangeNotifier {
     stopWs();
     convs.clear();
     activeConv = null;
-    messages.clear();
+    messages = [];
+    _msgCache.clear();                   // [070] 换服务器清内存缓存
+    await Settings.clearMessageCache();  // [070] 清持久化缓存（不同服务器数据不能串）
     token = null;
     agent = null;
     Api.invalidate();
@@ -157,27 +165,48 @@ class AppState extends ChangeNotifier {
   /// true = 后台 HTTP 拉消息中；false = 拉完（或失败/无消息）
   bool loadingMessages = false;
 
-  /// [051] 即时切换，不阻塞 UI。
-  /// 改前：await listMessages + await assign 后才返回 → ConversationsPage 等 1-2s 才 push 页面
-  /// 改后：立刻设 activeConv + notifyListeners → 调用方立刻 push 页面（0ms 感知切换），
-  /// 后台 unawaited 跑 HTTP，拉到消息后再 notifyListeners 让 ChatPage 重渲染
+  /// [070] 即时切换 + 微信级秒显。三段式：
+  ///   1) 内存缓存有 → 立即显示，0 转圈
+  ///   2) 内存没有 → 读持久化缓存（冷启动场景），读到立刻显示停转圈
+  ///   3) 后台同步：有本地真实消息走「增量」(after) 只补新的，否则「全量」首拉；merge 去重后落盘
+  /// 防 race：所有回调都用 reqConvId 快照守卫，用户快速切走时旧结果不污染新会话。
   void openConv(Conversation c) {
     activeConv = c;
-    messages.clear();
-    loadingMessages = true;
-    notifyListeners();
-    // 防 race：用户快速切换会话时，旧的 HTTP 回来不能覆盖新的 activeConv
     final reqConvId = c.id;
+    final mem = _msgCache[reqConvId];
+    if (mem != null && mem.isNotEmpty) {
+      messages = mem;            // 内存缓存秒显，完全不转圈
+      loadingMessages = false;
+    } else {
+      messages = _msgCache[reqConvId] = <Message>[];
+      loadingMessages = true;    // 内存没有 → 先转圈，下面尽快用持久化/网络填上
+    }
+    notifyListeners();
+
     () async {
+      // 第二段：内存空 → 读持久化缓存
+      if (messages.isEmpty) {
+        try {
+          final pj = await Settings.getCachedMessages(reqConvId);
+          if (activeConv?.id == reqConvId && pj.isNotEmpty) {
+            final pcached = pj.map(Message.fromJson).toList()
+              ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+            _msgCache[reqConvId] = pcached;
+            messages = pcached;
+            loadingMessages = false;
+            notifyListeners();
+          }
+        } catch (_) {}
+      }
+      // 第三段：后台同步（增量优先）
       try {
-        final raw = await Api.listMessages(reqConvId, limit: 100);
-        // 用户已切到别的会话 / 关闭了，丢弃本次结果
+        final lastReal = _lastRealMessageId(reqConvId);
+        final raw = lastReal != null
+            ? await Api.listMessages(reqConvId, after: lastReal, limit: 200)
+            : await Api.listMessages(reqConvId, limit: 100);
         if (activeConv?.id != reqConvId) return;
-        final list = raw.map(Message.fromJson).toList()
-          ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
-        messages
-          ..clear()
-          ..addAll(list);
+        final fetched = raw.map(Message.fromJson).toList();
+        _mergeMessages(reqConvId, fetched, replace: lastReal == null);
         await Api.assign(reqConvId);
         if (activeConv?.id != reqConvId) return;
         c.unread = 0;
@@ -185,8 +214,9 @@ class AppState extends ChangeNotifier {
           if (m.sender == 'visitor') m.read = true;
         }
         _sendRead(reqConvId);
+        _persist(reqConvId);
       } catch (_) {
-        // 静默：网络出错 ChatPage 显示空 + 用户可下拉重试（未来加）
+        // 静默：网络出错时已显示的缓存不受影响；无缓存则保持空（未来加下拉重试）
       } finally {
         if (activeConv?.id == reqConvId) {
           loadingMessages = false;
@@ -196,11 +226,65 @@ class AppState extends ChangeNotifier {
     }();
   }
 
+  /// [070] 某会话内存缓存里最后一条「真实」消息 id（跳过 local- 乐观消息），用于增量 after。
+  String? _lastRealMessageId(String convId) {
+    final list = _msgCache[convId];
+    if (list == null) return null;
+    for (var i = list.length - 1; i >= 0; i--) {
+      if (!list[i].id.startsWith('local-')) return list[i].id;
+    }
+    return null;
+  }
+
+  /// [070] 合并服务器消息到会话缓存。
+  ///   replace=true（全量）以服务器为权威；replace=false（增量）并入已有真实消息。
+  ///   去重按 message.id；乐观 local- 消息：已被服务器确认（同 agent+content+media+时间≈）的丢弃，
+  ///   未确认的保留末尾继续显示。最后按时间排序。
+  void _mergeMessages(String convId, List<Message> incoming, {required bool replace}) {
+    final cur = _msgCache[convId] ?? <Message>[];
+    final localPending = cur.where((m) => m.id.startsWith('local-')).toList();
+    final byId = <String, Message>{};
+    if (!replace) {
+      for (final m in cur) {
+        if (!m.id.startsWith('local-')) byId[m.id] = m;
+      }
+    }
+    for (final m in incoming) {
+      byId[m.id] = m;
+    }
+    final realList = byId.values.toList()
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    bool confirmed(Message lo) => realList.any((r) =>
+        r.sender == 'agent' &&
+        r.content == lo.content &&
+        r.mediaUrl == lo.mediaUrl &&
+        (r.createdAt.difference(lo.createdAt).inSeconds).abs() <= 120);
+    final stillPending = localPending.where((lo) => !confirmed(lo)).toList();
+    final merged = <Message>[...realList, ...stillPending]
+      ..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    _msgCache[convId] = merged;
+    if (activeConv?.id == convId) messages = merged;
+  }
+
+  /// [070] 会话消息落盘（只存真实消息，不存 local- 乐观消息）。fire-and-forget。
+  void _persist(String convId) {
+    final list = _msgCache[convId];
+    if (list == null) return;
+    final real = list
+        .where((m) => !m.id.startsWith('local-'))
+        .map((m) => m.toCacheJson())
+        .toList();
+    Settings.setCachedMessages(convId, real);
+  }
+
   void closeActive() {
+    // [070] 离开会话：保留 _msgCache 供下次秒显，只把当前指针置空 + 落盘最新真实消息。
+    final cid = activeConv?.id;
     activeConv = null;
-    messages.clear();
-    loadingMessages = false;  // [051] 离开会话清 loading 标志，下次打开重新置 true
+    messages = [];
+    loadingMessages = false;
     notifyListeners();
+    if (cid != null) _persist(cid);
   }
 
   // [068] 防 race 设计说明（mobile 端）：

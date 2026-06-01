@@ -348,11 +348,12 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 func (h *HTTP) ListMessages(c *gin.Context) {
 	convID := c.Param("id")
 	before := c.Query("before")
+	after := c.Query("after") // [070] 增量同步：只拉比 afterID 更新的消息（进会话先显本地缓存，再后台补这段）
 	limit := 50
 	if v := c.Query("limit"); v != "" {
 		fmt.Sscanf(v, "%d", &limit)
 	}
-	msgs, err := h.svc.Store().ListMessages(c.Request.Context(), convID, before, limit)
+	msgs, err := h.svc.Store().ListMessages(c.Request.Context(), convID, before, after, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50007, "msg": "查询失败"})
 		return

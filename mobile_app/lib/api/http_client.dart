@@ -231,10 +231,16 @@ class Api {
     return const [];
   }
 
-  static Future<List<Map<String, dynamic>>> listMessages(String convId, {int limit = 100, String? before}) async {
+  /// [070] 加 after 增量同步参数：传 after=<本地最后一条消息 id> 只拉比它更新的消息，
+  /// 用于进会话先显本地缓存、再后台补这段增量（before 仍用于向上翻历史）。
+  static Future<List<Map<String, dynamic>>> listMessages(String convId, {int limit = 100, String? before, String? after}) async {
     final dio = await _ensure();
     final r = await dio.get('/agent/conversations/$convId/messages',
-        queryParameters: {'limit': limit, if (before != null) 'before': before});
+        queryParameters: {
+          'limit': limit,
+          if (before != null) 'before': before,
+          if (after != null) 'after': after,
+        });
     final data = r.data['data'];
     if (data is List) return data.cast<Map<String, dynamic>>();
     return const [];
