@@ -30,10 +30,41 @@ const filteredConvs = computed(() =>
 )
 const activeConv = ref(null)
 const messages = ref([])
-const draft = ref('')
+// ============================================================
+// [068] per-conv 草稿 / 附件隔离 —— 防"切会话串台"导致敏感账密泄露
+// ------------------------------------------------------------
+// 历史 bug：旧版 draft = ref('') 是单例全局变量。客服在访客 A 输入框
+// 打了「敏感账密」草稿（未发送），点切到访客 B，textarea 内容仍残留
+// A 的草稿；若客服一回车，文本会以 B 的 activeConv.id 发出去 → 敏感
+// 信息错发给 B，造成 critical 数据泄露。
+//
+// 修复方案：把 draft / pendingFiles 改成 per-conv 字典，
+//   drafts          = { [convId]: string }
+//   pendingFilesMap = { [convId]: [{file, blobUrl, isImage}] }
+// 通过 computed currentDraft / currentPendingFiles 绑定到当前活跃会话；
+// pickConv 不再清空草稿，切回旧会话自动恢复。
+//
+// 配合 sendText / uploadAndSendFile 入口 snapshot `sendingConvId`，
+// 即使发送途中用户被弹窗 / race 切走会话，消息也锁定原 conv，
+// 不会污染新会话视图。
+// ============================================================
+const drafts = ref({})          // { [convId]: string }
 // [040] 待发送文件队列（粘贴 / 选附件追加；点发送时依次上传）
 // 每项：{ file: File, blobUrl: string|null, isImage: bool }
-const pendingFiles = ref([])
+// [068] 改成 per-conv 字典，杜绝切会话附件串台
+const pendingFilesMap = ref({}) // { [convId]: [{file, blobUrl, isImage}] }
+
+// [068] textarea v-model 绑定 —— get 读当前活跃会话草稿，set 写回字典
+const currentDraft = computed({
+  get: () => (activeConv.value ? (drafts.value[activeConv.value.id] || '') : ''),
+  set: (v) => {
+    if (activeConv.value) drafts.value[activeConv.value.id] = v
+  },
+})
+// [068] 模板 v-for 当前活跃会话的 pending 附件
+const currentPendingFiles = computed(
+  () => (activeConv.value ? (pendingFilesMap.value[activeConv.value.id] || []) : [])
+)
 
 // [055] 关联访客（同 IP 30 天内出现的其他 vid）
 const relatedDialog = ref(false)
@@ -154,36 +185,52 @@ const lastMineMsg = computed(() => {
 })
 
 // [040] 发送：先发文本（如果有），再依次上传 pendingFiles 队列里的所有附件
+// [068] 入口 snapshot sendingConvId：杜绝发送过程中切换会话造成 conv-content 错配
 async function sendText() {
-  if (!activeConv.value) return
-  const text = (draft.value || '').trim()
-  const files = pendingFiles.value.map(it => it.file)
+  // [068] 入口锁定 conv —— 整个函数生命周期内不再读 activeConv.value.id
+  const sendingConvId = activeConv.value?.id
+  if (!sendingConvId) return
+  const text = (drafts.value[sendingConvId] || '').trim()
+  const fileItems = pendingFilesMap.value[sendingConvId] || []
+  const files = fileItems.map(it => it.file)
   if (!text && files.length === 0) return
   if (!ws?.alive) {
     ElMessage.warning('与服务器断开，正在重连')
     return
   }
+  // [068] 同时锁住 conv 对象本身，避免后续 activeConv 切走时找不到原 conv
+  const sendingConv = convs.value.find(x => x.id === sendingConvId) || activeConv.value
   sending.value = true
   try {
     if (text) {
       const now = new Date().toISOString()
-      ws.send({ type: 'chat', conv: activeConv.value.id, content: text, ts: Date.now(), prio: 0 })
-      messages.value.push({
-        id: 'local-' + Date.now(),
-        sender: 'agent',
-        sender_ref: String(session.agent?.id),
-        content: text,
-        created_at: now
-      })
-      activeConv.value.last_message = { sender: 'agent', content: text, created_at: now }
-      activeConv.value.updated_at = now
-      draft.value = ''
+      // [068] WSS 路由用 sendingConvId（锁定的会话），不读 activeConv
+      ws.send({ type: 'chat', conv: sendingConvId, content: text, ts: Date.now(), prio: 0 })
+      // [068] 仅当 UI 仍停留在 sendingConvId 才做本地乐观渲染，
+      // 否则切走后 push 到 messages.value 会污染新会话视图
+      if (activeConv.value?.id === sendingConvId) {
+        messages.value.push({
+          id: 'local-' + Date.now(),
+          sender: 'agent',
+          sender_ref: String(session.agent?.id),
+          content: text,
+          created_at: now
+        })
+      }
+      // 不论是否切走，conv 对象本身的 last_message / updated_at 都要更新（左侧列表预览）
+      if (sendingConv) {
+        sendingConv.last_message = { sender: 'agent', content: text, created_at: now }
+        sendingConv.updated_at = now
+      }
+      // [068] 按 sendingConvId 清草稿，不影响新切到的其他 conv 草稿
+      drafts.value[sendingConvId] = ''
     }
     if (files.length > 0) {
-      // 先清 UI 防重复点；上传失败 uploadAndSendFile 内部静默（catch {}）
-      clearAllPending()
+      // [068] 按 sendingConvId 清 pending，不影响其他 conv 的 pending
+      clearPendingFor(sendingConvId)
       for (const f of files) {
-        await uploadAndSendFile(f)
+        // [068] 把 sendingConvId 显式传给上传函数，避免上传过程中切走出错
+        await uploadAndSendFile(f, sendingConvId)
       }
     }
   } finally {
@@ -193,73 +240,95 @@ async function sendText() {
 }
 
 // 公共上传函数，附件按钮和粘贴事件共用
-async function uploadAndSendFile(file) {
-  if (!activeConv.value || !file) return
+// [068] 加 convId 参数：调用方在入口 snapshot 后传入，杜绝 race 时 activeConv 已切走
+async function uploadAndSendFile(file, convId) {
+  // [068] 兼容旧调用（未传 convId）：fallback 用当前 activeConv，但发送路径已全部传入
+  if (!convId) convId = activeConv.value?.id
+  if (!convId || !file) return
   const fd = new FormData()
   fd.append('file', file)
   fd.append('uploader', 'agent')
-  fd.append('conv_id', activeConv.value.id)
+  fd.append('conv_id', convId)
   try {
     const r = await http.post('/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
     ws?.send({
-      type: 'chat', conv: activeConv.value.id,
+      type: 'chat', conv: convId,
       content: '', media: r.url, mkind: r.kind, mname: r.name, msize: r.size,
       ts: Date.now(), prio: 0
     })
-    messages.value.push({
-      id: 'local-' + Date.now(), sender: 'agent', sender_ref: String(session.agent?.id),
-      content: '',
-      media_url: { String: r.url, Valid: true },
-      media_kind: { String: r.kind, Valid: true },
-      media_name: { String: r.name, Valid: true },
-      created_at: new Date().toISOString()
-    })
-    nextTick(scrollToBottom)
+    // [068] 仅当 UI 仍停在 convId 才本地乐观渲染，否则只发不渲染（避免污染新会话）
+    if (activeConv.value?.id === convId) {
+      messages.value.push({
+        id: 'local-' + Date.now(), sender: 'agent', sender_ref: String(session.agent?.id),
+        content: '',
+        media_url: { String: r.url, Valid: true },
+        media_kind: { String: r.kind, Valid: true },
+        media_name: { String: r.name, Valid: true },
+        created_at: new Date().toISOString()
+      })
+      nextTick(scrollToBottom)
+    }
   } catch {}
 }
 
 // [040] 选附件：multiple 支持，所有文件追加到 pendingFiles 队列
+// [068] 入口 snapshot convId，避免 for 循环中途 activeConv 切换
 function pickFile(e) {
+  const convId = activeConv.value?.id
+  if (!convId) { e.target.value = ''; return }
   const files = e.target.files
   if (files && files.length) {
-    for (const f of files) addPendingFile(f)
+    for (const f of files) addPendingFile(f, convId)
   }
   e.target.value = ''
 }
 
-// ============= [040] pendingFiles 队列管理 =============
+// ============= [040] pendingFiles 队列管理（[068] 改为 per-conv 字典）=============
 function fmtBytes(n) {
   if (n < 1024) return n + ' B'
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
   return (n / 1024 / 1024).toFixed(1) + ' MB'
 }
 
-function addPendingFile(file) {
-  if (!file) return
+// [068] 按 convId 加入 pending 列表；调用方必须显式传 convId
+function addPendingFile(file, convId) {
+  if (!file || !convId) return
   const isImage = (file.type || '').indexOf('image/') === 0
-  pendingFiles.value.push({
+  if (!pendingFilesMap.value[convId]) {
+    pendingFilesMap.value[convId] = []
+  }
+  pendingFilesMap.value[convId].push({
     file,
     blobUrl: isImage ? URL.createObjectURL(file) : null,
     isImage,
   })
 }
 
-function removePendingFile(item) {
-  const idx = pendingFiles.value.indexOf(item)
+// [068] 按 convId 移除 pending 项；模板点 × 时传当前 activeConv.id（模板层面已锁）
+function removePendingFile(item, convId) {
+  if (!convId) convId = activeConv.value?.id
+  if (!convId) return
+  const list = pendingFilesMap.value[convId]
+  if (!list) return
+  const idx = list.indexOf(item)
   if (idx < 0) return
   if (item.blobUrl) {
     try { URL.revokeObjectURL(item.blobUrl) } catch {}
   }
-  pendingFiles.value.splice(idx, 1)
+  list.splice(idx, 1)
 }
 
-function clearAllPending() {
-  for (const it of pendingFiles.value) {
+// [068] 按 convId 清空 pending 列表 + revoke blob URL，防内存泄漏
+function clearPendingFor(convId) {
+  if (!convId) return
+  const list = pendingFilesMap.value[convId]
+  if (!list) return
+  for (const it of list) {
     if (it.blobUrl) {
       try { URL.revokeObjectURL(it.blobUrl) } catch {}
     }
   }
-  pendingFiles.value = []
+  delete pendingFilesMap.value[convId]
 }
 
 // 复制消息内容到剪贴板：文本消息复制 m.content；文件/图片消息复制 URL
@@ -287,14 +356,17 @@ function copyMessage(m) {
 
 // [040] 粘贴：剪贴板里所有 file 都追加到 pendingFiles 队列（支持一次粘多张图）
 // 纯文本粘贴不拦截，仍走默认 textarea 行为
+// [068] 入口 snapshot convId，避免循环中途 activeConv 切走
 function onPasteDraft(e) {
+  const convId = activeConv.value?.id
+  if (!convId) return
   const items = e.clipboardData?.items
   if (!items) return
   let hadFile = false
   for (const it of items) {
     if (it.kind === 'file') {
       const f = it.getAsFile()
-      if (f) { addPendingFile(f); hadFile = true }
+      if (f) { addPendingFile(f, convId); hadFile = true }
     }
   }
   if (hadFile) e.preventDefault()
@@ -991,8 +1063,9 @@ function voiceCleanup() {
 
       <el-footer v-if="activeConv" class="chat-footer">
         <!-- [040] pending 多文件预览队列：粘贴 / 选附件追加到这里，点发送才依次上传 -->
-        <div v-if="pendingFiles.length" class="pending-list">
-          <div v-for="(it, idx) in pendingFiles" :key="idx" class="pending-chip">
+        <!-- [068] currentPendingFiles：仅显示当前活跃会话的 pending，切会话自动切换显示 -->
+        <div v-if="currentPendingFiles.length" class="pending-list">
+          <div v-for="(it, idx) in currentPendingFiles" :key="idx" class="pending-chip">
             <img v-if="it.isImage" :src="it.blobUrl" class="thumb" />
             <span v-else class="file-icon">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1004,11 +1077,13 @@ function voiceCleanup() {
               <span class="name">{{ it.file.name || (it.isImage ? '图片' : '文件') }}</span>
               <span class="size">{{ fmtBytes(it.file.size || 0) }}</span>
             </span>
-            <button class="remove-btn" title="移除" @click="removePendingFile(it)">×</button>
+            <!-- [068] 移除只针对当前 activeConv，convId 自动来自模板上下文 -->
+            <button class="remove-btn" title="移除" @click="removePendingFile(it, activeConv?.id)">×</button>
           </div>
         </div>
+        <!-- [068] v-model 绑定 currentDraft computed，自动 per-conv 隔离 -->
         <el-input
-          v-model="draft"
+          v-model="currentDraft"
           type="textarea"
           :rows="3"
           resize="none"

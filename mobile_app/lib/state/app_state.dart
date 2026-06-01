@@ -203,35 +203,52 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  // [068] 防 race 设计说明（mobile 端）：
+  //   mobile_app 现状已天然不串台 —— ChatPage 是 push 新页面方式打开，
+  //   每个 conv 对应一个独立 _ChatPageState 实例，其 _input (TextEditingController)
+  //   随 ChatPage 生命周期独立创建/销毁（见 chat_page.dart line 19 / line 38-43），
+  //   切换会话走 pop+push 必然换新实例，输入框文本 0 串台。
+  //   但仍按「snapshot-on-entry」防御范式（与 admin Console [068] 对齐）：
+  //   在 sendChat / uploadAndSendFile 入口立即锁定 convId snapshot，
+  //   后续 ws.send 的 conv 字段、Message.convId、本地乐观渲染守卫全部使用 snapshot，
+  //   防止未来重构在函数体中多次读 activeConv.id 时被中途切走的 race 触发数据错配。
   Future<void> sendChat(String text) async {
     final conv = activeConv;
     if (conv == null || text.trim().isEmpty || _ws == null || agent == null) return;
+    final convIdSnap = conv.id;              // [068] 入口锁定 conv，杜绝中途切走
+    final textSnap = text.trim();            // [068] 入口锁定文本
     final now = DateTime.now();
     _ws!.send({
       'type': 'chat',
-      'conv': conv.id,
-      'content': text.trim(),
+      'conv': convIdSnap,
+      'content': textSnap,
       'ts': now.millisecondsSinceEpoch,
       'prio': 0,
     });
-    // 乐观渲染
-    messages.add(Message(
-      id: 'local-${now.millisecondsSinceEpoch}',
-      convId: conv.id,
-      sender: 'agent',
-      senderRef: agent!.id.toString(),
-      content: text.trim(),
-      createdAt: now,
-    ));
-    notifyListeners();
+    // [068] 仅当用户仍停在 snapshot 会话才本地乐观渲染，
+    //   切走了消息已正确发到原 conv，只是 UI 不污染新会话视图。
+    if (activeConv?.id == convIdSnap) {
+      messages.add(Message(
+        id: 'local-${now.millisecondsSinceEpoch}',
+        convId: convIdSnap,
+        sender: 'agent',
+        senderRef: agent!.id.toString(),
+        content: textSnap,
+        createdAt: now,
+      ));
+      notifyListeners();
+    }
   }
 
   /// [041] 客服上传文件并发出 media 消息（图片 / 文件，跟 admin web Console.vue 对齐）。
   /// 失败返回 false，调用方可用来 toast / 重试。
+  /// [068] 入口 snapshot convIdSnap，上传 / ws.send / 乐观渲染全部锁定原 conv，
+  ///   防止上传期间 (await Api.uploadFile) 用户切走导致文件挂到错误会话。
   Future<bool> uploadAndSendFile(File file) async {
     final conv = activeConv;
     if (conv == null || _ws == null || agent == null) return false;
-    final res = await Api.uploadFile(file, conv.id);
+    final convIdSnap = conv.id;              // [068] 入口锁定 conv
+    final res = await Api.uploadFile(file, convIdSnap);
     if (res == null) return false;
     final url = res['url']?.toString() ?? '';
     if (url.isEmpty) return false;
@@ -241,7 +258,7 @@ class AppState extends ChangeNotifier {
     final now = DateTime.now();
     _ws!.send({
       'type': 'chat',
-      'conv': conv.id,
+      'conv': convIdSnap,
       'content': '',
       'media': url,
       'mkind': kind,
@@ -250,18 +267,21 @@ class AppState extends ChangeNotifier {
       'ts': now.millisecondsSinceEpoch,
       'prio': 0,
     });
-    messages.add(Message(
-      id: 'local-${now.millisecondsSinceEpoch}',
-      convId: conv.id,
-      sender: 'agent',
-      senderRef: agent!.id.toString(),
-      content: '',
-      mediaUrl: url,
-      mediaKind: kind,
-      mediaName: name,
-      createdAt: now,
-    ));
-    notifyListeners();
+    // [068] 切走了就不污染新会话 UI，但文件已正确发到 convIdSnap
+    if (activeConv?.id == convIdSnap) {
+      messages.add(Message(
+        id: 'local-${now.millisecondsSinceEpoch}',
+        convId: convIdSnap,
+        sender: 'agent',
+        senderRef: agent!.id.toString(),
+        content: '',
+        mediaUrl: url,
+        mediaKind: kind,
+        mediaName: name,
+        createdAt: now,
+      ));
+      notifyListeners();
+    }
     return true;
   }
 
