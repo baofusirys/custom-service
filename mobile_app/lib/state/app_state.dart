@@ -518,6 +518,10 @@ class AppState extends ChangeNotifier {
         _sendRead(convId);
         snd.playSound(agentSound);
       }
+      // [071] 访客来电（voice 通话事件）也算已联系——爷爷：有来电就算（含秒挂）
+      if (fromSys && kind == 'voice_finished') {
+        activeConv!.hasVisitorMsg = true;
+      }
       notifyListeners();
       return;
     }
@@ -531,7 +535,10 @@ class AppState extends ChangeNotifier {
         c.hasVisitorMsg = true;
         snd.playSound(agentSound);
       }
-      // [067] voice sys 不再翻 hasVisitorMsg；只走下面的 updatedAt / 预览刷新 + 上浮
+      // [071] 访客来电也算已联系（爷爷：有来电就算）；voice 不计未读、不外加提示音
+      if (fromSys && kind == 'voice_finished') {
+        c.hasVisitorMsg = true;
+      }
       c.updatedAt = m.createdAt;
       c.lastMessageSender = senderTag;
       c.lastMessagePreview = preview;

@@ -686,6 +686,10 @@ onMounted(async () => {
           sendReadAck(env.conv)
           playSound(agentSound.value)
         }
+        // [071] 访客来电（voice 通话事件）也实时翻「已联系」——爷爷：有来电就算（含秒挂）
+        if (fromSys && env.extra?.kind === 'voice_finished') {
+          activeConv.value.has_visitor_msg = true
+        }
         return
       }
 
@@ -697,6 +701,10 @@ onMounted(async () => {
           conv.unread = (conv.unread || 0) + 1
           conv.has_visitor_msg = true   // [065] 实时把会话从「未联系」翻成「已联系」
           playSound(agentSound.value)
+        }
+        // [071] 访客来电也实时翻「已联系」（不计未读、不外加提示音）
+        if (fromSys && env.extra?.kind === 'voice_finished') {
+          conv.has_visitor_msg = true
         }
         conv.updated_at = new Date(env.ts || Date.now()).toISOString()
         // 实时更新最后一条消息预览（WSS 本地维护，跟服务端 last_message 字段一致）

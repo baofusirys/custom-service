@@ -4,6 +4,47 @@
 
 ---
 
+## [071] 2026-06-01 18:32 — 「已联系」口径放宽：访客来电也算（含秒挂）· v0.6.7
+
+**起因 / 需求**
+
+爷爷反馈：访客「上来直接打电话」（一进来就拨客服、没发文字）也是主动联系，应该出现在「已联系」列表，别让客服漏掉来电访客。这与 [067] 相反——[067] 当时把 voice 通话事件从「已联系」去掉（怕「访客只点来电秒挂」误判）。
+
+**决策（爷爷拍板）**
+
+用 AskUserQuestion 跟爷爷确认边界（来电 cancel 秒挂怎么算）：① 排除秒挂其余都算 / ② 有来电就算（含秒挂）/ ③ 只有接通才算。**爷爷选 ②「有来电就算」**——最不漏人，访客只要拨打过客服电话（含秒挂取消）都算已联系，不区分结果。宁可多显示也别漏来电访客。
+
+**根因 / 数据事实**
+
+voice 通话事件以 sys 消息落库（`sender='sys'`, `sender_ref='voice:'+reason/code`，service.go OnVoiceCallFinished），voice 全是访客拨客服、无客服外呼，故「有 voice 消息」即「访客打过电话」。[067] 把 EXISTS 收紧到只认 `sender='visitor'`，导致来电访客不算已联系。
+
+**改了什么（三端齐改）**
+
+> 修改文件 3 个（backend 1 + admin 1 + mobile_app 1），升版本号 0.6.6 → 0.6.7
+
+- **后端**（核心，决定列表）：`store.go` ListOpenConversations 的 has_visitor_msg EXISTS 加回 voice —— `m.sender='visitor' OR (m.sender='sys' AND m.sender_ref LIKE 'voice%')`。LIKE 'voice%' 兼容 [069] 的 "voice:reason" 格式，走 idx_conv_time 索引。
+- **admin**（实时翻牌）：`Console.vue` WSS onMessage 当前/非当前两分支，收到 `extra.kind==='voice_finished'` 时把 has_visitor_msg 实时翻 true（不计未读、不外加提示音）。
+- **App**（实时翻牌）：`app_state.dart` _onEnvelope 同样两分支，`kind=='voice_finished'` 翻 hasVisitorMsg=true。
+
+isContacted（admin/mobile 都信后端 has_visitor_msg 字段）不用改——后端字段已含 voice，自动生效。
+
+**业务流程对比**
+
+| 场景 | 改动前（[067]） | 改动后（[071]） |
+| --- | --- | --- |
+| 访客上来直接打电话（任何结果） | 不算已联系、不进列表 | 算已联系、进列表 |
+| 访客来电秒挂取消(cancel) | 不算 | 也算（爷爷：有来电就算） |
+| 访客发文字 | 算（不变） | 算（不变） |
+| 客服端实时性 | 来电不翻牌 | 来电瞬间翻「已联系」、不用刷新 |
+
+**触发场景与边界 + 验证方式**
+
+触发：访客拨打客服电话（接通/未接/拒接/忙线/秒挂任一结果）→ 该会话即算已联系。
+边界：voice 消息 sender_ref 形如 "voice:hangup/no_answer/rejected/busy/cancel/..."，LIKE 'voice%' 全覆盖；后端 SQL 决定刷新/拉取口径、前端 WSS 翻牌决定实时性，两者一致。
+验证：后端 `go build/vet` PASS；App `flutter analyze` 零新增 error/warning（仅既有 info）；Web `vite build` PASS（✓ 8.15s）。手测：访客拨打后秒挂 → 客服端该会话立即进「已联系」筛选。
+
+---
+
 ## [070] 2026-06-01 17:59 — 进会话不再转圈：三端消息本地缓存 + 增量同步（微信级秒显）· v0.6.6
 
 **起因 / 需求**

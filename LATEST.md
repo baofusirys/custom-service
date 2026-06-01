@@ -1,4 +1,4 @@
-### 当前版本：v0.6.6 · 2026-06-01
+### 当前版本：v0.6.7 · 2026-06-01
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -67,7 +67,8 @@
         data-cs-site="default" defer></script>
 ```
 
-## 最近 3 次重大改动摘要
+## 最近重大改动摘要（倒序，最新在上）
+- **[071] 2026-06-01 v0.6.7**：「已联系」口径放宽——访客来电也算（含秒挂取消）。爷爷要"上来直接打电话"的访客也进已联系列表、别漏来电访客（与 [067] 相反）。AskUserQuestion 确认后爷爷拍板"有来电就算"。改 3 端：① backend store.go ListOpenConversations EXISTS 加回 `OR (m.sender='sys' AND m.sender_ref LIKE 'voice%')`；② admin Console.vue + ③ mobile app_state.dart WSS onMessage 收到 voice_finished 实时翻 has_visitor_msg。isContacted 信后端字段不改。go build/vet + flutter analyze + vite build 全 PASS。
 - **[070] 2026-06-01 v0.6.6**：进会话不再转圈——三端消息本地缓存 + 增量同步（微信级秒显）。起因：爷爷反馈 App+web 每次点进会话都转几秒「加载消息中」才显示，跟微信不一样。根因：前端无本地缓存、每次进会话现拉海外服务器（东京/美国，RTT 高）。改动：① backend `ListMessages` 加 after 增量参数（store.go/http.go）；② App messages 单例→按会话缓存 Map + shared_preferences 持久化 + openConv 三段式（内存秒显→持久化垫底→后台增量 merge），app_state/settings/http_client/models.dart；③ Web Console.vue 同款 + localStorage 持久化 + session.js 登出清缓存。乐观 local- 消息按内容去重防重复，LRU 60会话×200条防膨胀，延续 [068] 防串台铁律。
 - **[069] 2026-06-01 v0.6.5**：iOS 客服 App 接听后 17s 无声 → 修复 race / 异常静默 + backend 5s 看门狗 + voice_finished reason。起因：集成方 [073] 工单 iOS 客服接听后浮窗显示「通话中」但访客完全听不到客服，访客 17s 后 ICE 超时强断、客服端永不弹错。根因三层叠加：① mobile `_onOffer` `setRemoteDescription / createAnswer / setLocalDescription` 三步同一 try/catch 异常静默；② APNs 冷启 race：offer 先到、`_pc==null`、`_onIce` candidate 直接 drop → DTLS 永远握不上；③ accept() mic preflight 缺失，后端从未感知失败。改动 3 个文件 5 patch：① mobile `voice_controller.dart` Patch 1 三阶段独立 try/catch + sdp 空值校验 + `voice_signal_error{phase, reason, call_id, agent_id}` 上报；② Patch 2 accept() mic preflight + `_classifyMicError` 归一 5 种 reason + `voice_accept_failed` 上报；③ Patch 4 新增 `_prepareForIncomingCall` + `_pcReady` + `_earlyIceQueue` 缓存早到 ICE candidate + setRemote 后 flush + 所有 `await _pc!.xxx` 全包独立 try/catch；④ backend `hub.go` Patch 3 加 `pendingAccepts/acceptTimers sync.Map` + 5s 看门狗 + `fireAcceptWatchdog` LoadAndDelete 原子 dedup + voice_answer/end/reject 取消看门狗；⑤ `service.go` Patch 5 `codeToText(code, reason, durSec)` 优先按 reason 渲染 9 种中文 + `OnVoiceCallFinished` 签名加 reason + SenderRef 升级为 `voice:reason` 形式。验证：go build/vet PASS；真机三脚本：mic 关 / kill App 接听 / 故意丢 answer。
 - **[068] 2026-06-01 v0.6.4**：修复客服发消息串台严重 bug（敏感账密泄露给陌生访客）。起因：爷爷截图反馈客服在 A 会话输了账密草稿未发 → 切到 B 会话 textarea 仍留 A 草稿 → 误按回车发给 B → critical 数据泄露。根因：`admin/src/views/Console.vue` 的 `draft = ref('')` 是全局单例 + pickConv 切会话不清 draft + sendText 用 `activeConv.value.id` 实时读存在 race。改动：① admin Console.vue 改成 `drafts = ref({})` per-conv 字典 + 新 computed `currentDraft/currentPendingFiles` + sendText 入口 `const sendingConvId = activeConv.value?.id` snapshot 锁定 + ws.send / messages.push 守卫全用 snapshot + uploadAndSendFile 改签名 (file, convId) + addPendingFile/removePendingFile/clearPendingFor 全部 per-conv（blob URL revoke 防内存泄漏）+ pickFile/onPasteDraft 入口 snapshot；② `mobile_app/lib/state/app_state.dart` sendChat/uploadAndSendFile 入口加 `convIdSnap/textSnap` snapshot + 乐观渲染 `if (activeConv?.id == convIdSnap)` 守卫范式对齐 admin（mobile 因 ChatPage push 隔离原本不串台，仅做防御性硬化）。TODO：backend `hub.go case "chat"` agent 路径需加 `agentInConv(c.ID, e.ConvID)` 校验防恶意客户端伪造 conv_id。
