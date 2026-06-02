@@ -12,8 +12,14 @@ name: custom-service
 # 升级（pull 新镜像 + 重启，不编译）：
 #   docker compose pull && docker compose up -d
 #
+# 【国内源加速】拉 ghcr.io 慢时，在 .env 里设 REGISTRY_BASE 指向阿里云 ACR：
+#   REGISTRY_BASE=registry.cn-hangzhou.aliyuncs.com/baofusir
+#   docker login registry.cn-hangzhou.aliyuncs.com   # 私有库首次要登录；公开库可跳过
+#   docker compose pull && docker compose up -d
+#   不设 REGISTRY_BASE 时默认用 ghcr.io/baofusirys（国外）。镜像名 cs-* 两边一致。
+#
 # 跟开发版 docker-compose.yml 区别：
-#   - 所有 build: 改为 image: ghcr.io/baofusirys/cs-*:latest
+#   - 所有 build: 改为 image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-*:latest
 #   - 不需要源码，纯运维操作
 # 想从源码自己 build？用 docker-compose.yml（开发版，docker compose up -d --build）
 # ============================================================
@@ -23,7 +29,7 @@ x-image-tag: &tag latest
 services:
 
   mysql:
-    image: ghcr.io/baofusirys/cs-mysql:latest
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-mysql:latest
     container_name: cs-mysql
     restart: unless-stopped
     environment:
@@ -43,7 +49,7 @@ services:
       start_period: 30s
 
   redis:
-    image: ghcr.io/baofusirys/cs-redis:latest
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-redis:latest
     container_name: cs-redis
     restart: unless-stopped
     environment:
@@ -60,7 +66,7 @@ services:
       start_period: 10s
 
   backend:
-    image: ghcr.io/baofusirys/cs-backend:latest
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-backend:latest
     container_name: cs-backend
     restart: unless-stopped
     depends_on:
@@ -108,7 +114,7 @@ services:
       start_period: 20s
 
   admin:
-    image: ghcr.io/baofusirys/cs-admin:latest
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-admin:latest
     container_name: cs-admin
     restart: unless-stopped
     environment:
@@ -116,7 +122,7 @@ services:
     networks: [cs-net]
 
   widget:
-    image: ghcr.io/baofusirys/cs-widget:latest
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-widget:latest
     container_name: cs-widget
     restart: unless-stopped
     environment:
@@ -124,7 +130,7 @@ services:
     networks: [cs-net]
 
   coturn:
-    image: ghcr.io/baofusirys/cs-coturn:latest
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-coturn:latest
     container_name: cs-coturn
     restart: unless-stopped
     network_mode: host
@@ -142,7 +148,7 @@ services:
       - ${HOST_DATA_DIR:-/srv/cs-data}/logs/coturn:/var/log/coturn
 
   nginx:
-    image: ghcr.io/baofusirys/cs-nginx:latest
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-nginx:latest
     container_name: cs-nginx
     restart: unless-stopped
     depends_on:

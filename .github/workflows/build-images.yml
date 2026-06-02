@@ -16,6 +16,12 @@ env:
   REGISTRY: ghcr.io
   # 镜像名空间用仓库 owner（小写）：ghcr.io/baofusirys/cs-*
   OWNER: ${{ github.repository_owner }}
+  # 国内源（阿里云 ACR）双推：配齐下面 4 个 Repo Secret 才启用，没配则只推 GHCR（不影响现状）。
+  #   ALIYUN_REGISTRY  例 registry.cn-hangzhou.aliyuncs.com
+  #   ALIYUN_NAMESPACE 例 baofusir（阿里云容器镜像服务里建的命名空间）
+  #   ALIYUN_USERNAME / ALIYUN_PASSWORD  ACR 访问凭证（不是阿里云登录密码，是「访问凭证」里设的）
+  ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
+  ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
 
 jobs:
   build:
@@ -60,6 +66,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 配了阿里云 Secret 才登录国内源（env 引用 secret，可在 if 里判断）
+      - name: Login to Aliyun ACR
+        if: ${{ env.ALIYUN_REGISTRY != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ALIYUN_REGISTRY }}
+          username: ${{ secrets.ALIYUN_USERNAME }}
+          password: ${{ secrets.ALIYUN_PASSWORD }}
+
       - name: Compute image tags
         id: tags
         run: |
@@ -70,6 +85,14 @@ jobs:
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             VER="${{ github.ref_name }}"
             TAGS="$TAGS,$IMG:${VER#v}"
+          fi
+          # 国内源（阿里云 ACR）双推：配了 Secret 才追加同名 tag，一次 build 同时推两个 registry
+          if [[ -n "${{ env.ALIYUN_REGISTRY }}" && -n "${{ env.ALIYUN_NAMESPACE }}" ]]; then
+            ALI="${{ env.ALIYUN_REGISTRY }}/${{ env.ALIYUN_NAMESPACE }}/${{ matrix.name }}"
+            TAGS="$TAGS,$ALI:latest,$ALI:sha-$SHORT_SHA"
+            if [[ "${{ github.ref_type }}" == "tag" ]]; then
+              TAGS="$TAGS,$ALI:${VER#v}"
+            fi
           fi
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
           echo "Will push: $TAGS"

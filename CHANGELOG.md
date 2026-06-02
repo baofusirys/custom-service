@@ -4,6 +4,41 @@
 
 ---
 
+## [074] 2026-06-02 22:50 — CI 双推国内源（阿里云 ACR）+ 生产 compose 镜像源可一键切换 · v0.6.9
+
+**起因 / 需求**
+
+爷爷反馈：服务器从 GHCR（GitHub 美国）拉镜像拉不下来（国内网络慢/超时）。希望镜像能推一份到国内源，服务器从国内秒拉。
+
+**决策（爷爷拍板）**
+
+用 AskUserQuestion 给了 4 个方案，爷爷选 **A. 阿里云 ACR**：
+- A 阿里云 ACR（选中）：CI build 后双推 GHCR + 阿里云，国内稳、免费个人版
+- B 配 GHCR 国内代理：省账号但代理稳定性差 —— 否
+- C 继续纯 build：现有服务器够用但开新服务器慢 —— 否
+
+**改了什么（修改文件 3 个，新增 0 删除 0）**
+
+- `.github/workflows/build-images.yml`：build 后**双推**——① 新增 `Login to Aliyun ACR` step（`if: env.ALIYUN_REGISTRY != ''`，配了 Secret 才执行）；② env 加 `ALIYUN_REGISTRY`/`ALIYUN_NAMESPACE`（引用 Secret）；③ Compute tags 追加阿里云同名 tag（latest/sha/版本号）。**没配 Secret 时只推 GHCR，完全不破坏现状**。
+- `docker-compose.production.yml`：7 个 `image:` 由 `ghcr.io/baofusirys/cs-*` 改为 `${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-*`，服务器 `.env` 设 `REGISTRY_BASE` 即可一键切国内/国外源 + 顶部注释加用法。
+- `.env.example`：新增 `REGISTRY_BASE` 说明段（仅 production 拉镜像部署相关）。
+
+**业务流程对比**
+
+- 改前：CI 只推 GHCR，国内服务器 `docker compose pull` 慢/拉不下来。
+- 改后：配齐阿里云 4 个 Secret 后，CI 同时推 GHCR + 阿里云；生产服务器 `.env` 设 `REGISTRY_BASE=registry.cn-hangzhou.aliyuncs.com/<命名空间>` 即可秒拉。
+
+**待爷爷提供（才能真正启用国内源）**
+
+阿里云容器镜像服务（ACR）的 registry 地址 / 命名空间 / 用户名 / 密码 → 存到 GitHub Repo Secret：`ALIYUN_REGISTRY`、`ALIYUN_NAMESPACE`、`ALIYUN_USERNAME`、`ALIYUN_PASSWORD`。
+
+**触发场景与边界 + 验证方式**
+
+边界：未配 Secret 时 `Login to Aliyun` step 因 `if env != ''` 跳过、tags 不追加阿里云 → CI 行为同现状（只推 GHCR），不会 break；本台测试服走源码 build（docker-compose.yml），本改动不影响它。
+验证：YAML 结构合法；push 后观察 Actions——未配 Secret 应只见 GHCR 推送、阿里云 step skipped。**本改动不影响现有测试服运行（它走 build，不拉镜像）**。
+
+---
+
 ## [073] 2026-06-02 19:52 — 客服点开会话不再把会话时间顶成「点击时间」 · v0.6.9
 
 **起因 / 需求**
