@@ -1,4 +1,4 @@
-### 当前版本：v0.6.8 · 2026-06-01
+### 当前版本：v0.6.9 · 2026-06-02
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -68,6 +68,7 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[073] 2026-06-02 v0.6.9**：客服点开会话不再把会话时间顶成「点击时间」。起因：爷爷反馈列表时间应是「消息来的时间」而非「客服点开的时间」（9:00 来消息、9:10 点开看 → 列表变 9:10）。根因（后端三端共性 bug）：列表 ORDER BY updated_at + web/Swift/Flutter 三端都显示 updated_at，而客服点开路径上 `AssignAgent`(接管)/`MarkRead`/`UpdateLastRead`(已读) 三个写操作都顺手刷了 updated_at；[072] 只拦了 page_navigation、漏了这三条直接 UPDATE。改动：仅后端 store.go 这三个函数去掉 `updated_at=?`，updated_at 自此只由真实消息(InsertMessage)维护 = 最后消息时间。无需改前端，三端自动好。go build PASS，需服务器 `docker pull` 生效。
 - **[072] 2026-06-01 v0.6.8**：页面访问不再顶起会话列表的时间和排序。起因：爷爷发现「访客访问了 XX 页面」这种浏览动作把会话顶到列表最上、改了最新消息时间。根因：InsertMessage 对所有 sys 消息刷 updated_at + 列表 ORDER BY updated_at。改 3 端（精确只动 `page:` 前缀，voice 来电等其他 sys 照旧上浮）：① backend store.go InsertMessage `page:` 前缀不刷 updated_at + getLastMessagePreview 排除 `page:` + import strings；② admin Console.vue + ③ app_state.dart WSS onMessage 页面访问只显示在聊天记录、不更新时间/不上浮。
 - **[071] 2026-06-01 v0.6.7**：「已联系」口径放宽——访客来电也算（含秒挂取消）。爷爷要"上来直接打电话"的访客也进已联系列表、别漏来电访客（与 [067] 相反）。AskUserQuestion 确认后爷爷拍板"有来电就算"。改 3 端：① backend store.go ListOpenConversations EXISTS 加回 `OR (m.sender='sys' AND m.sender_ref LIKE 'voice%')`；② admin Console.vue + ③ mobile app_state.dart WSS onMessage 收到 voice_finished 实时翻 has_visitor_msg。isContacted 信后端字段不改。go build/vet + flutter analyze + vite build 全 PASS。
 - **[070] 2026-06-01 v0.6.6**：进会话不再转圈——三端消息本地缓存 + 增量同步（微信级秒显）。起因：爷爷反馈 App+web 每次点进会话都转几秒「加载消息中」才显示，跟微信不一样。根因：前端无本地缓存、每次进会话现拉海外服务器（东京/美国，RTT 高）。改动：① backend `ListMessages` 加 after 增量参数（store.go/http.go）；② App messages 单例→按会话缓存 Map + shared_preferences 持久化 + openConv 三段式（内存秒显→持久化垫底→后台增量 merge），app_state/settings/http_client/models.dart；③ Web Console.vue 同款 + localStorage 持久化 + session.js 登出清缓存。乐观 local- 消息按内容去重防重复，LRU 60会话×200条防膨胀，延续 [068] 防串台铁律。

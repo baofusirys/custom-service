@@ -4,6 +4,42 @@
 
 ---
 
+## [073] 2026-06-02 19:52 — 客服点开会话不再把会话时间顶成「点击时间」 · v0.6.9
+
+**起因 / 需求**
+
+爷爷反馈 App（web 客服工作台也一样）的 bug：会话列表那个时间应该是「消息来的时间」，不是「客服点开这个会话的时间」。现状：访客 9:00 来消息，客服点开看了一眼，10 分钟后再点开，返回列表时该会话时间变成了 9:10（点击时刻），排序也跟着乱。
+
+**根因（后端，三端共性 bug）**
+
+会话列表 `ORDER BY updated_at DESC` + 侧边显示 updated_at（web / Swift / Flutter 三端都取后端 updated_at）。而「客服点开会话」这条路径上有三个写操作都顺手刷了 `updated_at=now()`：① `AssignAgent` 接管会话 ② `MarkRead` 标记已读 ③ `UpdateLastRead` 已读落地。[072] 当时只拦了 `InsertMessage` 里的 page_navigation，**漏了这三条不经过 InsertMessage 的直接 UPDATE 路径**。
+
+**改了什么**
+
+> 修改功能 3 个（修复），删除功能 0 个，新增功能 0 个。修改文件 1 个（backend/internal/store/store.go），改 3 个函数，升版本 0.6.8 → 0.6.9
+
+- `AssignAgent`（store.go:315）：去掉 SQL 里的 `updated_at=?`，只更新 agent_id（接管不是新消息，不该上浮）
+- `MarkRead`（store.go:504）：去掉 `updated_at=?`，只清未读计数
+- `UpdateLastRead`（store.go:518）：去掉 `updated_at=?`，只推 last_read_*_at + 清对应未读
+- 改后 `updated_at` 仅由 `InsertMessage`（真实 visitor/agent 消息、非 page 的 sys）维护 = 纯粹「最后一条消息时间」。**无需改任何前端——web / Swift / Flutter 三端自动好**。
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 访客 9:00 来消息、客服 9:10 点开看 | 列表时间变 9:10、会话上浮 | 列表时间保持 9:00、不上浮 |
+| 客服接管会话 | 会话上浮到顶 | 位置不变（无新消息）|
+| 访客发新消息 | 上浮 + 更新时间 | 仍上浮 + 更新时间（正确，真实活动）|
+| 访客来电(voice) | 上浮 | 仍上浮（[071] 来电是真实活动）|
+
+**触发场景与边界 + 验证方式**
+
+触发：客服点开任意会话（触发 assign + 已读）→ 该会话列表时间/排序不变。
+边界：只去掉「接管/已读」的 updated_at 刷新；真实消息（InsertMessage visitor/agent/非 page 的 sys）照旧刷 updated_at 上浮；`CloseConversation` 仍刷 updated_at（已关闭会话不在 open 列表，无影响）。
+验证：后端 `go build ./...` PASS（BUILD_OK）。手测：客服点开旧会话 → 返回列表，时间停在最后一条消息时刻不动；访客发新消息 → 正常上浮。**需服务器 `docker pull` 新镜像后生效，三端 App/web 不用更新**。
+
+---
+
 ## [072] 2026-06-01 19:52 — 页面访问不再顶起会话列表的时间和排序 · v0.6.8
 
 **起因 / 需求**

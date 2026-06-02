@@ -313,9 +313,12 @@ VALUES(?, ?, ?, 'open', 0, 0, ?, ?)`,
 }
 
 func (s *Store) AssignAgent(ctx context.Context, convID string, agentID int64) error {
+	// [073] 接管会话不再刷 updated_at：客服「点开/接管」会话不是「新消息活动」，
+	//   不应顶起会话在列表的时间和排序（updated_at 仅代表「最后一条消息时间」）。
+	//   原先 SET updated_at=now() 会让客服「点开看一眼」把会话时间改成点击时间（爷爷反馈的 bug）。
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET agent_id=?, updated_at=? WHERE id=? AND status='open'`,
-		agentID, time.Now(), convID)
+		`UPDATE conversations SET agent_id=? WHERE id=? AND status='open'`,
+		agentID, convID)
 	return err
 }
 
@@ -506,9 +509,11 @@ func (s *Store) MarkRead(ctx context.Context, convID, by string) error {
 	if by == "agent" {
 		col = "unread_agent"
 	}
+	// [073] 标记已读不再刷 updated_at：已读是「客服查看」动作、不是新消息，
+	//   不应顶起会话列表的时间/排序。只清未读计数。
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET `+col+`=0, updated_at=? WHERE id=?`,
-		time.Now(), convID)
+		`UPDATE conversations SET `+col+`=0 WHERE id=?`,
+		convID)
 	return err
 }
 
@@ -525,9 +530,11 @@ func (s *Store) UpdateLastRead(ctx context.Context, convID, role string, at time
 	default:
 		return errors.New("invalid role for UpdateLastRead")
 	}
+	// [073] 已读不再刷 updated_at（同 MarkRead / AssignAgent）：避免客服点开会话标记已读
+	//   把会话时间顶成点击时间。只推 last_read_*_at + 清对应未读。
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET `+col+`=?, `+unreadCol+`=0, updated_at=? WHERE id=?`,
-		at, time.Now(), convID)
+		`UPDATE conversations SET `+col+`=?, `+unreadCol+`=0 WHERE id=?`,
+		at, convID)
 	return err
 }
 
