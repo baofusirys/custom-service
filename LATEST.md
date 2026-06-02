@@ -12,6 +12,7 @@
 - 远端数据目录：`/srv/cs-data/{logs,uploads,ssl}`（铁律：必须在代码仓库外，详见 [CLAUDE.md 数据安全铁律]）
 - **远端 .env 路径**：`/srv/cs-data/.env`（[061] 起永久搬到仓库目录外，避免被 rsync/sftp 部署误删）
 - **启动命令**：`cd /custom-service && docker compose --env-file /srv/cs-data/.env up -d --build`
+- **国内镜像源（pull 加速，可选）**：`REGISTRY_BASE=crpi-saarj7fitzff243d.cn-zhangjiakou.personal.cr.aliyuncs.com/baofusir`（阿里云张家口个人版，镜像公开免登录；配 `docker-compose.production.yml` + `docker compose pull` 用。CI 已配 4 个 ALIYUN_* Secret 自动双推 GHCR+阿里云。详见 CHANGELOG [074][075]）
 - 入口：
   - 管理后台 `https://<你的域名>/admin/`
   - Widget 演示 `https://<你的域名>/widget/demo.html`
