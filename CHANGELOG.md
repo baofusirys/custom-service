@@ -4,6 +4,50 @@
 
 ---
 
+## [075] 2026-06-02 23:42 — 阿里云国内镜像源实际打通（张家口个人版，7 镜像已推 + 公开）· v0.6.9
+
+**起因 / 需求**
+
+[074] 配好 CI 双推框架后，爷爷提供 AccessKey 让直接打通国内源（GHCR 在国内拉不下来）。
+
+**做了什么（运维操作，用 AK 调阿里云 OpenAPI + 服务器 docker 完成）**
+
+- 验证 AK（主账号 root），激活个人版 ACR，定位实例地域 = **cn-zhangjiakou（张家口）**
+- 创建**公开**命名空间 `baofusir`
+- 把测试服已 build 的 7 个镜像 tag + push 到个人版 registry，并把 7 仓库设为**公开**
+- 登出后匿名 `docker pull` 验证通过（digest 一致）
+
+**真实坐标（关键，以后查 —— 用户名/密码见 ACR「访问凭证」页，不写入仓库）**
+
+- registry：`crpi-saarj7fitzff243d.cn-zhangjiakou.personal.cr.aliyuncs.com`
+- namespace：`baofusir`
+- 镜像：`<registry>/baofusir/cs-{backend,admin,widget,nginx,coturn,redis,mysql}:latest`
+- 生产 `REGISTRY_BASE=crpi-saarj7fitzff243d.cn-zhangjiakou.personal.cr.aliyuncs.com/baofusir`
+
+**坑（血泪教训）**
+
+个人版 ACR 的 registry 域名是**专属的** `crpi-xxx.cn-zhangjiakou.personal.cr.aliyuncs.com`，
+不是通用的 `registry.cn-zhangjiakou.aliyuncs.com`——用通用域名一直 403/401。正确域名在控制台「访问凭证」页查。
+
+**改了什么（文件 3 个，仅注释/示例域名）**
+
+- `.env.example` / `docker-compose.production.yml` / `.github/workflows/build-images.yml`：示例域名由占位 `registry.cn-hangzhou` 改为真实 `crpi-...` 个人版域名。
+
+**业务流程对比**
+
+- 改前：服务器从 GHCR（美国）拉镜像慢/拉不下来。
+- 改后：服务器 `.env` 设 `REGISTRY_BASE=crpi-.../baofusir`，`docker compose pull` 从张家口**秒拉（公开免登录）**。
+
+**待办（CI 自动双推，可选）**
+
+配 4 个 GitHub Secret（`ALIYUN_REGISTRY`/`ALIYUN_NAMESPACE`/`ALIYUN_USERNAME`/`ALIYUN_PASSWORD`）后，每次 push 自动双推 GHCR + 阿里云。PASSWORD 需在 ACR「访问凭证」页设固定密码。
+
+**验证方式**
+
+`docker logout` 后匿名 `docker pull .../baofusir/cs-backend:latest` → `Status: Downloaded`，digest `a342ad...` 一致。
+
+---
+
 ## [074] 2026-06-02 22:50 — CI 双推国内源（阿里云 ACR）+ 生产 compose 镜像源可一键切换 · v0.6.9
 
 **起因 / 需求**

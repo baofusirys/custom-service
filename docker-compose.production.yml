@@ -13,8 +13,8 @@ name: custom-service
 #   docker compose pull && docker compose up -d
 #
 # 【国内源加速】拉 ghcr.io 慢时，在 .env 里设 REGISTRY_BASE 指向阿里云 ACR：
-#   REGISTRY_BASE=registry.cn-hangzhou.aliyuncs.com/baofusir
-#   docker login registry.cn-hangzhou.aliyuncs.com   # 私有库首次要登录；公开库可跳过
+#   REGISTRY_BASE=crpi-saarj7fitzff243d.cn-zhangjiakou.personal.cr.aliyuncs.com/baofusir
+#   （阿里云个人版 ACR 的镜像已设为公开，匿名直接 pull，无需 docker login）
 #   docker compose pull && docker compose up -d
 #   不设 REGISTRY_BASE 时默认用 ghcr.io/baofusirys（国外）。镜像名 cs-* 两边一致。
 #

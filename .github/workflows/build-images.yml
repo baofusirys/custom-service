@@ -17,9 +17,10 @@ env:
   # 镜像名空间用仓库 owner（小写）：ghcr.io/baofusirys/cs-*
   OWNER: ${{ github.repository_owner }}
   # 国内源（阿里云 ACR）双推：配齐下面 4 个 Repo Secret 才启用，没配则只推 GHCR（不影响现状）。
-  #   ALIYUN_REGISTRY  例 registry.cn-hangzhou.aliyuncs.com
-  #   ALIYUN_NAMESPACE 例 baofusir（阿里云容器镜像服务里建的命名空间）
-  #   ALIYUN_USERNAME / ALIYUN_PASSWORD  ACR 访问凭证（不是阿里云登录密码，是「访问凭证」里设的）
+  #   ALIYUN_REGISTRY  crpi-saarj7fitzff243d.cn-zhangjiakou.personal.cr.aliyuncs.com（个人版专属域名）
+  #   ALIYUN_NAMESPACE baofusir（阿里云容器镜像服务里建的命名空间）
+  #   ALIYUN_USERNAME  nick8780981961（个人版账号登录名，「访问凭证」页显示）
+  #   ALIYUN_PASSWORD  在 ACR「访问凭证」页设置的固定密码
   ALIYUN_REGISTRY: ${{ secrets.ALIYUN_REGISTRY }}
   ALIYUN_NAMESPACE: ${{ secrets.ALIYUN_NAMESPACE }}
 
