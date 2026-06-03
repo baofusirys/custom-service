@@ -266,7 +266,7 @@ const lastMineMsg = computed(() => {
 async function sendText() {
   // [068] 入口锁定 conv —— 整个函数生命周期内不再读 activeConv.value.id
   const sendingConvId = activeConv.value?.id
-  if (!sendingConvId) return
+  if (!sendingConvId) { ElMessage.warning('请先选择一个会话再发送'); return }   // [078] 明确提示、不静默（配合后端 [077] 防孤儿）
   const text = (drafts.value[sendingConvId] || '').trim()
   const fileItems = pendingFilesMap.value[sendingConvId] || []
   const files = fileItems.map(it => it.file)
@@ -321,7 +321,8 @@ async function sendText() {
 async function uploadAndSendFile(file, convId) {
   // [068] 兼容旧调用（未传 convId）：fallback 用当前 activeConv，但发送路径已全部传入
   if (!convId) convId = activeConv.value?.id
-  if (!convId || !file) return
+  if (!convId) { ElMessage.warning('会话已失效，请重新选择会话'); return }   // [078] conv 空明确提示，不静默丢弃
+  if (!file) return
   const fd = new FormData()
   fd.append('file', file)
   fd.append('uploader', 'agent')

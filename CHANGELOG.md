@@ -4,6 +4,29 @@
 
 ---
 
+## [078] 2026-06-03 19:41 — 客户端堵空 conv（App+Web 第二道防线）+ 客服发消息发送音 · v0.7.0
+
+**起因 / 需求**
+
+[077] 后端已从源头杜绝 conv_id 孤儿（强制校验，任何端发空 conv 都被拒）。本条做客户端配套：① 第二道防线——App/Web 发送前也拦空 conv、明确提示不静默；② 爷爷要求客服发消息有声音反馈。
+
+**改了什么（App Swift + Web admin）**
+
+- **Swift App**（Mac 独立仓库 commit 9a73af6）：import AudioToolbox；sendText/uploadAndSend 发送后 `AudioServicesPlaySystemSound(1004)` 发送音；sendText/uploadAndSend guard 加 `!cid.isEmpty`、sendRead guard `!convId.isEmpty`、openConv guard `!id.isEmpty` —— 拦空串 conv
+- **Web admin** Console.vue：① sendText 空 conv 由静默 return 改 `ElMessage.warning("请先选择一个会话再发送")`；② uploadAndSendFile 空 conv 改 `ElMessage.warning("会话已失效，请重新选择会话")`
+
+**业务流程对比**
+
+- 改前：conv 空时静默不发（App）/静默 return（Web），客服以为发出去了；发消息无声音
+- 改后：conv 空明确提示"请先选会话"；客服发消息有发送音反馈
+
+**触发场景与边界 + 验证方式**
+
+触发：会话未选中/已失效时发送 → 明确提示。后端 [077] 已强制拦截（核心从源头杜绝），客户端为第二道防线 + 体验优化。
+验证：Swift ARCHIVE/EXPORT SUCCEEDED 装机 INSTALL_EXIT=0；Web rebuild admin（vite build）。需 deploy + rebuild admin 生效。
+
+---
+
 ## [077] 2026-06-03 19:27 — 修复客服消息 conv_id 偶发为空（孤儿消息）：后端强制校验 + 历史数据修复 · v0.7.0
 
 **起因 / 需求**
