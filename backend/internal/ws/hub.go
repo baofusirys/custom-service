@@ -332,6 +332,12 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			if !h.sink.PreprocessAgentMessage(ctx, e, c) {
 				return
 			}
+			// [079] 回 ACK：服务器已收到 agent 消息且校验通过，客户端据此把"发送中"标记为"已送达"。
+			//   解决：WS 断开/不稳定时 task?.send 静默丢弃但客户端乐观显示"已发送"→ 消息从未到服务器却假成功。
+			//   客户端发送时带 id(本地消息 id)，这里原样回 type=ack + 同 id，客户端按 id 匹配确认。
+			if e.ID != "" {
+				c.Send(&Envelope{Type: "ack", ID: e.ID, ConvID: e.ConvID, TS: NowMS()})
+			}
 		}
 		// 立即广播（实时 WSS 优先）
 		h.FanoutToConv(ctx, e)
