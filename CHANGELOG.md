@@ -4,6 +4,34 @@
 
 ---
 
+## [079] 2026-06-04 03:41 — 消息可靠发送：ACK 确认 + 未送达标红重发 + 重连自动重发（后端+App+Web）· v0.7.0
+
+**起因 / 需求**
+
+那边反馈 bug：客服端 WS 断开/不稳定时发的消息静默丢失（raw_ws 实测故障时段客服 chat rx=0、DB 无 agent 消息），但界面假显示"已发送"。客服误以为发成功、重复发，影响服务。
+
+**根因（四路 agent 调研 + 实读代码）**
+
+客户端发送缺可靠性：WSManager.sendDict(App) / ws.send(Web) 断连/失败时丢弃消息但 UI 乐观显示成功；无 ACK 确认、无失败重发、无离线队列。与 [068] token/WS 不稳定叠加。
+
+**改了什么（后端 1 + App 4 + Web 1）**
+
+- **后端** ws/hub.go：agent chat PreprocessAgentMessage 通过后回 `{type:ack, id, conv}`（客户端发送带本地 id，据此确认送达）
+- **App**（Mac 仓库 756d1fa）：MsgStatus(sending/sent/failed)；WSManager.sendDict 返回 Bool；Store 状态机（带 id 发送+乐观 sending+12s ACK 超时+收 ack 转 sent+点击重发 resend+重连 onAlive 自动重发 resendPending）；MessageRow 发送中转圈/已送达/未送达红❗可点重发
+- **Web** admin Console.vue：消息加 status；sendText/uploadAndSendFile 带 id + ws.send 返回值标 sending/failed + 12s 超时；onMessage type=ack→sent；onOpen 重连自动重发；角标显示 发送中/未送达(红可点重发)/已读
+
+**业务流程对比**
+
+- 改前：断连/丢包发消息 → 静默丢弃但显示"已发送"，客服以为成功（实际访客和 DB 都没有）
+- 改后：服务器收到才回 ACK → 标"已送达"；12s 没收到 ACK → 标红"未送达·点击重发"；WS 重连自动重发未确认；**绝不假"已发送"**
+
+**触发场景与边界 + 验证方式**
+
+触发：WS 断/网络抖动发消息 → 12s 内没 ACK → 红色未送达。边界：Web 原本断开时 sendText 已 `if(!ws.alive) return` 提示不发，本次补"发出后没收到 ACK"的兜底。
+验证：后端 go build PASS、App 装机 INSTALL_EXIT=0(seq 2980)、Web rebuild admin（vite build）。需 deploy(10)+rebuild backend(已部署)+admin 生效。
+
+---
+
 ## [078] 2026-06-03 19:41 — 客户端堵空 conv（App+Web 第二道防线）+ 客服发消息发送音 · v0.7.0
 
 **起因 / 需求**

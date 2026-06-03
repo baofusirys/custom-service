@@ -261,6 +261,40 @@ const lastMineMsg = computed(() => {
   return null
 })
 
+// [079] 发送可靠性 —— ACK 确认 + 超时 failed + 点击重发 + 重连自动重发
+//   解决: WS 断开/不稳定时消息静默丢失但 UI 假"已发送"。发送带 id, 服务器收到回 ACK;
+//   12s 未收 ACK→未送达(红可重发); WS 重连(onOpen)自动重发未确认。
+const ackTimers = {}
+function scheduleAckTimeout(mid) {
+  if (ackTimers[mid]) clearTimeout(ackTimers[mid])
+  ackTimers[mid] = setTimeout(() => { markStatus(mid, 'failed') }, 12000)
+}
+function markStatus(mid, st) {
+  const mm = messages.value.find(x => x.id === mid)
+  if (mm) mm.status = st
+  if (st !== 'sending' && ackTimers[mid]) { clearTimeout(ackTimers[mid]); delete ackTimers[mid] }
+}
+function buildResendEnv(m, convId) {
+  const d = { type: 'chat', conv: convId, id: m.id, ts: Date.now(), prio: 0 }
+  if (m.media_url?.Valid) { d.content = ''; d.media = m.media_url.String; d.mkind = m.media_kind?.String; d.mname = m.media_name?.String }
+  else { d.content = m.content }
+  return d
+}
+function resendMsg(m) {
+  if (!m || !activeConv.value) return
+  markStatus(m.id, 'sending')
+  if (ws?.send(buildResendEnv(m, activeConv.value.id))) scheduleAckTimeout(m.id)
+  else markStatus(m.id, 'failed')
+}
+function resendPending() {
+  if (!activeConv.value) return
+  for (const m of messages.value) {
+    if (m.sender === 'agent' && (m.status === 'sending' || m.status === 'failed')) {
+      if (ws?.send(buildResendEnv(m, activeConv.value.id))) { m.status = 'sending'; scheduleAckTimeout(m.id) }
+    }
+  }
+}
+
 // [040] 发送：先发文本（如果有），再依次上传 pendingFiles 队列里的所有附件
 // [068] 入口 snapshot sendingConvId：杜绝发送过程中切换会话造成 conv-content 错配
 async function sendText() {
@@ -282,18 +316,21 @@ async function sendText() {
     if (text) {
       const now = new Date().toISOString()
       // [068] WSS 路由用 sendingConvId（锁定的会话），不读 activeConv
-      ws.send({ type: 'chat', conv: sendingConvId, content: text, ts: Date.now(), prio: 0 })
+      const sentMid = 'local-' + Date.now()
+      const sentOk = ws.send({ type: 'chat', conv: sendingConvId, content: text, id: sentMid, ts: Date.now(), prio: 0 })   // [079] 带 id 供 ACK 匹配
       // [068] 仅当 UI 仍停留在 sendingConvId 才做本地乐观渲染，
       // 否则切走后 push 到 messages.value 会污染新会话视图
       if (activeConv.value?.id === sendingConvId) {
         messages.value.push({
-          id: 'local-' + Date.now(),
+          id: sentMid,
           sender: 'agent',
           sender_ref: String(session.agent?.id),
           content: text,
-          created_at: now
+          created_at: now,
+          status: sentOk ? 'sending' : 'failed'   // [079] 没发出→未送达
         })
       }
+      if (sentOk) scheduleAckTimeout(sentMid)
       // 不论是否切走，conv 对象本身的 last_message / updated_at 都要更新（左侧列表预览）
       if (sendingConv) {
         sendingConv.last_message = { sender: 'agent', content: text, created_at: now }
@@ -329,22 +366,25 @@ async function uploadAndSendFile(file, convId) {
   fd.append('conv_id', convId)
   try {
     const r = await http.post('/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-    ws?.send({
-      type: 'chat', conv: convId,
+    const upMid = 'local-' + Date.now()
+    const upOk = ws?.send({
+      type: 'chat', conv: convId, id: upMid,
       content: '', media: r.url, mkind: r.kind, mname: r.name, msize: r.size,
       ts: Date.now(), prio: 0
     })
     // [068] 仅当 UI 仍停在 convId 才本地乐观渲染，否则只发不渲染（避免污染新会话）
     if (activeConv.value?.id === convId) {
       messages.value.push({
-        id: 'local-' + Date.now(), sender: 'agent', sender_ref: String(session.agent?.id),
+        id: upMid, sender: 'agent', sender_ref: String(session.agent?.id),
         content: '',
         media_url: { String: r.url, Valid: true },
         media_kind: { String: r.kind, Valid: true },
         media_name: { String: r.name, Valid: true },
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
+        status: upOk ? 'sending' : 'failed'   // [079]
       })
       nextTick(scrollToBottom)
+      if (upOk) scheduleAckTimeout(upMid)
     }
   } catch {}
 }
@@ -589,10 +629,18 @@ onMounted(async () => {
   ws = new AgentWS({
     url: `${proto}://${location.host}/ws/agent`,
     token: session.token,
+    onOpen: () => { resendPending() },   // [079] 重连成功自动重发未确认消息
     onMessage: (env) => {
       // hello：记住自己的 connID（多端同步去重必需）
       if (env.type === 'hello') {
         myConnId.value = env.extra?.conn_id || ''
+        return
+      }
+      // [079] 服务器 ACK：把"发送中"消息标"已送达"（解决断连/丢包时假"已发送"）
+      if (env.type === 'ack') {
+        const mm = messages.value.find(x => x.id === env.id)
+        if (mm) mm.status = 'sent'
+        if (ackTimers[env.id]) { clearTimeout(ackTimers[env.id]); delete ackTimers[env.id] }
         return
       }
 
@@ -1142,11 +1190,11 @@ function voiceCleanup() {
                     <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                   </span>
                 </div>
-                <!-- 已读角标：仅在「自己最新那条消息已被对方读了」时显示 -->
-                <div
-                  v-if="isMineGroup(g) && lastMineMsg && lastMineMsg.read && g.items[g.items.length-1].id === lastMineMsg.id"
-                  class="read-indicator">
-                  已读
+                <!-- [079] 发送状态/已读角标 -->
+                <div v-if="isMineGroup(g)" class="read-indicator">
+                  <span v-if="g.items[g.items.length-1].status === 'sending'" style="color:#909399">发送中…</span>
+                  <span v-else-if="g.items[g.items.length-1].status === 'failed'" style="color:#f56c6c;cursor:pointer" @click.stop="resendMsg(g.items[g.items.length-1])">⚠ 未送达 · 点击重发</span>
+                  <span v-else-if="lastMineMsg && lastMineMsg.read && g.items[g.items.length-1].id === lastMineMsg.id">已读</span>
                 </div>
               </div>
             </div>
