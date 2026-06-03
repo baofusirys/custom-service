@@ -327,6 +327,7 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			}
 		} else {
 			e.From = "agent:" + c.ID
+			e.ConvID = c.ConvID // [077] 对齐 visitor(上方)：agent 也用服务器权威 c.ConvID，不信任前端传的 conv 字段
 			sender = "agent"
 			if !h.sink.PreprocessAgentMessage(ctx, e, c) {
 				return

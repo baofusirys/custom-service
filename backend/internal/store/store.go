@@ -448,7 +448,30 @@ ORDER BY created_at DESC LIMIT 1`, convID).Scan(
 
 // ============ Message ============
 
+// AgentOwnsConversation [077] 校验会话存在且该客服已接管(或会话未分配，允许接管过程中发送)。
+// 防 agent 孤儿消息 + 防越权写入他人会话([069] 遗留 TODO)。走 idx_agent 索引、参数化防注入。
+func (s *Store) AgentOwnsConversation(ctx context.Context, convID, agentID string) (bool, error) {
+	if convID == "" {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM conversations WHERE id=? AND (agent_id=CAST(? AS UNSIGNED) OR agent_id IS NULL) LIMIT 1`,
+		convID, agentID).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) InsertMessage(ctx context.Context, m *Message) error {
+	// [077] 兜底：conv_id 不能为空（防任何路径写入孤儿消息；同步层 PreprocessAgentMessage 已拦，这里双保险）
+	if m.ConvID == "" {
+		return errors.New("insert_message: conv_id 不能为空")
+	}
 	if m.ID == "" {
 		m.ID = uuid.NewString()
 	}

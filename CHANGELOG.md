@@ -4,6 +4,40 @@
 
 ---
 
+## [077] 2026-06-03 19:27 — 修复客服消息 conv_id 偶发为空（孤儿消息）：后端强制校验 + 历史数据修复 · v0.7.0
+
+**起因 / 需求**
+
+爷爷生产库实测：客服 App/Web 发的部分消息按会话查不到（"消失"，但访客已收到）。5120 条消息中 26 条 conv_id 为空，全部 sender=agent，跨版本长期间歇（~0.5%），涉及多个客服（aid=1/4）。客服误以为发送失败、重复发送，影响服务。
+
+**根因（四路 agent 调研 + 实读代码，并纠正一处误判）**
+
+agent 消息入库的 conv_id 用的是**后端连接快照 c.ConvID**（非前端传的 e.ConvID）。客服 WSS 建连时 c.ConvID 为空，必须点开会话（AssignSelf→AttachAgentToConv）才绑定。在"建连→接管"窗口内发消息，service.go PersistMessageAsync（:205）快照到空 c.ConvID 直接入库 → 孤儿。visitor 路径有兜底（:217 OpenOrGetConversation 补建），agent 路径完全没兜底。InsertMessage 也无 conv_id 非空校验。[069] 遗留的 agentInConv 校验 TODO 至今未实现。次因：WSS 重连未重新 AssignSelf、并发竞态、空串绕过 NOT NULL。
+
+**改了什么（后端，修改 3 + 新增 2）**
+
+> 修改文件 3（service.go/hub.go/store.go）+ 新增迁移 1，升版本 0.6.9 → 0.7.0
+
+- `service.go` PreprocessAgentMessage：强制校验 —— c.ConvID 空回 error("请先点开会话")+记 agent_msg_no_conv 日志+拦截（不广播不入库）；调 AgentOwnsConversation 校验会话存在 + 该客服已接管（防越权），不过回 error
+- `ws/hub.go` agent 分支：补 `e.ConvID = c.ConvID`（对齐 visitor，服务器权威不信前端）
+- `store.go`：新增 AgentOwnsConversation（idx_agent 索引 + 参数化，agent_id 匹配或未分配）；InsertMessage 入口加 conv_id 非空兜底
+- `migrations/007_fix_orphan_messages.sql`：Docker 自动迁移，26 条孤儿按"客服/访客 + created_at 时间最接近活跃会话"关联回 conv_id；REGEXP 防 CAST 非数字、关联不到的保留不动；单事务失败回滚
+
+**业务流程对比**
+
+| 场景 | 改动前 | 改动后 |
+| --- | --- | --- |
+| 客服接管会话前发消息 | 空 conv_id 入库 → 孤儿（界面消失） | 被拒 + 提示"请先点开会话"，不产生孤儿 |
+| 历史 26 条孤儿 | 按会话查不到 | Docker 启动自动迁移找回归属、界面可见 |
+| 客服发给他人已接管会话 | 可越权写入 | 被拒（AgentOwnsConversation 校验） |
+
+**触发场景与边界 + 验证方式**
+
+触发：客服建连后、点开会话前发消息 → 拦截。边界：会话未分配（agent_id NULL）允许发（接管中）；他人接管 → 拒；visitor 兜底不变。
+验证：`go build ./...` PASS（BUILD_OK）。部署后 007 自动跑，孤儿数 26→0（或仅关联不到的残留）。需服务器 deploy + rebuild backend 生效。客户端堵漏 + 发送音见 [078]。
+
+---
+
 ## [075] 2026-06-02 23:42 — 阿里云国内镜像源实际打通（张家口个人版，7 镜像已推 + 公开）· v0.6.9
 
 **起因 / 需求**

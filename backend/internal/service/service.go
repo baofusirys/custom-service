@@ -86,8 +86,28 @@ func (s *Service) PreprocessVisitorMessage(ctx context.Context, e *ws.Envelope, 
 	return true
 }
 
-// PreprocessAgentMessage 同步阶段：内容清洗。
+// PreprocessAgentMessage 同步阶段：[077] conv 强制校验（杜绝 agent 孤儿消息）+ 内容清洗。
 func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) bool {
+	// [077] 根因：客服 WSS 刚建连时 c.ConvID 为空，必须点开会话(AssignSelf→AttachAgentToConv)才填上。
+	//   在「建连→接管」窗口内发消息，空 c.ConvID 会被原样入库 → 孤儿消息（按会话 conv_id 查不到、界面"消失"）。
+	//   visitor 路径有兜底(PersistMessageAsync OpenOrGetConversation)，但 agent 不能自动补会话（会错关联到别的会话），
+	//   只能拒绝并提示客服先点开会话；同时防越权写入他人会话（[069] 遗留 TODO 一并落地）。
+	if c.ConvID == "" {
+		c.Send(&ws.Envelope{Type: "error", Content: "请先点开一个会话再发送消息", TS: ws.NowMS()})
+		s.bizLog.Warn("agent_msg_no_conv", zap.String("agent", c.ID), zap.String("msg_id", e.ID))
+		return false
+	}
+	ok, err := s.store.AgentOwnsConversation(ctx, c.ConvID, c.ID)
+	if err != nil {
+		s.bizLog.Error("agent_conv_check_err", zap.Error(err), zap.String("conv", c.ConvID))
+		c.Send(&ws.Envelope{Type: "error", Content: "会话校验失败，请重试", TS: ws.NowMS()})
+		return false
+	}
+	if !ok {
+		c.Send(&ws.Envelope{Type: "error", Content: "会话不存在或您未接管该会话", TS: ws.NowMS()})
+		s.bizLog.Warn("agent_conv_forbidden", zap.String("agent", c.ID), zap.String("conv", c.ConvID))
+		return false
+	}
 	if e.Content != "" {
 		e.Content = security.SanitizeText(e.Content)
 	}
