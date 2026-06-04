@@ -541,7 +541,12 @@ const grouped = computed(() => {
 
 function fmtAbs(t) { return dayjs(t).format('YYYY-MM-DD HH:mm:ss') }
 function fmtHM(t) { return dayjs(t).format('HH:mm') }
-function fmtMsgTime(t) { const d = dayjs(t); return d.isSame(dayjs(), 'day') ? d.format('HH:mm') : d.format('MM-DD HH:mm') }   // [080] 每条消息具体时间
+function fmtMsgTime(t) {   // [081] 今天 HH:mm / 今年 MM-DD HH:mm / 往年 YYYY-MM-DD HH:mm
+  const d = dayjs(t), now = dayjs()
+  if (d.isSame(now, 'day')) return d.format('HH:mm')
+  if (d.isSame(now, 'year')) return d.format('MM-DD HH:mm')
+  return d.format('YYYY-MM-DD HH:mm')
+}
 function fmtGroupTime(t) {
   const d = dayjs(t)
   const today = dayjs().startOf('day')

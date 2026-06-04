@@ -4,6 +4,23 @@
 
 ---
 
+## [081] 2026-06-04 12:10 — 消息时间跨年带年份完善（三端）· v0.7.0
+
+**起因 / 需求**
+
+爷爷强调"不是今天的要带日期"。[080] 已做今天 HH:mm / 非今天 MM-dd HH:mm，本条完善：**跨年的带上年份**，避免跨年混淆。
+
+**改了什么（三端 fmtMsgTime 加跨年判断）**
+
+统一格式：**今天 HH:mm / 今年非今天 MM-dd HH:mm / 往年 yyyy-MM-dd HH:mm**
+- App（Mac 789e7c0）Models.swift fmtMsgTime：加 `cal.isDate(d, equalTo:, toGranularity:.year)` 判断
+- Web Console.vue：`dayjs isSame(now,'year')` 判断
+- 访客端 chat.html：`getFullYear()` 比较
+
+**验证**：App 装机 INSTALL_EXIT=0(seq 3004)；Web/widget rebuild（vite/Dockerfile）。需 deploy(10)+rebuild admin+widget 生效。
+
+---
+
 ## [080] 2026-06-04 12:01 — 三端聊天每条消息显示具体时间（App + Web + 访客端）· v0.7.0
 
 **起因 / 需求**

@@ -822,11 +822,12 @@
     }
     return pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
-  function fmtMsgTime(ts) {   // [080] 每条消息具体时间（今天 HH:mm / 更早 MM-dd HH:mm，东八区随浏览器本地）
+  function fmtMsgTime(ts) {   // [081] 今天 HH:mm / 今年 MM-dd HH:mm / 往年 yyyy-MM-dd HH:mm
     var d = new Date(ts), now = new Date();
     var hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
-    var sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-    return sameDay ? hm : (pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + hm);
+    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) return hm;
+    var md = pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + hm;
+    return d.getFullYear() === now.getFullYear() ? md : (d.getFullYear() + '-' + md);
   }
   function escape(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
