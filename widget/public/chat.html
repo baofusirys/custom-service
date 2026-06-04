@@ -822,6 +822,12 @@
     }
     return pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
+  function fmtMsgTime(ts) {   // [080] 每条消息具体时间（今天 HH:mm / 更早 MM-dd HH:mm，东八区随浏览器本地）
+    var d = new Date(ts), now = new Date();
+    var hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+    var sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    return sameDay ? hm : (pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + hm);
+  }
   function escape(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -961,6 +967,11 @@
       };
       b.appendChild(cp);
     }
+    // [080] 每条消息可见时间
+    var tm = document.createElement('span');
+    tm.textContent = fmtMsgTime(m.created_at || m.ts || Date.now());
+    tm.style.cssText = 'display:block;font-size:11px;opacity:0.55;margin-top:3px;text-align:right';
+    b.appendChild(tm);
     return b;
   }
 

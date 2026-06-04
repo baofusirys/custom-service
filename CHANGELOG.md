@@ -4,6 +4,27 @@
 
 ---
 
+## [080] 2026-06-04 12:01 — 三端聊天每条消息显示具体时间（App + Web + 访客端）· v0.7.0
+
+**起因 / 需求**
+
+爷爷要 App / Web 客服工作台 / 访客端聊天界面**每条消息都显示具体时间**（之前只有 hover title 绝对时间 / 组间 time-divider，每条消息没有可见时间）。
+
+**改了什么（三端）**
+
+- **App**（Mac 58d66b2）：Models 加 `fmtMsgTime`（今天 HH:mm / 更早 MM-dd HH:mm，Asia/Shanghai）；MessageRow 气泡下加时间（所有消息）与发送状态同一行
+- **Web** admin Console.vue：加 `fmtMsgTime`（dayjs，今天 HH:mm / 更早 MM-DD HH:mm）；每条 bubble 内底部加可见时间（右对齐小灰字）
+- **访客端** widget/public/chat.html：加 `fmtMsgTime`；buildBubble 每条消息 bubble 末尾加可见时间
+
+**业务流程对比**
+
+- 改前：消息时间只在 hover bubble title（绝对时间）/ 组间 time-divider 显示
+- 改后：每条消息气泡下/内都有可见的具体时间（今天 HH:mm，跨天带 MM-dd 日期）
+
+**验证**：App 装机 INSTALL_EXIT=0(seq 2996)；Web/widget rebuild（vite / Dockerfile COPY）。需 deploy(10)+rebuild admin+widget 生效。
+
+---
+
 ## [079] 2026-06-04 03:41 — 消息可靠发送：ACK 确认 + 未送达标红重发 + 重连自动重发（后端+App+Web）· v0.7.0
 
 **起因 / 需求**

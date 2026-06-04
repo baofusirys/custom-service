@@ -541,6 +541,7 @@ const grouped = computed(() => {
 
 function fmtAbs(t) { return dayjs(t).format('YYYY-MM-DD HH:mm:ss') }
 function fmtHM(t) { return dayjs(t).format('HH:mm') }
+function fmtMsgTime(t) { const d = dayjs(t); return d.isSame(dayjs(), 'day') ? d.format('HH:mm') : d.format('MM-DD HH:mm') }   // [080] 每条消息具体时间
 function fmtGroupTime(t) {
   const d = dayjs(t)
   const today = dayjs().startOf('day')
@@ -1180,6 +1181,7 @@ function voiceCleanup() {
                     </a>
                   </template>
                   <span v-if="m.content" class="bubble-text">{{ m.content }}</span>
+                  <span class="bubble-time" style="display:block;font-size:11px;opacity:0.55;margin-top:3px;text-align:right">{{ fmtMsgTime(m.created_at) }}</span>
                   <!-- 复制按钮：文本消息显示。点击复制消息内容到剪贴板 -->
                   <span
                     v-if="m.content || mediaURL(m)"
