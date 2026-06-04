@@ -115,9 +115,12 @@ onMounted(load)
 
       <el-divider content-position="left">访客进入网站</el-divider>
 
-      <el-form-item label="通知客服">
+      <el-form-item label="新访客进入提醒">
         <el-switch v-model="form.notify_visitor_enter" />
-        <div class="form-tip">访客打开有 widget 的页面 → 客服后台弹出提醒并播声</div>
+        <div class="form-tip">
+          开启：新访客打开带 widget 的页面 → 客服端弹提醒 + 响提示音。<br/>
+          关闭：新访客进入<strong>不弹不响</strong>（访客真正发来消息仍照常提醒，不受影响）。
+        </div>
       </el-form-item>
 
       <el-form-item label="自动问候">

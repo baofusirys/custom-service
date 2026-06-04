@@ -152,6 +152,7 @@ const onlineStats = ref({ visitors: 0, agents: 0 })
 const fileInput = ref(null)
 const sending = ref(false)
 const agentSound = ref('agent1') // 由 /admin/settings 拉到的客服端通知音
+const notifyVisitorEnter = ref(true) // [082] 新访客进入是否提醒(弹窗+声音)；前端二道保险，后端 service.go 也已按此 gate 下发
 const myConnId = ref('') // 自己 WSS 连接 ID（hello 时拿到，用于多端同步去重）
 let ws = null
 
@@ -161,6 +162,7 @@ async function loadSoundPref() {
   try {
     const r = await http.get('/admin/settings')
     agentSound.value = r.data?.agent_notify_sound || 'agent1'
+    notifyVisitorEnter.value = r.data?.notify_visitor_enter !== 'false' // [082] 默认开；显式 'false' 才关
   } catch {}
 }
 
@@ -679,14 +681,17 @@ onMounted(async () => {
       if (env.type === 'sys') {
         // 系统通知：访客进入提醒（弹 toast + 播声 + 刷会话列表）
         if (env.extra?.kind === 'visitor_enter') {
-          ElNotification({
-            title: '访客进入',
-            message: env.content || '有新访客进入网站',
-            type: 'info',
-            duration: 4500,
-            position: 'bottom-right'
-          })
-          playSound(agentSound.value)
+          // [082] 二道保险：本地开关关了就不弹不响（后端 service.go 也已按 notify_visitor_enter gate 下发）
+          if (notifyVisitorEnter.value) {
+            ElNotification({
+              title: '访客进入',
+              message: env.content || '有新访客进入网站',
+              type: 'info',
+              duration: 4500,
+              position: 'bottom-right'
+            })
+            playSound(agentSound.value)
+          }
         }
         scheduleConvsRefresh()
         return

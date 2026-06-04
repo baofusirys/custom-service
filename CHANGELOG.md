@@ -4,6 +4,45 @@
 
 ---
 
+## [082] 2026-06-04 16:14 — 「新访客进入提醒」开关补齐前端二道保险 + 命名直白（Web + App）· v0.7.0
+
+**起因 / 需求**
+
+爷爷要求：系统设置加一个开关，"新访客来了之后是否通知，不通知就不响那一声"，Web 客服工作台和 App 都要。爷爷暂不部署那台测试服（已挪作他用），只改代码本地验，App 照常装机。
+
+**现状核查（先汇报，不凭印象）**
+
+这个开关其实**早已存在**，键名 `notify_visitor_enter`：
+- 后端 `service.go:590` 已 `if s.SettingBool(ctx,"notify_visitor_enter",true)` gate 了 `visitor_enter` sys 事件下发——关掉后端就不广播，两端自然不弹不响。**它没有形同虚设**。
+- 但有两个问题：① 设置页 label 叫"通知客服"，藏在「访客进入网站」分区，爷爷没认出来就是它；② Web/App **本地没读这个值做二道保险**，万一后端版本不一致（旧版/配置漂移）就兜不住。
+
+**改了什么（复用现有 `notify_visitor_enter` 键，不新造；修改 0 新增 0 删除 0 个功能键，纯增强）**
+
+Web 工作台（admin，2 文件）：
+- `admin/src/views/Settings.vue`：label "通知客服" → "**新访客进入提醒**"，提示语改直白（开/关分别什么效果，并注明"访客真正发来消息仍照常提醒，不受影响"）
+- `admin/src/views/Console.vue`：① 新增 ref `notifyVisitorEnter`(默认 true)；② `loadSoundPref` 拉 `/admin/settings` 时一并读 `notify_visitor_enter`；③ 收 `visitor_enter` 事件播声/弹窗前加 `if (notifyVisitorEnter.value)` 本地 gate（二道保险）
+
+App（Mac `~/code/custom_service_swift`，3 文件）：
+- `Sources/Store.swift`：① 新增属性 `var notifyVisitorEnter = true`；② `onEnvelope` 的 `visitor_enter` 分支加 `, notifyVisitorEnter` 条件，关了不 `playNotify`
+- `Sources/SoundPreview.swift`：`loadAgentSound()` 拉设置时一并读 `notify_visitor_enter`
+- `Sources/SettingsView.swift`：Toggle "通知客服" → "新访客进入提醒"，Section 加 footer 说明
+
+后端：**不改**（已 gate，且不碰那台服务器）。
+
+**业务流程对比**
+
+- 改动前：客服在设置里看到"通知客服"开关不知是干啥；关掉只靠后端不发事件生效，前端无兜底
+- 改动后：开关叫"新访客进入提醒"一目了然；关掉后——后端不发(第一道) + 前端即便收到也不弹不响(第二道)。访客真正发消息的提示音不受此开关影响，避免漏接真实消息
+
+**触发场景与边界 + 验证**
+
+- 触发：仅"新访客打开带 widget 的网页"(visitor_enter)。关掉=不弹通知不响声
+- 不触发：老访客/访客发真实消息的提示音**永远不受影响**（防漏接）
+- 边界：非 admin 客服拉不到设置 → 本地默认 true，但后端 gate 同样不发，结果一致；设置值显式 'false' 才算关，其余(含缺失)默认开
+- 验证：Web 改动 4 处已落地；App build `** BUILD SUCCEEDED **`（5 处 Swift 改动编译+codesign 通过），`.app` 已签好待装机（手机当前 unavailable，上线即装）
+
+---
+
 ## [081] 2026-06-04 12:10 — 消息时间跨年带年份完善（三端）· v0.7.0
 
 **起因 / 需求**
