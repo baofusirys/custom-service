@@ -4,6 +4,39 @@
 
 ---
 
+## [083] 2026-06-06 15:59 — 修复 Bug①「收到通知看不到人」：会话超时自动关闭误埋未读（后端 + 数据修复 + 重新 up 测试服）· v0.7.0
+
+**起因 / 需求**
+
+爷爷反馈 Bug①：客服收到「访客进入 / 新消息」通知，点开会话列表却**找不到人**，未读像凭空消失。同时爷爷把测试服挪用跑了别的项目，要求把别的项目停掉、客服系统重新 up 起来。
+
+**根因（大白话）**
+
+[store.go](backend/internal/store/store.go) 的 `EnsureFreshConversation(freshMinutes=30)`：访客隔 30 分钟再进来，系统会把上一段会话直接 `status=closed` 再开一段新的。但它**没检查旧会话里是否还有客服没看过的消息**(`unread_agent>0`)。有未读的会话被关 → 工作台列表只查 `status='open'` → 这条不显示 → 客服收到过通知却找不到人，未读被埋（消息没丢，一直在 messages 表，只是承载它的会话被关）。
+
+**改了什么（修改 1 处 + 新增 1 个 migration）**
+
+- `backend/internal/store/store.go` `EnsureFreshConversation`：超时重开前先判断 `existing.UnreadA>0`，**有未读就直接复用旧会话**(`return existing,false`，不关不另起)，让客服先处理未读；无未读才走原来的关旧开新。从源头杜绝再产生。
+- `backend/migrations/008_reopen_unread_closed.sql`（新增）：数据修复，把历史上已被误埋的会话(`status='closed' AND unread_agent>0`)恢复为 `open` + 清 `closed_at`，让客服看到并处理。docker 启动自动迁移、幂等（全新库命中 0 行）。
+
+**业务流程对比**
+
+- 改动前：访客 30 分钟后回来 → 旧会话(含未读)被关 → 工作台列表看不到 → 客服找不到人，客户被晾着
+- 改动后：旧会话有未读 → 复用它 → 列表正常显示未读 → 客服无缝接上；历史被埋的也一次性恢复
+
+**触发场景与边界 + 验证**
+
+- 触发：访客距上次活动 > 30 分钟再次进入，且旧会话有客服未读 → 复用旧会话
+- 不触发：旧会话无未读 → 仍按原逻辑关旧开新（隔很久回来算新一轮咨询，重新问候）
+- 边界：migration 只动「已关闭且有未读」，正常关闭(无未读)一律不碰；幂等可重复执行
+- 验证：部署后 docker 自动跑 008，查 `status='closed' AND unread_agent>0` 应为 0；代码层新访客 30 分钟回访带未读时列表可见
+
+**运维**
+
+测试服(38.76.193.68)别的项目（宝塔 nginx `/www/server/nginx` + `doqaus-php` 容器）停掉，释放 80/443；客服系统 `docker compose up -d --build`（含本次 Bug① 修复 + 008 迁移）。数据卷 `cs_mysql_data`/`cs_redis_data`/`cs_ssl_data`/`cs_acme_data` 及别的项目数据卷**全程未动**。
+
+---
+
 ## [082] 2026-06-04 16:14 — 「新访客进入提醒」开关补齐前端二道保险 + 命名直白（Web + App）· v0.7.0
 
 **起因 / 需求**

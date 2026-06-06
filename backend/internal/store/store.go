@@ -227,7 +227,15 @@ func (s *Store) EnsureFreshConversation(ctx context.Context, siteID, visitorID s
 		return c, true, nil
 	}
 	if freshMinutes > 0 && time.Since(existing.UpdatedAt) > time.Duration(freshMinutes)*time.Minute {
-		// 旧会话超时：关闭它（消息不删，可在客服「历史记录」页查到）+ 开新会话
+		// [083] Bug① 修复：超时本应「关旧开新」，但旧会话若还有客服未读(UnreadA>0)，
+		//   关掉它会把未读埋进 closed 会话——工作台列表只查 status='open'，客服收到
+		//   通知却在列表找不到人(爷爷反馈的「收到通知看不到人」)。
+		//   所以只要有未读，一律复用旧会话(不关、不另起)，让客服先把未读处理完；
+		//   isNew=false 不重复触发问候/进入提醒。无未读才走原来的关旧开新。
+		if existing.UnreadA > 0 {
+			return existing, false, nil
+		}
+		// 旧会话超时且无未读：关闭它（消息不删，可在客服「历史记录」页查到）+ 开新会话
 		if err := s.CloseConversation(ctx, existing.ID); err != nil {
 			return nil, false, err
 		}
