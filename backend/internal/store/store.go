@@ -220,7 +220,8 @@ func (s *Store) EnsureFreshConversation(ctx context.Context, siteID, visitorID s
 		return nil, false, err
 	}
 	if existing == nil {
-		c, err := s.createConversation(ctx, siteID, visitorID)
+		// 全新访客：没有旧会话可继承，agent_id 留空
+		c, err := s.createConversation(ctx, siteID, visitorID, sql.NullInt64{})
 		if err != nil {
 			return nil, false, err
 		}
@@ -239,7 +240,9 @@ func (s *Store) EnsureFreshConversation(ctx context.Context, siteID, visitorID s
 		if err := s.CloseConversation(ctx, existing.ID); err != nil {
 			return nil, false, err
 		}
-		c, err := s.createConversation(ctx, siteID, visitorID)
+		// [085] 期望①：重建会话继承旧会话的客服(agent_id)，保住「已接手」不丢，
+		//   避免新会话 agent_id=NULL 把"已接待的客户"挤出列表/降级为未接手。
+		c, err := s.createConversation(ctx, siteID, visitorID, existing.AgentID)
 		if err != nil {
 			return nil, false, err
 		}
@@ -268,20 +271,24 @@ ORDER BY started_at DESC LIMIT 1`, visitorID, siteID).Scan(
 }
 
 // createConversation 仅新建一条 open 会话。
-func (s *Store) createConversation(ctx context.Context, siteID, visitorID string) (*Conversation, error) {
+// [085] agentID 用于「超时重建继承旧客服」：全新访客传 sql.NullInt64{}（空），
+//
+//	超时重建传 existing.AgentID，保住「已接手」不丢。
+func (s *Store) createConversation(ctx context.Context, siteID, visitorID string, agentID sql.NullInt64) (*Conversation, error) {
 	now := time.Now()
 	c := &Conversation{
 		ID:        uuid.NewString(),
 		SiteID:    siteID,
 		VisitorID: visitorID,
+		AgentID:   agentID,
 		Status:    "open",
 		StartedAt: now,
 		UpdatedAt: now,
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO conversations(id, site_id, visitor_id, status, unread_visitor, unread_agent, started_at, updated_at)
-VALUES(?, ?, ?, 'open', 0, 0, ?, ?)`,
-		c.ID, c.SiteID, c.VisitorID, c.StartedAt, c.UpdatedAt)
+INSERT INTO conversations(id, site_id, visitor_id, agent_id, status, unread_visitor, unread_agent, started_at, updated_at)
+VALUES(?, ?, ?, ?, 'open', 0, 0, ?, ?)`,
+		c.ID, c.SiteID, c.VisitorID, agentID, c.StartedAt, c.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -339,9 +346,12 @@ func (s *Store) CloseConversation(ctx context.Context, convID string) error {
 }
 
 // ListOpenConversations 给客服后台用：当前所有进行中的会话（含访客信息 + 最后一条消息预览）。
-func (s *Store) ListOpenConversations(ctx context.Context, limit int) ([]map[string]any, error) {
+func (s *Store) ListOpenConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	// [059] 顺手把 v.ip_cipher 也 SELECT 出来（handler 层解密成明文 IP 给客服看
 	// 「访客 IP + 地理位置」一目了然，会话列表选客户体验提升）
@@ -362,12 +372,17 @@ SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_a
            OR (m.sender = 'sys' AND m.sender_ref LIKE 'voice%')
          )
          LIMIT 1
-       ) AS has_visitor_msg
+       ) AS has_visitor_msg,
+       EXISTS(
+         SELECT 1 FROM conversations c2
+         WHERE c2.visitor_id = c.visitor_id AND c2.agent_replied = 1
+         LIMIT 1
+       ) AS contacted
 FROM conversations c
 JOIN visitors v ON v.id = c.visitor_id
 WHERE c.status='open'
 ORDER BY c.updated_at DESC
-LIMIT ?`, limit)
+LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -381,9 +396,10 @@ LIMIT ?`, limit)
 			started, updated                          time.Time
 			ident, country, city, page, ref, ipCipher sql.NullString
 			hasVisitorMsg                             bool // [065] EXISTS 子查询结果，MySQL TINYINT(1) 可直接 Scan 到 bool
+			contacted                                 bool // [085] 该访客历史上是否被客服回复过(sender='agent')，「已联系」新口径
 		)
 		if err := rows.Scan(&id, &vid, &aid, &unread, &started, &updated,
-			&ident, &country, &city, &page, &ref, &ipCipher, &hasVisitorMsg); err != nil {
+			&ident, &country, &city, &page, &ref, &ipCipher, &hasVisitorMsg, &contacted); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
@@ -400,6 +416,7 @@ LIMIT ?`, limit)
 			"referer":         nullStr(ref),
 			"ip_cipher":       nullStr(ipCipher), // [059] handler 层会解密成 ip 明文并删掉这个字段
 			"has_visitor_msg": hasVisitorMsg,     // [065][067] 访客是否主动联系过（严格只算 sender='visitor' 真实消息，不含 voice 通话事件）
+			"contacted":       contacted,         // [085] 该访客是否被客服回复过（按访客历史聚合），前端「已联系」用此字段
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -414,6 +431,113 @@ LIMIT ?`, limit)
 		}
 	}
 	return out, nil
+}
+
+// MarkAgentReplied [085] 标记会话已被客服回复过（客服发消息时调用）。
+// 用于「已联系」口径：按访客历史聚合，该访客任一会话被回复过即算「已联系」。
+// 幂等：只在 agent_replied=0 时写，避免重复 UPDATE 放大。
+func (s *Store) MarkAgentReplied(ctx context.Context, convID string) error {
+	if convID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE conversations SET agent_replied=1 WHERE id=? AND agent_replied=0`, convID)
+	return err
+}
+
+// ListContactedConversations [085]「已联系」列表：客服真正回复过(sender='agent')的客户。
+//
+//	口径 = 访客名下任一会话 agent_replied=1（按客户历史聚合，不再只看当前这一段会话）。
+//	按访客去重（每访客取最新一条会话，跨 open/closed），按最近活动倒序，offset/limit 分页。
+//	解决「会话超时重建导致已联系丢失 + 200 窗口截断」，支撑工作台滚动加载全部接待过的客户。
+//	性能：内层 JOIN 先用 idx_agent_replied 选「被回复过」的访客，再 idx_visitor_updated
+//	取每访客最新会话；窗口函数只作用于这批行，生产 450 客户仍毫秒级。
+func (s *Store) ListContactedConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT t.id, t.visitor_id, t.agent_id, t.unread_agent, t.status, t.started_at, t.updated_at,
+       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher
+FROM (
+  SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.status, c.started_at, c.updated_at,
+         ROW_NUMBER() OVER (PARTITION BY c.visitor_id ORDER BY c.updated_at DESC) AS rn
+  FROM conversations c
+  JOIN (SELECT DISTINCT visitor_id FROM conversations WHERE agent_replied = 1) r
+    ON r.visitor_id = c.visitor_id
+) t
+JOIN visitors v ON v.id = t.visitor_id
+WHERE t.rn = 1
+ORDER BY t.updated_at DESC
+LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0, limit)
+	for rows.Next() {
+		var (
+			id, vid                                   string
+			aid                                       sql.NullInt64
+			unread                                    int
+			status                                    string
+			started, updated                          time.Time
+			ident, country, city, page, ref, ipCipher sql.NullString
+		)
+		if err := rows.Scan(&id, &vid, &aid, &unread, &status, &started, &updated,
+			&ident, &country, &city, &page, &ref, &ipCipher); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"id":              id,
+			"visitor_id":      vid,
+			"agent_id":        nullInt(aid),
+			"unread":          unread,
+			"status":          status, // [085] 已联系含已结束(closed)会话，前端可标记"已结束"
+			"started_at":      started,
+			"updated_at":      updated,
+			"identifier":      nullStr(ident),
+			"country":         nullStr(country),
+			"city":            nullStr(city),
+			"last_page":       nullStr(page),
+			"referer":         nullStr(ref),
+			"ip_cipher":       nullStr(ipCipher),
+			"has_visitor_msg": true, // 已联系列表项恒为已联系（兼容前端旧字段）
+			"contacted":       true, // [085] 本列表都是客服回复过的客户
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// 补 last_message 预览（与 ListOpenConversations 同款 N+1，分页 limit≤50 时 ms 级）
+	for _, c := range out {
+		if cid, ok := c["id"].(string); ok {
+			if lm, err := s.getLastMessagePreview(ctx, cid); err == nil && lm != nil {
+				c["last_message"] = lm
+			}
+		}
+	}
+	return out, nil
+}
+
+// CountContactedVisitors [085]「已联系」客户总数（被客服回复过的去重访客数），
+// 给前端显示「已联系 (N)」+ 判断滚动是否到底。
+func (s *Store) CountContactedVisitors(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT visitor_id) FROM conversations WHERE agent_replied=1`).Scan(&n)
+	return n, err
+}
+
+// CountOpenConversations [085] 进行中(open)会话总数，给「全部 (N)」显示。
+func (s *Store) CountOpenConversations(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM conversations WHERE status='open'`).Scan(&n)
+	return n, err
 }
 
 // getLastMessagePreview 返回会话最近一条消息的预览（用于列表展示）。

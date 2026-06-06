@@ -55,6 +55,7 @@ func (h *HTTP) Health(c *gin.Context) {
 //   - 集成方查自己部署的：curl https://yourdomain/api/version
 //   - 拉 upstream 最新： curl -s https://raw.githubusercontent.com/baofusirys/custom-service/main/VERSION
 //   - 不一致就 docker compose pull && up -d 升级
+//
 // 不需要鉴权（仅返公开版本号信息，无敏感数据）
 func (h *HTTP) Version(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
@@ -128,7 +129,13 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 	// 老访客回访：30 分钟阈值更敏感（之前 60 分钟），老客户半小时内反复打开 widget 不会
 	// 骚扰；超过 30 分钟才算"重新进入"触发新会话 + 推送「老客户回访」。
 	// 旧会话只是 status=closed，消息历史保留在 messages 表，客服「历史记录」页可查。
-	conv, isNew, err := h.svc.Store().EnsureFreshConversation(c.Request.Context(), v.SiteID, v.ID, 30)
+	// [085] 期望③：30 分钟阈值改 settings 可配（session_fresh_minutes），默认 30。
+	//   clamp 到 [1,1440] 分钟：0/负/超界一律回退默认，防误配导致"每次进入都重建"或"永不重建"。
+	freshMin := h.svc.SettingInt(c.Request.Context(), "session_fresh_minutes", 30)
+	if freshMin < 1 || freshMin > 1440 {
+		freshMin = 30
+	}
+	conv, isNew, err := h.svc.Store().EnsureFreshConversation(c.Request.Context(), v.SiteID, v.ID, freshMin)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50002, "msg": "创建会话失败"})
 		return
@@ -324,9 +331,38 @@ func (h *HTTP) AgentWS(c *gin.Context) {
 	_, _ = ws.UpgradeAgent(h.hub, c.Writer, c.Request, fmt.Sprintf("%d", claims.AgentID), "")
 }
 
-// ListConversations 客服后台拉取进行中会话
+// ListConversations 客服后台拉取会话列表。
+// [085] 支持分页 + 两种口径：
+//
+//	mode=all（默认）：进行中(open)会话，按最近活动倒序，offset/limit 分页
+//	mode=contacted：客服回复过的客户(按访客去重，跨 open/closed)，分页 —— 「已联系」滚动加载
+//
+// 返回 data 为数组；前端按「返回条数 < limit」判断是否到底（没有下一页）。
 func (h *HTTP) ListConversations(c *gin.Context) {
-	rows, err := h.svc.Store().ListOpenConversations(c.Request.Context(), 200)
+	mode := c.Query("mode")
+	limit := 50
+	if v := c.Query("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := 0
+	if v := c.Query("offset"); v != "" {
+		fmt.Sscanf(v, "%d", &offset)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	var (
+		rows []map[string]any
+		err  error
+	)
+	if mode == "contacted" {
+		rows, err = h.svc.Store().ListContactedConversations(c.Request.Context(), limit, offset)
+	} else {
+		rows, err = h.svc.Store().ListOpenConversations(c.Request.Context(), limit, offset)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50006, "msg": "查询失败"})
 		return
@@ -341,7 +377,14 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 		}
 		delete(row, "ip_cipher") // 不外泄密文
 	}
-	c.JSON(http.StatusOK, gin.H{"code": 0, "data": rows})
+	// [085] 附带总数：前端显示「已联系 (N)」/「全部 (N)」；滚动是否到底用「返回条数<limit」判断
+	var total int
+	if mode == "contacted" {
+		total, _ = h.svc.Store().CountContactedVisitors(c.Request.Context())
+	} else {
+		total, _ = h.svc.Store().CountOpenConversations(c.Request.Context())
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": rows, "total": total})
 }
 
 // ListMessages 拉历史消息
@@ -462,7 +505,7 @@ func (h *HTTP) CloseConv(c *gin.Context) {
 var allowedMIME = map[string]bool{
 	"image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true,
 	"application/pdf": true, "application/zip": true, "application/x-zip-compressed": true,
-	"text/plain": true,
+	"text/plain":         true,
 	"application/msword": true,
 	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
 	"application/vnd.ms-excel": true,
@@ -559,7 +602,7 @@ func (h *HTTP) Upload(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
-		"id": id, "url": url, "kind": kind, "size": mh.Size, "name": mh.Filename, "mime": mimeType,
+		"id":   id, "url": url, "kind": kind, "size": mh.Size, "name": mh.Filename, "mime": mimeType,
 	})
 }
 
@@ -714,12 +757,13 @@ func (h *HTTP) ListAgents(c *gin.Context) {
 
 // 允许的 setting key 白名单（防止任意 key 注入）
 var allowedSettingKeys = map[string]bool{
-	"agent_notify_sound":   true,
-	"visitor_notify_sound": true,
-	"notify_visitor_enter": true,
-	"greeting_enabled":     true,
-	"greeting_text":        true,
-	"widget_title":         true,
+	"agent_notify_sound":    true,
+	"visitor_notify_sound":  true,
+	"notify_visitor_enter":  true,
+	"session_fresh_minutes": true, // [085] 会话超时重建阈值(分钟)，默认 30
+	"greeting_enabled":      true,
+	"greeting_text":         true,
+	"widget_title":          true,
 	// luckfast APNs 推送：访客发消息时后端调 messagepush.luckfast.com 推到客服 iPhone
 	// 两项都填才启用；留空则禁用推送（不报错，不影响其它功能）
 	"push_user_id":  true,
@@ -860,4 +904,3 @@ func (h *HTTP) DisableAgent(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }
-

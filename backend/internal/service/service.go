@@ -250,6 +250,13 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 			s.bizLog.Error("persist insert msg err",
 				zap.Error(err), zap.String("id", snap.ID), zap.String("conv", convID))
 		}
+		// [085] 客服回复 → 标记会话 agent_replied=1（「已联系」口径按访客聚合此标记，
+		//   解决会话超时重建后「已联系」丢失：只要该客户被回复过，名下任一会话都算已联系）
+		if sender == "agent" && convID != "" {
+			if err := s.store.MarkAgentReplied(ctx, convID); err != nil {
+				s.bizLog.Warn("mark_agent_replied err", zap.Error(err), zap.String("conv", convID))
+			}
+		}
 		// 仅访客消息触发 APNs 推送（让客服 iPhone 锁屏时也能收到）
 		if sender == "visitor" {
 			preview := buildPushPreview(&snap)
@@ -547,6 +554,20 @@ func (s *Service) SettingStr(ctx context.Context, key, def string) string {
 	return v
 }
 
+// SettingInt [085] 读 int 类型 setting（缺失/解析失败返回 def）。
+// 用于「会话超时重建」阈值 session_fresh_minutes 可配置项。边界由调用方 clamp。
+func (s *Service) SettingInt(ctx context.Context, key string, def int) int {
+	v := s.store.GetSetting(ctx, key, "")
+	if v == "" {
+		return def
+	}
+	n := def
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		return def
+	}
+	return n
+}
+
 // ============ 访客进入通知 + 自动问候 ============
 
 // GreetingTextIfEnabled 返回当前问候文本；未开启返回 ""。
@@ -559,17 +580,18 @@ func (s *Service) GreetingTextIfEnabled(ctx context.Context) string {
 }
 
 // OnVisitorEnter 异步执行三件事（不阻塞访客主流程，goroutine 内运行）：
-//   1. 立即广播 visitor_enter sys 通知给所有在线客服（触发客服端 ElNotification + 播声）
-//   2. 把 greeting 落库（DB 持久化，客服端历史能查到）
-//   3. 等访客 WSS 上线后 PushToVisitor greeting（type=chat, from=sys），
-//      让访客端走完整的 onmessage 逻辑：播提示音 / 累计未读 / 显示「已读」机制
-//      同时给所有在线客服广播一份（客服端能在左侧列表立即看到这条 sys 消息）
+//  1. 立即广播 visitor_enter sys 通知给所有在线客服（触发客服端 ElNotification + 播声）
+//  2. 把 greeting 落库（DB 持久化，客服端历史能查到）
+//  3. 等访客 WSS 上线后 PushToVisitor greeting（type=chat, from=sys），
+//     让访客端走完整的 onmessage 逻辑：播提示音 / 累计未读 / 显示「已读」机制
+//     同时给所有在线客服广播一份（客服端能在左侧列表立即看到这条 sys 消息）
 //
 // 为啥不用之前那套「HTTP response 里返回 greeting 文本，访客端直接 render」的旧方案：
 // 旧方案虽然简单，但访客端是"自己绘制"消息，没走 WSS onmessage 通道，所以：
 //   - 没触发提示音 playNotify
 //   - 没累计未读（widget 收起时 badge 不动）
 //   - 没已读机制
+//
 // 新方案让 greeting 完全等同于"客服真实发的消息"。
 func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversation, hub *ws.Hub) {
 	go func() {

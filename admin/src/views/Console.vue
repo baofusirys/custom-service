@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref, nextTick, computed } from 'vue'
+import { onMounted, onUnmounted, ref, nextTick, computed, watch } from 'vue'
 import { ElMessage, ElNotification } from 'element-plus'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
@@ -18,16 +18,21 @@ const convs = ref([])
 // 「已主动联系」判定：严格只信后端字段 has_visitor_msg
 // 由后端 SQL EXISTS 计算（[067] 收紧为 messages.sender='visitor' 真实消息，voice/sys 事件不再算）
 // [067] 去掉 unread>0 兜底：避免 sys 事件曾让 unread 虚高 → 把"只点了来电立即挂掉"的会话误判为已联系
+// [085] 列表重构（修复"实际接待 450 客户、工作台只显示 4 个"）：
+//   filterMode='all'       进行中(open)会话，滚动分页
+//   filterMode='contacted' 客服真正回复过的客户(按访客去重，跨 open/closed)，滚动分页
+//   「已联系」口径由 has_visitor_msg(访客发过消息) 改为后端 contacted(客服回复过 sender='agent'，按访客历史聚合)，
+//   不再受 200 条窗口限制，会话超时重建也不丢。
 const filterMode = ref('all')
-const isContacted = (c) => c.has_visitor_msg === true
-const contactedCount = computed(
-  () => convs.value.filter(isContacted).length
-)
-const filteredConvs = computed(() =>
-  filterMode.value === 'contacted'
-    ? convs.value.filter(isContacted)
-    : convs.value
-)
+const isContacted = (c) => c.contacted === true
+const allTotal = ref(0)         // 「全部」总数（后端返回，与已加载条数解耦）
+const contactedTotal = ref(0)   // 「已联系」总数
+const convLoading = ref(false)  // 分页加载中（防重复触发）
+const convHasMore = ref(true)   // 当前 tab 是否还有下一页
+const CONV_PAGE = 50
+let convOffset = 0
+// 后端已按 mode 返回，前端不再本地过滤
+const filteredConvs = computed(() => convs.value)
 const activeConv = ref(null)
 const messages = ref([])
 // ============================================================
@@ -166,10 +171,51 @@ async function loadSoundPref() {
   } catch {}
 }
 
-async function refreshConvs() {
-  const r = await http.get('/agent/conversations')
-  convs.value = r.data || []
+// [085] 分页加载会话列表。reset=true 回首页(切 tab/刷新)，false 追加下一页(滚动触底)。
+async function loadConvs(reset = true) {
+  if (convLoading.value) return
+  convLoading.value = true
+  try {
+    if (reset) { convOffset = 0; convHasMore.value = true }
+    const r = await http.get('/agent/conversations', {
+      params: { mode: filterMode.value, offset: convOffset, limit: CONV_PAGE }
+    })
+    const data = r.data || []
+    if (reset) {
+      convs.value = data
+    } else {
+      // 去重追加：防 WSS 上浮/并发导致同一会话重复
+      const seen = new Set(convs.value.map(x => x.id))
+      convs.value.push(...data.filter(x => !seen.has(x.id)))
+    }
+    convOffset += data.length
+    convHasMore.value = data.length === CONV_PAGE
+    if (filterMode.value === 'contacted') contactedTotal.value = r.total || 0
+    else allTotal.value = r.total || 0
+  } catch (e) {
+    // 静默：下次滚动/定时兜底会重试
+  } finally {
+    convLoading.value = false
+  }
 }
+// 兼容旧调用名：重载当前 tab 首页
+async function refreshConvs() { await loadConvs(true) }
+// 轻量取「已联系」总数（初次进入让 tab 数字就准，异步不阻塞主列表）
+async function refreshContactedTotal() {
+  try {
+    const r = await http.get('/agent/conversations', { params: { mode: 'contacted', offset: 0, limit: 1 } })
+    contactedTotal.value = r.total || 0
+  } catch {}
+}
+// 列表滚动触底 → 加载下一页
+const convScrollRef = ref(null)
+function onConvScroll({ scrollTop }) {
+  const wrap = convScrollRef.value?.wrapRef
+  if (!wrap || !convHasMore.value || convLoading.value) return
+  if (wrap.scrollHeight - scrollTop - wrap.clientHeight < 150) loadConvs(false)
+}
+// 切换 tab：重载对应口径首页
+watch(filterMode, () => { loadConvs(true) })
 
 async function loadMessages(convID) {
   // [070] 1) 缓存秒显：内存没有就读 localStorage，立即铺到 UI（0 转圈）
@@ -624,13 +670,14 @@ function scheduleConvsRefresh() {
   if (convsDebounce) return
   convsDebounce = setTimeout(() => {
     convsDebounce = null
-    refreshConvs()
+    refreshConvs()          // [085] 重载当前 tab 首页（新会话/新消息上浮）
+    refreshContactedTotal() // 顺带刷新「已联系」总数
   }, 3000)
 }
 
 let convsTimer
 onMounted(async () => {
-  await Promise.all([refreshConvs(), refreshStats(), loadSoundPref()])
+  await Promise.all([refreshConvs(), refreshStats(), loadSoundPref(), refreshContactedTotal()])
   // 解锁 AudioContext（Chrome 等需要用户手势）—— 用户既然能进到 console 页就算手势
   document.addEventListener('click', unlockAudio, { once: true, capture: true })
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -1038,19 +1085,19 @@ function voiceCleanup() {
         <div class="aside-filter" style="margin-top:8px">
           <el-radio-group v-model="filterMode" size="small" style="width:100%">
             <el-radio-button value="all" style="width:50%;text-align:center">
-              全部 ({{ convs.length }})
+              全部 ({{ allTotal }})
             </el-radio-button>
             <el-radio-button value="contacted" style="width:50%;text-align:center">
-              已联系 ({{ contactedCount }})
+              已联系 ({{ contactedTotal }})
             </el-radio-button>
           </el-radio-group>
         </div>
       </div>
       <el-divider style="margin:0" />
-      <el-scrollbar class="conv-scroll">
+      <el-scrollbar class="conv-scroll" ref="convScrollRef" @scroll="onConvScroll">
         <el-empty
-          v-if="!filteredConvs.length"
-          :description="filterMode==='contacted' ? '暂无主动联系过客服的访客' : '暂无进行中的会话'"
+          v-if="!filteredConvs.length && !convLoading"
+          :description="filterMode==='contacted' ? '暂无客服回复过的客户' : '暂无进行中的会话'"
           :image-size="80" />
         <template v-else>
           <div
@@ -1077,6 +1124,8 @@ function voiceCleanup() {
               </div>
             </div>
           </div>
+          <div v-if="convLoading" style="text-align:center;padding:10px;color:#909399;font-size:12px">加载中…</div>
+          <div v-else-if="!convHasMore && filteredConvs.length" style="text-align:center;padding:10px;color:#c0c4cc;font-size:12px">— 没有更多了 —</div>
         </template>
       </el-scrollbar>
     </el-aside>

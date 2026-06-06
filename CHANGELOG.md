@@ -4,6 +4,50 @@
 
 ---
 
+## [085] 2026-06-06 20:08 — 修复 Bug③「已联系」严重失真(接待450只显4)：口径重构 + 滚动分页 + 会话超时阈值可配（后端+Web+App）· v0.7.0
+
+**起因 / 需求**
+
+上游用他们生产服务器真实数据测出：实际接待过 450 个客户，工作台「已联系」只显示 4 个（Web 与 iOS App 一致）。
+
+**根因（两层叠加）**
+
+1. 后端 `GET /api/agent/conversations` 写死只返回最近 200 条 open 会话，前端本地切「已联系」。
+2. 访客离开超 30 分钟再进入触发 `EnsureFreshConversation(...,30)`：关旧会话 + 新建，新会话 ① 不带 agent_id（NULL）② 没有历史 visitor 消息(消息留在旧 closed 会话)→`has_visitor_msg=false`③ `updated_at` 最新挤进 200 窗口最前，把老的「已接待」会话挤出。证据：846/850(99.5%) closed 会话 closed_at 与同访客下一会话 started_at 精确衔接（进入即重建）。
+
+**改了什么**
+
+爷爷决策：「已联系」口径 = **客服真正回复过(sender='agent')，按客户历史聚合**；**前端滚动分页**（Web+App），加载要快、能异步就异步。
+
+后端（migration 1 新增 + store/service/http）：
+- `migrations/009_agent_replied.sql`：新增 `agent_replied` 标记列(客服回复过的会话) + 回填存量 + 2 索引；幂等(information_schema 守护 DDL)。
+- `store.go`：① `createConversation` 加 agentID 参数，超时重建**继承旧客服**(期望①)；② `ListOpenConversations` 加 offset 分页 + `contacted` 字段(按访客聚合 agent_replied)；③ 新增 `ListContactedConversations`(窗口函数 ROW_NUMBER 按访客去重、跨 open/closed、分页)；④ `MarkAgentReplied`；⑤ `CountContactedVisitors`/`CountOpenConversations`。
+- `service.go`：客服消息持久化时 `MarkAgentReplied`；新增 `SettingInt`。
+- `http.go`：`ListConversations` 支持 `mode`/`offset`/`limit`，返回 `total`；阈值 `session_fresh_minutes` 走 settings(期望③，clamp 1-1440)；settings key 白名单加该项。
+
+Web（admin）：
+- `Console.vue`：两 tab 滚动分页(`loadConvs` reset/append、`onConvScroll` 触底、`watch(filterMode)` 重载)；「已联系」改用后端 `contacted` 口径；tab 数字用后端 `total`(异步预取已联系总数不阻塞主列表)。
+- `Settings.vue`：加「会话保持时长」(`session_fresh_minutes`，el-input-number 1-1440)。
+
+App（Mac custom_service_swift）：
+- `Models.swift`：Conversation 加 `contacted`/`status`，`isContacted` 改 `contacted==true`。
+- `Store.swift`：拆 `convs`(全部)/`contactedConvs`(已联系)两份独立分页 + `loadConvs`/`loadMoreConvs`/`reloadContacted`/`refreshContactedTotal`。
+- `Views.swift`：TabView 两页各自数组 + List 触底 `onAppear` 加载下一页 + tab 数字用 total。
+- `SettingsView.swift`：加「会话保持」Stepper(1-1440)。
+
+**业务流程对比**
+
+- 改动前：访客 30 分钟后回来 → 会话重建丢 agent_id/消息 → 「已联系」判定失败 + 200 窗口截断 → 450 客户只显 4，客服找不到接待过的人。
+- 改动后：「已联系」= 客服回复过的客户，按客户历史聚合(重建不丢)、跨 open/closed、滚动分页加载全部；重建会话继承原客服；30 分钟阈值后台可配。
+
+**触发场景与边界 + 验证**
+
+- 触发：客服回复过的客户进「已联系」(去重一人一条)，滚动到底自动加载下一页；阈值改 settings 实时生效。
+- 边界：窗口函数仅作用于「被回复过」的访客子集(idx_agent_replied + idx_visitor_updated)；分页去重防 WSS 上浮重复；阈值 clamp 1-1440 防误配；migration 幂等(全新库 0 行、可重跑)。
+- 验证：后端 `go build` 通过；Web `vite build` 通过；App `xcodebuild BUILD SUCCEEDED`；部署后 docker 自动跑 009，「已联系」数 = COUNT(DISTINCT visitor WHERE agent_replied=1)。
+
+---
+
 ## [084] 2026-06-06 16:07 — 修复 Bug②「App 发出去的消息消失」：WS 连接就绪时机错误致断网必丢（App）· v0.7.0
 
 **起因 / 需求**

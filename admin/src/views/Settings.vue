@@ -10,6 +10,7 @@ const form = ref({
   agent_notify_sound: 'agent1',
   visitor_notify_sound: 'visitor1',
   notify_visitor_enter: true,
+  session_fresh_minutes: 30,
   greeting_enabled: true,
   greeting_text: '您好，欢迎光临！请问有什么可以帮您？',
   widget_title: '在线客服',
@@ -42,6 +43,7 @@ async function load() {
     form.value.agent_notify_sound = d.agent_notify_sound || 'agent1'
     form.value.visitor_notify_sound = d.visitor_notify_sound || 'visitor1'
     form.value.notify_visitor_enter = d.notify_visitor_enter !== 'false'
+    form.value.session_fresh_minutes = parseInt(d.session_fresh_minutes) || 30
     form.value.greeting_enabled = d.greeting_enabled !== 'false'
     form.value.greeting_text = d.greeting_text || form.value.greeting_text
     form.value.widget_title = d.widget_title || form.value.widget_title
@@ -63,6 +65,7 @@ async function save() {
       agent_notify_sound: form.value.agent_notify_sound,
       visitor_notify_sound: form.value.visitor_notify_sound,
       notify_visitor_enter: form.value.notify_visitor_enter ? 'true' : 'false',
+      session_fresh_minutes: String(form.value.session_fresh_minutes || 30),
       greeting_enabled: form.value.greeting_enabled ? 'true' : 'false',
       greeting_text: form.value.greeting_text || '',
       widget_title: form.value.widget_title || '在线客服',
@@ -120,6 +123,15 @@ onMounted(load)
         <div class="form-tip">
           开启：新访客打开带 widget 的页面 → 客服端弹提醒 + 响提示音。<br/>
           关闭：新访客进入<strong>不弹不响</strong>（访客真正发来消息仍照常提醒，不受影响）。
+        </div>
+      </el-form-item>
+
+      <el-form-item label="会话保持时长">
+        <el-input-number v-model="form.session_fresh_minutes" :min="1" :max="1440" :step="5" controls-position="right" style="width:160px" />
+        <span style="margin-left:8px;color:#909399">分钟</span>
+        <div class="form-tip">
+          访客离开超过这个时长再回来，算「新一轮咨询」：系统关闭旧会话、开新会话并重新问候/提醒（默认 30 分钟，范围 1–1440）。<br/>
+          注：旧会话<strong>有未读时不会关</strong>，且新会话<strong>继承原客服</strong>，不丢失「已联系」记录。
         </div>
       </el-form-item>
 
