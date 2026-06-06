@@ -4,6 +4,38 @@
 
 ---
 
+## [084] 2026-06-06 16:07 — 修复 Bug②「App 发出去的消息消失」：WS 连接就绪时机错误致断网必丢（App）· v0.7.0
+
+**起因 / 需求**
+
+爷爷反馈 Bug②：用手机 App 发消息，网络一断就丢，今天**断 20 次、成功 0 条**。之前 [079] 的"防丢失（ACK 确认 + 重连重发）"只在电脑网页版彻底生效，App 这版没修干净。
+
+**根因（大白话）**
+
+App 的 WS 连接在 `task.resume()`（只是发起握手，TCP/TLS/WS upgrade 都没完成、还没真连上）后就**立即** `onAlive(true)` → 触发 `resendPending` 重发，把消息发进一个"假装连上了"的连接里，全丢；而真正连上（收到服务器 `hello`）时反而不再触发重发。再加上 `sendDict` 只看 `task != nil` 就返回 `true`（误判已发），`send` 失败的回调还被 `{ _ in }` 吞掉。浏览器版用 `onopen`（真连上才触发）所以没这问题——这正是"网页版好了、App 没好"的根。
+
+**改了什么（App `Sources/WSManager.swift` 重写，5 处）**
+
+- 新增 `ready` 标志：只有**收到服务器 hello** 才算"连接真正就绪"
+- `connect()`：去掉 `resume` 后立即 `onAlive(true)`（假就绪根因）
+- `receive()` 收到 hello：`ready=true` + `retry=0` + `onAlive(true)`（此刻才触发 resendPending，时机正确）
+- `sendDict`：`guard ready`（未就绪返回 `false` → 上层标红「未送达」→ 重连后自动重发）；`send` 失败回调触发 `handleDisconnect` 重连（带 `task === self.task` 比对，避免误杀已重连的新连接）
+- `handleDisconnect`/`stop`：`ready=false` + 防重入
+
+**业务流程对比**
+
+- 改动前：断网发消息 → App 假装"已发" → 实际进黑洞 → 断 20 次成功 0 条
+- 改动后：断网发消息 → 立即标红「未送达」→ 网络恢复（收到 hello）→ 自动重发 → 收到 ACK 变「已发」。彻底对齐网页版可靠性
+
+**触发场景与边界 + 验证**
+
+- 触发：手机网络抖动 / WS 断开期间发消息 → 标红「未送达」，连上自动重发
+- 边界：`send` 回调延迟到达时用 `task===self.task` 比对，只有还是同一连接才判坏，不误杀已重连的新连接；`handleDisconnect` 防重入避免 send 失败与 receive 失败重复触发
+- 说明：Store 层 `sendText` 的 `ok ? .sending : .failed`（断开就标红）逻辑本就正确，关键是 `sendDict` 返回值要准——本次正是把它修准
+- 验证：`xcodebuild ** BUILD SUCCEEDED **` + 装机成功（seq 3132）
+
+---
+
 ## [083] 2026-06-06 15:59 — 修复 Bug①「收到通知看不到人」：会话超时自动关闭误埋未读（后端 + 数据修复 + 重新 up 测试服）· v0.7.0
 
 **起因 / 需求**
