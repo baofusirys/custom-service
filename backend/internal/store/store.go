@@ -554,11 +554,12 @@ SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_a
        ) AS contacted
 FROM conversations c
 JOIN visitors v ON v.id = c.visitor_id
-WHERE c.status='open' AND (
-  c.unread_agent > 0
-  OR (c.agent_replied = 0 AND EXISTS(
-        SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1))
-)
+WHERE c.status='open'
+  -- [087] 必须有访客「真实消息」(sender='visitor')打底：从根上排除纯浏览(page_navigation)、
+  --   自动问候(greeting)、访客进入、voice 通话事件——这些都是 sys 消息，客服无需「回复」。
+  --   不再依赖 unread_agent 是否纯净(历史脏数据可能被 sys 污染)。
+  AND EXISTS(SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1)
+  AND (c.unread_agent > 0 OR c.agent_replied = 0)
 ORDER BY c.unread_agent DESC, c.updated_at DESC
 LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
@@ -614,11 +615,9 @@ LIMIT ? OFFSET ?`, limit, offset)
 func (s *Store) CountPendingConversations(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM conversations c WHERE c.status='open' AND (
-  c.unread_agent > 0
-  OR (c.agent_replied = 0 AND EXISTS(
-        SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1))
-)`).Scan(&n)
+SELECT COUNT(*) FROM conversations c WHERE c.status='open'
+  AND EXISTS(SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1)
+  AND (c.unread_agent > 0 OR c.agent_replied = 0)`).Scan(&n)
 	return n, err
 }
 

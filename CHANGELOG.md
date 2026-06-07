@@ -4,6 +4,34 @@
 
 ---
 
+## [087] 2026-06-07 21:55 — 修复「待回复」误收纯浏览/问候/voice 会话：必须有访客真实消息打底（后端）· v0.7.0
+
+**起因 / 需求**
+
+爷爷发现 [086]「待回复」口径用了裸 `unread_agent>0`，可能把"只有系统消息（自动问候、浏览记录 page_navigation、voice 通话事件）但 unread 被污染"的会话误算进待回复。代码核查证实：现在 `InsertMessage`（[065]起）只有访客真实消息(sender='visitor')才 +1 unread，sys 消息不加；但**历史脏数据**（[065]修复前 unread 被 sys 污染的老会话）会让 [086] 口径误报。
+
+**改了什么（store.go 2 处）**
+
+`ListPendingConversations` + `CountPendingConversations` 的 WHERE 加前提：
+```
+AND EXISTS(SELECT 1 FROM messages m WHERE m.conv_id=c.id AND m.sender='visitor')
+AND (c.unread_agent>0 OR c.agent_replied=0)
+```
+即「待回复」**必须有访客真实消息(sender='visitor')打底**，再看未读/未回复。不再依赖 unread_agent 的纯净度。
+
+**业务流程对比**
+
+- 改动前：访客只浏览了页面 / 只收到自动问候 / 只打了个 voice 没发消息 → 若 unread 被历史脏数据污染 → 误进「待回复」骚扰客服。
+- 改动后：只有访客**真的发过文字/图片消息**且(没回复完 或 有未读)才进「待回复」。纯浏览、纯问候、纯进入、纯 voice 一律不进。
+
+**触发场景与边界 + 验证**
+
+- 不进待回复：page_navigation(sender='sys' sender_ref='page:')、greeting(sys)、visitor_enter(不入 messages 表)、voice 事件(sys sender_ref='voice') —— 均无 sender='visitor' 真实消息。
+- 进待回复：访客发过文字/媒体(sender='visitor') 且 (unread>0 或 agent_replied=0)。
+- 验证：后端 `go build` 通过；部署后「待回复」数应排除那些只有系统消息的会话。
+
+---
+
 ## [086] 2026-06-07 20:06 — 修复 Bug④「[085] 致新客户咨询全部漏接」：新增「待回复」工作队列 tab（后端+Web+App）· v0.7.0
 
 **起因 / 需求**
