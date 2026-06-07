@@ -27,6 +27,7 @@ const filterMode = ref('all')
 const isContacted = (c) => c.contacted === true
 const allTotal = ref(0)         // 「全部」总数（后端返回，与已加载条数解耦）
 const contactedTotal = ref(0)   // 「已联系」总数
+const pendingTotal = ref(0)     // [086] 「待回复」总数（红点提醒，防漏接新客户）
 const convLoading = ref(false)  // 分页加载中（防重复触发）
 const convHasMore = ref(true)   // 当前 tab 是否还有下一页
 const CONV_PAGE = 50
@@ -191,6 +192,7 @@ async function loadConvs(reset = true) {
     convOffset += data.length
     convHasMore.value = data.length === CONV_PAGE
     if (filterMode.value === 'contacted') contactedTotal.value = r.total || 0
+    else if (filterMode.value === 'pending') pendingTotal.value = r.total || 0
     else allTotal.value = r.total || 0
   } catch (e) {
     // 静默：下次滚动/定时兜底会重试
@@ -200,11 +202,15 @@ async function loadConvs(reset = true) {
 }
 // 兼容旧调用名：重载当前 tab 首页
 async function refreshConvs() { await loadConvs(true) }
-// 轻量取「已联系」总数（初次进入让 tab 数字就准，异步不阻塞主列表）
-async function refreshContactedTotal() {
+// [086] 异步并行预取「待回复」「已联系」总数（tab 数字就准，不阻塞主列表）
+async function refreshSideTotals() {
   try {
-    const r = await http.get('/agent/conversations', { params: { mode: 'contacted', offset: 0, limit: 1 } })
-    contactedTotal.value = r.total || 0
+    const [p, c] = await Promise.all([
+      http.get('/agent/conversations', { params: { mode: 'pending', offset: 0, limit: 1 } }),
+      http.get('/agent/conversations', { params: { mode: 'contacted', offset: 0, limit: 1 } })
+    ])
+    pendingTotal.value = p.total || 0
+    contactedTotal.value = c.total || 0
   } catch {}
 }
 // 列表滚动触底 → 加载下一页
@@ -670,14 +676,14 @@ function scheduleConvsRefresh() {
   if (convsDebounce) return
   convsDebounce = setTimeout(() => {
     convsDebounce = null
-    refreshConvs()          // [085] 重载当前 tab 首页（新会话/新消息上浮）
-    refreshContactedTotal() // 顺带刷新「已联系」总数
+    refreshConvs()        // [085] 重载当前 tab 首页（新会话/新消息上浮）
+    refreshSideTotals()   // [086] 顺带刷新「待回复」「已联系」总数
   }, 3000)
 }
 
 let convsTimer
 onMounted(async () => {
-  await Promise.all([refreshConvs(), refreshStats(), loadSoundPref(), refreshContactedTotal()])
+  await Promise.all([refreshConvs(), refreshStats(), loadSoundPref(), refreshSideTotals()])
   // 解锁 AudioContext（Chrome 等需要用户手势）—— 用户既然能进到 console 页就算手势
   document.addEventListener('click', unlockAudio, { once: true, capture: true })
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
@@ -1084,10 +1090,13 @@ function voiceCleanup() {
         <!-- [065] 会话过滤 tab：全部 / 仅主动联系过的访客 -->
         <div class="aside-filter" style="margin-top:8px">
           <el-radio-group v-model="filterMode" size="small" style="width:100%">
-            <el-radio-button value="all" style="width:50%;text-align:center">
+            <el-radio-button value="all" style="width:33.33%;text-align:center">
               全部 ({{ allTotal }})
             </el-radio-button>
-            <el-radio-button value="contacted" style="width:50%;text-align:center">
+            <el-radio-button value="pending" style="width:33.34%;text-align:center">
+              <span :style="{ color: pendingTotal > 0 ? '#f56c6c' : '', fontWeight: pendingTotal > 0 ? 700 : 400 }">待回复 ({{ pendingTotal }})</span>
+            </el-radio-button>
+            <el-radio-button value="contacted" style="width:33.33%;text-align:center">
               已联系 ({{ contactedTotal }})
             </el-radio-button>
           </el-radio-group>
@@ -1097,7 +1106,7 @@ function voiceCleanup() {
       <el-scrollbar class="conv-scroll" ref="convScrollRef" @scroll="onConvScroll">
         <el-empty
           v-if="!filteredConvs.length && !convLoading"
-          :description="filterMode==='contacted' ? '暂无客服回复过的客户' : '暂无进行中的会话'"
+          :description="filterMode==='contacted' ? '暂无客服回复过的客户' : (filterMode==='pending' ? '暂无待回复的客户（都回完啦）' : '暂无进行中的会话')"
           :image-size="80" />
         <template v-else>
           <div

@@ -523,6 +523,105 @@ LIMIT ? OFFSET ?`, limit, offset)
 	return out, nil
 }
 
+// ListPendingConversations [086]「待回复」列表：访客发过消息、需要客服处理的 open 会话。
+//
+//	口径 = open 且（unread_agent>0 有未读 OR (agent_replied=0 且访客发过真实消息)）——
+//	即"有新未读"或"访客发过消息但客服从没回复过"。
+//	排序：未读多的优先(unread DESC) 再按最近活动 —— 实现「有未读强制靠前、不被新访客挤走」(期望③)。
+//	修复 [085] 副作用：新客户首次咨询(从未被回复)不进「已联系」，客服只看已联系会漏接。
+func (s *Store) ListPendingConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_at,
+       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher,
+       EXISTS(
+         SELECT 1 FROM messages m
+         WHERE m.conv_id = c.id AND (
+           m.sender = 'visitor'
+           OR (m.sender = 'sys' AND m.sender_ref LIKE 'voice%')
+         )
+         LIMIT 1
+       ) AS has_visitor_msg,
+       EXISTS(
+         SELECT 1 FROM conversations c2
+         WHERE c2.visitor_id = c.visitor_id AND c2.agent_replied = 1
+         LIMIT 1
+       ) AS contacted
+FROM conversations c
+JOIN visitors v ON v.id = c.visitor_id
+WHERE c.status='open' AND (
+  c.unread_agent > 0
+  OR (c.agent_replied = 0 AND EXISTS(
+        SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1))
+)
+ORDER BY c.unread_agent DESC, c.updated_at DESC
+LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0, limit)
+	for rows.Next() {
+		var (
+			id, vid                                   string
+			aid                                       sql.NullInt64
+			unread                                    int
+			started, updated                          time.Time
+			ident, country, city, page, ref, ipCipher sql.NullString
+			hasVisitorMsg                             bool
+			contacted                                 bool
+		)
+		if err := rows.Scan(&id, &vid, &aid, &unread, &started, &updated,
+			&ident, &country, &city, &page, &ref, &ipCipher, &hasVisitorMsg, &contacted); err != nil {
+			return nil, err
+		}
+		out = append(out, map[string]any{
+			"id":              id,
+			"visitor_id":      vid,
+			"agent_id":        nullInt(aid),
+			"unread":          unread,
+			"started_at":      started,
+			"updated_at":      updated,
+			"identifier":      nullStr(ident),
+			"country":         nullStr(country),
+			"city":            nullStr(city),
+			"last_page":       nullStr(page),
+			"referer":         nullStr(ref),
+			"ip_cipher":       nullStr(ipCipher),
+			"has_visitor_msg": hasVisitorMsg,
+			"contacted":       contacted,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, c := range out {
+		if cid, ok := c["id"].(string); ok {
+			if lm, err := s.getLastMessagePreview(ctx, cid); err == nil && lm != nil {
+				c["last_message"] = lm
+			}
+		}
+	}
+	return out, nil
+}
+
+// CountPendingConversations [086]「待回复」总数（红点提醒用）。口径与 ListPendingConversations 一致。
+func (s *Store) CountPendingConversations(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM conversations c WHERE c.status='open' AND (
+  c.unread_agent > 0
+  OR (c.agent_replied = 0 AND EXISTS(
+        SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1))
+)`).Scan(&n)
+	return n, err
+}
+
 // CountContactedVisitors [085]「已联系」客户总数（被客服回复过的去重访客数），
 // 给前端显示「已联系 (N)」+ 判断滚动是否到底。
 func (s *Store) CountContactedVisitors(ctx context.Context) (int, error) {

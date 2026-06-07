@@ -4,6 +4,39 @@
 
 ---
 
+## [086] 2026-06-07 20:06 — 修复 Bug④「[085] 致新客户咨询全部漏接」：新增「待回复」工作队列 tab（后端+Web+App）· v0.7.0
+
+**起因 / 需求**
+
+[085] 把「已联系」改为「客服回复过(agent_replied=1)的访客」，**严重副作用**：新客户首次咨询(从未被回复)永远不进「已联系」，客服只看「已联系」会漏掉所有新客户。实测最近 2 天 6 个有访客消息的会话，5 个 agent_replied=0、只在「全部」可见(含未读 3、未读 1 的真实待回复客户)。
+
+**方案选择（爷爷给①②③三选一/组合）**
+
+- ② 放宽「已联系」为 agent_id 非空 OR 回复过 —— **否决**：新客户没人接管时 agent_id 仍为 NULL，救不了漏接。
+- ① 新增「待回复」筛选标签 + ③ 有未读强制置顶 —— **采纳**：给客服一个专门的「谁在等我回」工作队列。
+
+**改了什么（后端 store/http + Web + App）**
+
+口径：「待回复」= open 且（`unread_agent>0` 有未读 **OR** `agent_replied=0` 且访客发过真实消息）。排序 `unread_agent DESC, updated_at DESC`(未读强制靠前，不被新访客挤走=期望③)。
+
+- `store.go`：新增 `ListPendingConversations`(分页) + `CountPendingConversations`(红点)。
+- `http.go`：`ListConversations` 加 `mode=pending` 分支(列表 + total)。
+- `Console.vue`：会话列表 tab 从 2 个变 3 个「全部 / 待回复 / 已联系」，「待回复」数字 >0 时**红色加粗**；异步并行预取待回复+已联系总数(`refreshSideTotals`)。
+- App `Store.swift`：新增 `pendingConvs`/`pendingTotal` 独立分页 + `reloadPending`/`refreshPendingTotal`；`Views.swift`：segmented 加「待回复」段 + TabView 加待回复页 + 触底加载。
+
+**业务流程对比**
+
+- 改动前([085])：新客户发消息但没被回复 → 不进「已联系」→ 客服盯「已联系」漏接，只能在「全部」里大海捞针。
+- 改动后：新客户发消息 → 立即进「待回复」(红色数字提醒)，未读的强制置顶；客服回复后该客户进「已联系」。三个视图分工：全部=总览 / 待回复=待办 / 已联系=客户档案。
+
+**触发场景与边界 + 验证**
+
+- 触发：访客发消息且(有未读 或 该客户从没被回复) → 进「待回复」，未读多的在最前。
+- 边界：客服回复后(agent_replied=1 且 unread=0)移出待回复(下次刷新/切 tab 生效)；纯浏览没发消息的访客不进待回复(不打扰)。
+- 验证：后端 `go build` 通过；Web `vite build` 通过；App `xcodebuild BUILD SUCCEEDED`；部署后查「待回复」数 = 测试服有访客消息未回复的会话数(应含 5 个 agent_replied=0 + 有未读的)。
+
+---
+
 ## [085] 2026-06-06 20:08 — 修复 Bug③「已联系」严重失真(接待450只显4)：口径重构 + 滚动分页 + 会话超时阈值可配（后端+Web+App）· v0.7.0
 
 **起因 / 需求**

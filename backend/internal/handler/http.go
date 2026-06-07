@@ -360,6 +360,8 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 	)
 	if mode == "contacted" {
 		rows, err = h.svc.Store().ListContactedConversations(c.Request.Context(), limit, offset)
+	} else if mode == "pending" {
+		rows, err = h.svc.Store().ListPendingConversations(c.Request.Context(), limit, offset)
 	} else {
 		rows, err = h.svc.Store().ListOpenConversations(c.Request.Context(), limit, offset)
 	}
@@ -381,6 +383,8 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 	var total int
 	if mode == "contacted" {
 		total, _ = h.svc.Store().CountContactedVisitors(c.Request.Context())
+	} else if mode == "pending" {
+		total, _ = h.svc.Store().CountPendingConversations(c.Request.Context())
 	} else {
 		total, _ = h.svc.Store().CountOpenConversations(c.Request.Context())
 	}
