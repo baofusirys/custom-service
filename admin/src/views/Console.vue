@@ -217,27 +217,29 @@ function onConvScroll({ scrollTop }) {
 // 切换 tab：重载对应口径首页
 watch(filterMode, () => { loadConvs(true) })
 
-async function loadMessages(convID) {
+// [090] 按「客户(访客)」加载其所有会话段的完整历史消息（合并成一条时间流）。
+//   配合 [088] 列表按客户聚合：详情也按客户聚合。缓存键统一用 visitorID。
+async function loadMessages(visitorID) {
   // [070] 1) 缓存秒显：内存没有就读 localStorage，立即铺到 UI（0 转圈）
-  let cached = msgCache[convID]
+  let cached = msgCache[visitorID]
   if (!cached) {
-    cached = loadCachedMsgs(convID).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
-    msgCache[convID] = cached
+    cached = loadCachedMsgs(visitorID).sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    msgCache[visitorID] = cached
   }
-  if (activeConv.value?.id === convID) {
+  if (activeConv.value?.visitor_id === visitorID) {
     messages.value = cached
     if (cached.length) { await nextTick(); scrollToBottom() }
   }
   // [070] 2) 后台同步：有本地真实消息走增量(after) 只补新的，否则全量首拉
-  const lastReal = lastRealId(convID)
+  const lastReal = lastRealId(visitorID)
   const q = lastReal ? `?limit=200&after=${encodeURIComponent(lastReal)}` : `?limit=100`
-  const r = await http.get(`/agent/conversations/${convID}/messages${q}`)
+  const r = await http.get(`/agent/visitor/${visitorID}/messages${q}`)
   // 全量接口返回 DESC（最新在前）→ reverse 成 ASC；增量 after 已是 ASC
   const fetched = r.data || []
   const norm = lastReal ? fetched : fetched.slice().reverse()
-  mergeMessages(convID, norm, !lastReal)
-  saveCachedMsgs(convID)
-  if (activeConv.value?.id === convID) { await nextTick(); scrollToBottom() }
+  mergeMessages(visitorID, norm, !lastReal)
+  saveCachedMsgs(visitorID)
+  if (activeConv.value?.visitor_id === visitorID) { await nextTick(); scrollToBottom() }
 }
 
 async function pickConv(c) {
@@ -249,7 +251,7 @@ async function pickConv(c) {
   c.unread = 0
   // 拉消息 + 接管会话并行（两个 RPC 互相独立，时间 = max 而非 sum）
   await Promise.all([
-    loadMessages(c.id),
+    loadMessages(c.visitor_id),   // [090] 按客户拉完整历史（跨该访客所有会话段）
     http.post(`/agent/conversations/${c.id}/assign`),
   ])
   // assign 后 agent 已加入 byConv[c.id]，立即发 WSS read：
@@ -774,7 +776,7 @@ onMounted(async () => {
           page_title: isPageNav ? env.extra.title : ''
         })
         nextTick(scrollToBottom)
-        saveCachedMsgs(env.conv)  // [070] 实时收到的消息也落盘，刷新页面/重开不丢
+        saveCachedMsgs(activeConv.value?.visitor_id)  // [090] 按客户缓存（详情已按客户聚合）
         // 同步更新当前会话的 last_message 预览（保持左侧列表跟实时一致）
         if (activeConv.value && !isPageNav) {
           let preview = env.content || ''

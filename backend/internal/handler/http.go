@@ -404,6 +404,26 @@ func (h *HTTP) ListMessages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": msgs})
 }
 
+// ListMessagesByVisitor [090] 按客户(访客)拉「全部会话段」消息，合并成完整历史对话流。
+//
+//	path: /agent/visitor/:vid/messages?before=&after=&limit=
+//	配合 [088] 列表按客户聚合：点开客户看其所有历史会话(含已结束)的真实对话，而非只看最新一段。
+func (h *HTTP) ListMessagesByVisitor(c *gin.Context) {
+	vid := c.Param("vid")
+	before := c.Query("before")
+	after := c.Query("after")
+	limit := 50
+	if v := c.Query("limit"); v != "" {
+		fmt.Sscanf(v, "%d", &limit)
+	}
+	msgs, err := h.svc.Store().ListMessagesByVisitor(c.Request.Context(), vid, before, after, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50007, "msg": "查询失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": 0, "data": msgs})
+}
+
 // AssignSelf 客服接管会话
 func (h *HTTP) AssignSelf(c *gin.Context) {
 	convID := c.Param("id")

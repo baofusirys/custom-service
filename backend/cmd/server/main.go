@@ -180,6 +180,8 @@ func main() {
 			ag.GET("/turn-credential", h.TurnCredential)
 			// [055] 关联访客（同 IP 30 天内出现的其他 vid，给客服参考"疑似同一人"）
 			ag.GET("/visitor/:vid/related", h.RelatedVisitors)
+			// [090] 按客户聚合的完整历史对话（跨该访客所有会话段，含已结束）
+			ag.GET("/visitor/:vid/messages", h.ListMessagesByVisitor)
 		}
 
 		// 管理（仅 admin）
@@ -249,4 +251,3 @@ func ensureDatabaseExists(cfg *config.Config) error {
 		cfg.MySQL.Database))
 	return err
 }
-

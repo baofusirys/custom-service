@@ -703,6 +703,69 @@ FROM messages WHERE conv_id=? ORDER BY created_at DESC LIMIT ?`, convID, limit)
 	return out, nil
 }
 
+// ListMessagesByVisitor [090] 按「客户(访客)」查其所有会话段的消息，合并成一条完整时间流。
+//
+//	配合 [088] 列表按客户聚合：点开客户要看到他「所有历史会话」(含已结束的旧会话段)的真实对话/通话，
+//	而不是只看最新一段会话(常常只有系统消息)。
+//	read 状态：每条消息按它「所属那段会话」的 last_read_*_at 算(JOIN conversations 带出)，跨会话段各算各的。
+//	分页同 ListMessages：after 增量 / before 翻页 / default 最新；游标是 message id，按 created_at 全局排序。
+//	走 idx(conversations.visitor_id) + messages.conv_id 索引。
+func (s *Store) ListMessagesByVisitor(ctx context.Context, visitorID, beforeID, afterID string, limit int) ([]Message, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	base := `
+SELECT m.id, m.conv_id, m.sender, m.sender_ref, m.content, m.media_url, m.media_kind, m.media_name, m.media_size, m.delivered_ws, m.created_at,
+       c.last_read_agent_at, c.last_read_visitor_at
+FROM messages m
+JOIN conversations c ON c.id = m.conv_id
+WHERE c.visitor_id = ?`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	switch {
+	case afterID != "":
+		rows, err = s.db.QueryContext(ctx, base+`
+  AND m.created_at >= (SELECT created_at FROM messages WHERE id=?)
+ORDER BY m.created_at ASC LIMIT ?`, visitorID, afterID, limit)
+	case beforeID != "":
+		rows, err = s.db.QueryContext(ctx, base+`
+  AND m.created_at < (SELECT created_at FROM messages WHERE id=?)
+ORDER BY m.created_at DESC LIMIT ?`, visitorID, beforeID, limit)
+	default:
+		rows, err = s.db.QueryContext(ctx, base+`
+ORDER BY m.created_at DESC LIMIT ?`, visitorID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Message, 0, limit)
+	for rows.Next() {
+		var m Message
+		var lastAgent, lastVisitor sql.NullTime
+		if err := rows.Scan(&m.ID, &m.ConvID, &m.Sender, &m.SenderRef, &m.Content,
+			&m.MediaURL, &m.MediaKind, &m.MediaName, &m.MediaSize, &m.DeliveredWS, &m.CreatedAt,
+			&lastAgent, &lastVisitor); err != nil {
+			return nil, err
+		}
+		// 每条消息按其「所属会话」的 last_read 算 read（跨会话段各算各的）
+		switch m.Sender {
+		case "visitor":
+			if lastAgent.Valid && !m.CreatedAt.After(lastAgent.Time) {
+				m.Read = true
+			}
+		case "agent":
+			if lastVisitor.Valid && !m.CreatedAt.After(lastVisitor.Time) {
+				m.Read = true
+			}
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // ============ Agent ============
 
 func (s *Store) GetAgentByUsername(ctx context.Context, username string) (*Agent, error) {

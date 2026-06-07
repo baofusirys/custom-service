@@ -4,6 +4,37 @@
 
 ---
 
+## [090] 2026-06-08 04:58 — 修复点开客户只显最新一段会话：详情按客户聚合显示完整历史对话（后端+Web+App）· v0.7.0
+
+**起因 / 需求**
+
+[088] 列表已按客户(visitor)聚合，但点开后消息接口仍按单个 conv_id 加载——只显示该客户**最新一段会话**（常常只有系统消息），其历史会话段里的真实聊天/通话全看不到。下游实测：访客 18 段会话，真实对话在某旧段，点开却只看到最新段的系统消息。「列表按客户聚合了，详情也得按客户聚合」。
+
+**改了什么**
+
+后端（store + handler + 路由）：
+- `store.go` 新增 `ListMessagesByVisitor(visitorID, before, after, limit)`：`JOIN conversations` 按 `visitor_id` 查该客户**所有会话段**的消息，按 `created_at` 排成一条完整时间流；read 状态按每条消息「所属那段会话」的 `last_read_*_at` 各算各的；分页同 ListMessages(after 增量/before 翻页/default 最新)。
+- `http.go` 新增 handler `ListMessagesByVisitor`；`main.go` 注册路由 `GET /agent/visitor/:vid/messages`。
+
+Web（admin）：
+- `Console.vue` `loadMessages(convID)` → 改为按 `visitorID` 加载（调 `/agent/visitor/:vid/messages`），缓存键统一用 visitor_id；`pickConv` 传 `c.visitor_id`；WSS 落盘缓存键改 visitor_id。**发送/接管/已读仍用 conv_id**（最新会话）。
+
+App（custom_service_swift）：
+- `Store.swift` `openConv`：用该会话的 `visitor_id` 拉「全部会话段」完整历史（缓存键仍用 conv_id，与 WSS 一致）。
+
+**业务流程对比**
+
+- 改动前：点开客户 → 只拉最新一段会话的消息 → 历史真实对话/通话全看不到。
+- 改动后：点开客户 → 按 visitor_id 拉其所有会话段消息，合并成一条完整时间流，从头到尾都能看到（含已结束会话段的聊天/通话）。
+
+**触发场景与边界 + 验证**
+
+- 点开任意客户：显示其名下所有会话段的消息时间流；发消息仍进当前会话(conv_id)。
+- 边界：read 跨会话段各按所属会话 last_read 算；WSS 实时新消息按 conv==当前会话追加(历史段不再有新消息)；走 conversations.visitor_id + messages.conv_id 索引。
+- 验证：后端 `go build` 通过；Web `vite build` 通过；App `xcodebuild BUILD SUCCEEDED`（CODE_SIGNING_ALLOWED=NO 验证代码编译通过）。**App 装机待设备连接稳定补做**（凌晨 USB 通道不稳，签名/装机被 Connection reset 打断，非代码问题）。
+
+---
+
 ## [089] 2026-06-07 22:52 — 存档：旧 Flutter 版 App 毛玻璃试验半成品提交留痕（仅 mobile_app）· v0.7.0
 
 **起因 / 需求**
