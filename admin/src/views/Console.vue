@@ -385,6 +385,9 @@ async function sendText() {
       if (sendingConv) {
         sendingConv.last_message = { sender: 'agent', content: text, created_at: now }
         sendingConv.updated_at = now
+        // [091] 发完立即上浮到列表顶部（跟 WSS 收消息一致，不等刷新）
+        const idx = convs.value.indexOf(sendingConv)
+        if (idx > 0) { convs.value.splice(idx, 1); convs.value.unshift(sendingConv) }
       }
       // [068] 按 sendingConvId 清草稿，不影响新切到的其他 conv 草稿
       drafts.value[sendingConvId] = ''

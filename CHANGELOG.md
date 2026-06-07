@@ -4,6 +4,36 @@
 
 ---
 
+## [091] 2026-06-08 05:44 — 发/收消息后会话列表本地实时更新 + 上浮（App + Web）· v0.7.0
+
+**起因 / 需求**
+
+爷爷反馈：在 App 聊天界面给访客发消息后，回到会话列表，列表**不实时更新**（最后一条预览 / 时间 / 排序都不变），要等刷新拉后端才更新。WS 收到访客消息也应该实时变。
+
+**根因**
+
+- App `sendText`/`uploadAndSend`：只 `append` 到聊天 `msgs`，**完全不更新 `convs` 会话列表**（预览/时间/排序全靠回界面时 refreshConvs 拉后端）。
+- App `onEnvelope`（WSS 收消息）：只更新 `convs`、**不更新 `contactedConvs`（[088] 后有两个列表）**，也**不更新 `updated_at`**（时间不变）。
+- Web `sendText`：更新了 `last_message`/`updated_at`，但**没上浮**到列表顶部。
+
+**改了什么**
+
+- App `Store.swift`：新增 `bumpConv(convId, sender, preview, addUnread)`——同时更新 `convs`(全部) + `contactedConvs`(已联系) 两个列表的 `last_message` + `updated_at`(ISO now) + 上浮到顶；`sendText`/`uploadAndSend` 发完调用（本地实时）；`onEnvelope` 收消息统一走 `bumpConv`（补齐 contactedConvs + 时间）。
+- Web `Console.vue`：`sendText` 发完加上浮（`splice` + `unshift`）。
+
+**业务流程对比**
+
+- 改动前：客服发消息后会话列表纹丝不动，要等回界面刷新才显示；图2 看到"我：嗯"05:36 但最新"你好"05:37 没顶上来。
+- 改动后：发完**立即**预览更新 + 时间更新 + 排到列表最前；WSS 收访客消息同样实时（含已联系列表）。
+
+**触发场景与边界 + 验证**
+
+- 客服发文字/图片 → 列表该会话立即更新预览+时间+上浮；WSS 收访客消息 → 同步更新（非当前会话 unread+1）。
+- 边界：bumpConv 同时维护两个列表（同一客户在全部/已联系都更新）；ISO8601 时间被 parseDate 正确解析显示东八区。
+- 验证：App `BUILD SUCCEEDED` + 装机 seq 3252；Web `vite build`。
+
+---
+
 ## [090] 2026-06-08 04:58 — 修复点开客户只显最新一段会话：详情按客户聚合显示完整历史对话（后端+Web+App）· v0.7.0
 
 **起因 / 需求**
