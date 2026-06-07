@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../api/models.dart';
 import '../state/app_state.dart';
+import '../widgets/glass.dart';
 import 'chat_page.dart';
 
 class ConversationsPage extends StatefulWidget {
@@ -57,7 +58,13 @@ class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindi
     final isContactedMode = filterMode == 'contacted';
 
     return Scaffold(
+      backgroundColor: const Color(0xFFF2F2F7),
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
+        // [074] iOS 26 玻璃顶栏
+        flexibleSpace: const GlassBar(border: false, child: SizedBox.expand()),
         title: Row(
           children: [
             const Text('在线会话'),
@@ -117,8 +124,10 @@ class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindi
                 ],
               )
             : ListView.separated(
+                // [074] 卡片间距 8 + 底部 96 给浮动 tab bar 让位
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 96),
                 itemCount: filtered.length,
-                separatorBuilder: (_, __) => const Divider(height: 1, indent: 72),
+                separatorBuilder: (_, __) => const SizedBox(height: 8),
                 itemBuilder: (ctx, i) => _convTile(context, filtered[i]),
               ),
       ),
@@ -140,7 +149,14 @@ class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindi
     final name = c.displayName;
     final color = _avatarColor(c.visitorId);
     final initial = (name.isNotEmpty ? name[0] : '?').toUpperCase();
-    return ListTile(
+    // [074] iOS 26 内容层：圆角白卡片（squircle 半径 16），玻璃只在 chrome、内容用白卡
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
       leading: CircleAvatar(
         backgroundColor: color,
         child: Text(initial, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
@@ -188,6 +204,7 @@ class _ConversationsPageState extends State<ConversationsPage> with WidgetsBindi
         ctx.read<AppState>().openConv(c);
         Navigator.of(ctx).push(MaterialPageRoute(builder: (_) => const ChatPage()));
       },
+      ),
     );
   }
 

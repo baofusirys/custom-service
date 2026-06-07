@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../state/app_state.dart';
+import '../widgets/glass.dart';
 import '../widgets/voice_call_overlay.dart';
 import 'conversations_page.dart';
 import 'me_page.dart';
@@ -34,7 +35,9 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // Stack 让 VoiceCallOverlay 浮在所有页面之上（idle 时自动 SizedBox 不占位）
+      backgroundColor: const Color(0xFFF2F2F7),
+      extendBody: true,
+      // Stack：内容 + 浮动玻璃 tab bar + VoiceCallOverlay 都浮在内容之上
       body: Stack(
         children: [
           IndexedStack(
@@ -44,16 +47,62 @@ class _HomePageState extends State<HomePage> {
               MePage(),
             ],
           ),
+          // [074] iOS 26 浮动玻璃 tab bar：胶囊形浮在内容上，两边留白 + 柔和阴影
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: MediaQuery.of(context).padding.bottom + 10,
+            child: Center(child: _floatingTabBar()),
+          ),
           const VoiceCallOverlay(),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _tab,
-        onDestinationSelected: (i) => setState(() => _tab = i),
-        destinations: const [
-          NavigationDestination(icon: Icon(Icons.chat_bubble_outline), selectedIcon: Icon(Icons.chat_bubble), label: '会话'),
-          NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: '我的'),
-        ],
+    );
+  }
+
+  /// [074] iOS 26 浮动玻璃胶囊 tab bar：选中项是蓝色胶囊（图标+文字），未选中只图标。
+  Widget _floatingTabBar() {
+    const items = [
+      (Icons.chat_bubble_outline, Icons.chat_bubble, '会话'),
+      (Icons.person_outline, Icons.person, '我的'),
+    ];
+    return GlassBar(
+      borderRadius: BorderRadius.circular(28),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+      shadow: const [
+        BoxShadow(color: Color(0x1F000000), blurRadius: 20, offset: Offset(0, 6)),
+      ],
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: List.generate(items.length, (i) {
+          final sel = _tab == i;
+          final it = items[i];
+          return GestureDetector(
+            onTap: () => setState(() => _tab = i),
+            behavior: HitTestBehavior.opaque,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
+              decoration: BoxDecoration(
+                color: sel ? const Color(0xFF2974FF) : Colors.transparent,
+                borderRadius: BorderRadius.circular(22),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(sel ? it.$2 : it.$1,
+                      size: 20, color: sel ? Colors.white : const Color(0xFF6B7280)),
+                  if (sel) ...[
+                    const SizedBox(width: 6),
+                    Text(it.$3,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
+                  ],
+                ],
+              ),
+            ),
+          );
+        }),
       ),
     );
   }

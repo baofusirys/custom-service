@@ -4,6 +4,28 @@
 
 ---
 
+## [089] 2026-06-07 22:52 — 存档：旧 Flutter 版 App 毛玻璃试验半成品提交留痕（仅 mobile_app）· v0.7.0
+
+**起因 / 需求**
+
+源代码管理面板长期挂着 6 个 `mobile_app/` 未提交改动（本轮对话开始前就遗留的，非本次任务产生）。爷爷决定**提交保留、留痕**。
+
+**说明**
+
+`mobile_app/` 是**旧的 Flutter App**。客服 App 已全面转 SwiftUI 重写（Mac `~/code/custom_service_swift` 独立仓库，已迭代到 [088]），Flutter 版自 [072] 后即搁置。这批改动是当初在 Flutter 版上试「毛玻璃」效果的半成品。
+
+**改了什么（仅 mobile_app，不影响后端 / Web / SwiftUI App）**
+
+- `mobile_app/lib/widgets/glass.dart`（新增 60 行，毛玻璃 widget）
+- `mobile_app/lib/pages/chat_page.dart` / `conversations_page.dart` / `home_page.dart`（试玻璃效果改动）
+- `mobile_app/pubspec.yaml` / `pubspec.lock`（加了一个依赖）
+
+**边界**
+
+纯存档留痕，Flutter 版不再迭代（App 走 SwiftUI）。不触碰任何后端 / Web / 数据库 / 部署。
+
+---
+
 ## [088] 2026-06-07 22:28 — 列表口径按爷爷最终定义重构：删「待回复」，「全部/已联系」都按客户聚合（后端+Web+App）· v0.7.0
 
 **起因 / 需求**

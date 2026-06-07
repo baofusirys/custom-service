@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import '../api/models.dart';
 import '../state/app_state.dart';
+import '../widgets/glass.dart';
 import '../widgets/message_bubble.dart';
 import '../widgets/page_banner.dart';
 
@@ -150,13 +151,24 @@ class _ChatPageState extends State<ChatPage> {
       if (_autoScroll) _scrollToBottom();
     });
 
+    // [074] iOS 26 官方风格：浅色内容层（系统灰 #F2F2F7），玻璃只用在顶栏/输入栏（chrome）。
     return Scaffold(
+      backgroundColor: const Color(0xFFF2F2F7),
       appBar: AppBar(
+        backgroundColor: Colors.transparent,
+        elevation: 0,
+        scrolledUnderElevation: 0,
         centerTitle: true,
-        // [037] 标题真居中（之前内层 Column crossAxisAlignment.start 把它顶到左边了）
+        // [074] 玻璃顶栏：GlassBar 充满 AppBar 区域（含状态栏），标题/返回浮在上面
+        flexibleSpace: const GlassBar(border: false, child: SizedBox.expand()),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new, size: 20, color: Color(0xFF1C1C1E)),
+          onPressed: () => Navigator.of(context).maybePop(),
+        ),
+        // [037] 标题真居中
         title: Text(
           conv.displayName,
-          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+          style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: Color(0xFF1C1C1E)),
         ),
       ),
       body: Column(
@@ -287,14 +299,11 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Widget _inputBar() {
-    return Container(
+    // [074] 输入栏玻璃化（iOS26 chrome 层）：克制毛玻璃 + 发丝边，浮在浅色内容上
+    return GlassBar(
       padding: EdgeInsets.only(
-        left: 12, right: 12, top: 8,
-        bottom: 8 + MediaQuery.of(context).padding.bottom,
-      ),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        border: Border(top: BorderSide(color: Color(0xFFE5E7EB))),
+        left: 12, right: 12, top: 10,
+        bottom: 10 + MediaQuery.of(context).padding.bottom,
       ),
       child: SafeArea(
         top: false,
