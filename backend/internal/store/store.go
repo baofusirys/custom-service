@@ -346,128 +346,34 @@ func (s *Store) CloseConversation(ctx context.Context, convID string) error {
 }
 
 // ListOpenConversations 给客服后台用：当前所有进行中的会话（含访客信息 + 最后一条消息预览）。
-func (s *Store) ListOpenConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	// [059] 顺手把 v.ip_cipher 也 SELECT 出来（handler 层解密成明文 IP 给客服看
-	// 「访客 IP + 地理位置」一目了然，会话列表选客户体验提升）
-	// [065] 增加 has_visitor_msg 字段：访客是否「主动联系过客服」
-	// [067] 曾收紧为「严格只算 messages.sender='visitor' 真实消息」。
-	// [071] 爷爷改口径：访客「上来直接打电话」也是主动联系 → 把 voice 通话事件加回。
-	//   口径 = 访客发过真实消息(sender='visitor') OR 有过 voice 通话事件(sys + sender_ref LIKE 'voice%')。
-	//   爷爷明确「有来电就算」（含 cancel 秒挂），不区分通话结果；voice 全是访客拨客服、无客服外呼。
-	//   EXISTS + idx_conv_time(conv_id, created_at) 索引命中：O(log N)，200 conv 毫秒级。
-	//   排除：page_navigation / greeting / visitor_enter / typing / voice 信令与通话事件（均不算主动联系）。
-	rows, err := s.db.QueryContext(ctx, `
-SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_at,
-       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher,
-       EXISTS(
-         SELECT 1 FROM messages m
-         WHERE m.conv_id = c.id AND (
-           m.sender = 'visitor'
-           OR (m.sender = 'sys' AND m.sender_ref LIKE 'voice%')
-         )
-         LIMIT 1
-       ) AS has_visitor_msg,
-       EXISTS(
-         SELECT 1 FROM conversations c2
-         WHERE c2.visitor_id = c.visitor_id AND c2.agent_replied = 1
-         LIMIT 1
-       ) AS contacted
-FROM conversations c
-JOIN visitors v ON v.id = c.visitor_id
-WHERE c.status='open'
-ORDER BY c.updated_at DESC
-LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]map[string]any, 0, limit)
-	for rows.Next() {
-		var (
-			id, vid                                   string
-			aid                                       sql.NullInt64
-			unread                                    int
-			started, updated                          time.Time
-			ident, country, city, page, ref, ipCipher sql.NullString
-			hasVisitorMsg                             bool // [065] EXISTS 子查询结果，MySQL TINYINT(1) 可直接 Scan 到 bool
-			contacted                                 bool // [085] 该访客历史上是否被客服回复过(sender='agent')，「已联系」新口径
-		)
-		if err := rows.Scan(&id, &vid, &aid, &unread, &started, &updated,
-			&ident, &country, &city, &page, &ref, &ipCipher, &hasVisitorMsg, &contacted); err != nil {
-			return nil, err
-		}
-		out = append(out, map[string]any{
-			"id":              id,
-			"visitor_id":      vid,
-			"agent_id":        nullInt(aid),
-			"unread":          unread,
-			"started_at":      started,
-			"updated_at":      updated,
-			"identifier":      nullStr(ident),
-			"country":         nullStr(country),
-			"city":            nullStr(city),
-			"last_page":       nullStr(page),
-			"referer":         nullStr(ref),
-			"ip_cipher":       nullStr(ipCipher), // [059] handler 层会解密成 ip 明文并删掉这个字段
-			"has_visitor_msg": hasVisitorMsg,     // [065][067] 访客是否主动联系过（严格只算 sender='visitor' 真实消息，不含 voice 通话事件）
-			"contacted":       contacted,         // [085] 该访客是否被客服回复过（按访客历史聚合），前端「已联系」用此字段
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// 每条 conv 补一条 last_message 预览（应用层 N+1，limit≤200 时仍 ms 级）
-	for _, c := range out {
-		if cid, ok := c["id"].(string); ok {
-			if lm, err := s.getLastMessagePreview(ctx, cid); err == nil && lm != nil {
-				c["last_message"] = lm
-			}
-		}
-	}
-	return out, nil
-}
-
-// MarkAgentReplied [085] 标记会话已被客服回复过（客服发消息时调用）。
-// 用于「已联系」口径：按访客历史聚合，该访客任一会话被回复过即算「已联系」。
-// 幂等：只在 agent_replied=0 时写，避免重复 UPDATE 放大。
-func (s *Store) MarkAgentReplied(ctx context.Context, convID string) error {
-	if convID == "" {
-		return nil
-	}
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET agent_replied=1 WHERE id=? AND agent_replied=0`, convID)
-	return err
-}
-
-// ListContactedConversations [085]「已联系」列表：客服真正回复过(sender='agent')的客户。
+// listVisitorAggregated [088] 会话列表统一实现：按「客户(访客)」聚合，每个访客取最新一条会话，
+// 跨 open/closed（人走了 / 会话关了也算）。onlyContacted=true 时只保留「主动操作过」(visitor_engaged)的客户。
 //
-//	口径 = 访客名下任一会话 agent_replied=1（按客户历史聚合，不再只看当前这一段会话）。
-//	按访客去重（每访客取最新一条会话，跨 open/closed），按最近活动倒序，offset/limit 分页。
-//	解决「会话超时重建导致已联系丢失 + 200 窗口截断」，支撑工作台滚动加载全部接待过的客户。
-//	性能：内层 JOIN 先用 idx_agent_replied 选「被回复过」的访客，再 idx_visitor_updated
-//	取每访客最新会话；窗口函数只作用于这批行，生产 450 客户仍毫秒级。
-func (s *Store) ListContactedConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
+//	「全部」  = 所有来过的访客(含只浏览没说话 / 已离线 / 已关闭)，一人一条。
+//	「已联系」= 访客主动发过文字/图片 或 打过语音电话(visitor_engaged=1)的客户，一人一条。
+//
+// 每行带 contacted 字段(该客户是否主动操作过)，供「全部」tab 标记。
+// filter 是代码内常量拼接(非用户输入)，limit/offset 全参数化 ? 占位，无注入风险。
+func (s *Store) listVisitorAggregated(ctx context.Context, onlyContacted bool, limit, offset int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
+	filter := ""
+	if onlyContacted {
+		filter = "WHERE c.visitor_id IN (SELECT DISTINCT visitor_id FROM conversations WHERE visitor_engaged = 1)"
+	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT t.id, t.visitor_id, t.agent_id, t.unread_agent, t.status, t.started_at, t.updated_at,
-       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher
+       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher,
+       EXISTS(SELECT 1 FROM conversations c3 WHERE c3.visitor_id = t.visitor_id AND c3.visitor_engaged = 1) AS contacted
 FROM (
   SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.status, c.started_at, c.updated_at,
          ROW_NUMBER() OVER (PARTITION BY c.visitor_id ORDER BY c.updated_at DESC) AS rn
   FROM conversations c
-  JOIN (SELECT DISTINCT visitor_id FROM conversations WHERE agent_replied = 1) r
-    ON r.visitor_id = c.visitor_id
+  `+filter+`
 ) t
 JOIN visitors v ON v.id = t.visitor_id
 WHERE t.rn = 1
@@ -486,99 +392,10 @@ LIMIT ? OFFSET ?`, limit, offset)
 			status                                    string
 			started, updated                          time.Time
 			ident, country, city, page, ref, ipCipher sql.NullString
-		)
-		if err := rows.Scan(&id, &vid, &aid, &unread, &status, &started, &updated,
-			&ident, &country, &city, &page, &ref, &ipCipher); err != nil {
-			return nil, err
-		}
-		out = append(out, map[string]any{
-			"id":              id,
-			"visitor_id":      vid,
-			"agent_id":        nullInt(aid),
-			"unread":          unread,
-			"status":          status, // [085] 已联系含已结束(closed)会话，前端可标记"已结束"
-			"started_at":      started,
-			"updated_at":      updated,
-			"identifier":      nullStr(ident),
-			"country":         nullStr(country),
-			"city":            nullStr(city),
-			"last_page":       nullStr(page),
-			"referer":         nullStr(ref),
-			"ip_cipher":       nullStr(ipCipher),
-			"has_visitor_msg": true, // 已联系列表项恒为已联系（兼容前端旧字段）
-			"contacted":       true, // [085] 本列表都是客服回复过的客户
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// 补 last_message 预览（与 ListOpenConversations 同款 N+1，分页 limit≤50 时 ms 级）
-	for _, c := range out {
-		if cid, ok := c["id"].(string); ok {
-			if lm, err := s.getLastMessagePreview(ctx, cid); err == nil && lm != nil {
-				c["last_message"] = lm
-			}
-		}
-	}
-	return out, nil
-}
-
-// ListPendingConversations [086]「待回复」列表：访客发过消息、需要客服处理的 open 会话。
-//
-//	口径 = open 且（unread_agent>0 有未读 OR (agent_replied=0 且访客发过真实消息)）——
-//	即"有新未读"或"访客发过消息但客服从没回复过"。
-//	排序：未读多的优先(unread DESC) 再按最近活动 —— 实现「有未读强制靠前、不被新访客挤走」(期望③)。
-//	修复 [085] 副作用：新客户首次咨询(从未被回复)不进「已联系」，客服只看已联系会漏接。
-func (s *Store) ListPendingConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
-	if limit <= 0 || limit > 500 {
-		limit = 100
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	rows, err := s.db.QueryContext(ctx, `
-SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.started_at, c.updated_at,
-       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher,
-       EXISTS(
-         SELECT 1 FROM messages m
-         WHERE m.conv_id = c.id AND (
-           m.sender = 'visitor'
-           OR (m.sender = 'sys' AND m.sender_ref LIKE 'voice%')
-         )
-         LIMIT 1
-       ) AS has_visitor_msg,
-       EXISTS(
-         SELECT 1 FROM conversations c2
-         WHERE c2.visitor_id = c.visitor_id AND c2.agent_replied = 1
-         LIMIT 1
-       ) AS contacted
-FROM conversations c
-JOIN visitors v ON v.id = c.visitor_id
-WHERE c.status='open'
-  -- [087] 必须有访客「真实消息」(sender='visitor')打底：从根上排除纯浏览(page_navigation)、
-  --   自动问候(greeting)、访客进入、voice 通话事件——这些都是 sys 消息，客服无需「回复」。
-  --   不再依赖 unread_agent 是否纯净(历史脏数据可能被 sys 污染)。
-  AND EXISTS(SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1)
-  AND (c.unread_agent > 0 OR c.agent_replied = 0)
-ORDER BY c.unread_agent DESC, c.updated_at DESC
-LIMIT ? OFFSET ?`, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]map[string]any, 0, limit)
-	for rows.Next() {
-		var (
-			id, vid                                   string
-			aid                                       sql.NullInt64
-			unread                                    int
-			started, updated                          time.Time
-			ident, country, city, page, ref, ipCipher sql.NullString
-			hasVisitorMsg                             bool
 			contacted                                 bool
 		)
-		if err := rows.Scan(&id, &vid, &aid, &unread, &started, &updated,
-			&ident, &country, &city, &page, &ref, &ipCipher, &hasVisitorMsg, &contacted); err != nil {
+		if err := rows.Scan(&id, &vid, &aid, &unread, &status, &started, &updated,
+			&ident, &country, &city, &page, &ref, &ipCipher, &contacted); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
@@ -586,6 +403,7 @@ LIMIT ? OFFSET ?`, limit, offset)
 			"visitor_id":      vid,
 			"agent_id":        nullInt(aid),
 			"unread":          unread,
+			"status":          status, // open/closed，前端可标记「已结束」
 			"started_at":      started,
 			"updated_at":      updated,
 			"identifier":      nullStr(ident),
@@ -593,9 +411,9 @@ LIMIT ? OFFSET ?`, limit, offset)
 			"city":            nullStr(city),
 			"last_page":       nullStr(page),
 			"referer":         nullStr(ref),
-			"ip_cipher":       nullStr(ipCipher),
-			"has_visitor_msg": hasVisitorMsg,
-			"contacted":       contacted,
+			"ip_cipher":       nullStr(ipCipher), // handler 层会解密成 ip 明文并删掉这个字段
+			"contacted":       contacted,         // [088] 该客户是否主动操作过(发消息/图片/语音电话)
+			"has_visitor_msg": contacted,         // 兼容前端旧字段名
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -611,30 +429,46 @@ LIMIT ? OFFSET ?`, limit, offset)
 	return out, nil
 }
 
-// CountPendingConversations [086]「待回复」总数（红点提醒用）。口径与 ListPendingConversations 一致。
-func (s *Store) CountPendingConversations(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM conversations c WHERE c.status='open'
-  AND EXISTS(SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.sender = 'visitor' LIMIT 1)
-  AND (c.unread_agent > 0 OR c.agent_replied = 0)`).Scan(&n)
-	return n, err
+// ListAllVisitorConversations [088]「全部」：所有来过的访客(一人一条最新会话，跨 open/closed)。
+func (s *Store) ListAllVisitorConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
+	return s.listVisitorAggregated(ctx, false, limit, offset)
 }
 
-// CountContactedVisitors [085]「已联系」客户总数（被客服回复过的去重访客数），
-// 给前端显示「已联系 (N)」+ 判断滚动是否到底。
+// MarkAgentReplied [085] 标记会话已被客服回复过（客服发消息时调用）。
+// 用于「已联系」口径：按访客历史聚合，该访客任一会话被回复过即算「已联系」。
+// 幂等：只在 agent_replied=0 时写，避免重复 UPDATE 放大。
+func (s *Store) MarkAgentReplied(ctx context.Context, convID string) error {
+	if convID == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE conversations SET agent_replied=1 WHERE id=? AND agent_replied=0`, convID)
+	return err
+}
+
+// ListContactedConversations [088]「已联系」：访客主动操作过(发文字/图片 或 打语音电话)的客户。
+//
+//	口径 = 访客名下任一会话 visitor_engaged=1（按客户聚合、跨 open/closed），不管客服是否回复过。
+//	爷爷定的「已联系」真义：访客手动操作过才算；纯浏览(page_navigation)/系统问候/访客进入一律不算。
+func (s *Store) ListContactedConversations(ctx context.Context, limit, offset int) ([]map[string]any, error) {
+	return s.listVisitorAggregated(ctx, true, limit, offset)
+}
+
+// [088]「待回复」(ListPending/CountPending) 已移除：爷爷决定列表只保留「全部 / 已联系」两个口径。
+
+// CountContactedVisitors [088]「已联系」客户总数（主动操作过的去重访客数）。
 func (s *Store) CountContactedVisitors(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(DISTINCT visitor_id) FROM conversations WHERE agent_replied=1`).Scan(&n)
+		`SELECT COUNT(DISTINCT visitor_id) FROM conversations WHERE visitor_engaged=1`).Scan(&n)
 	return n, err
 }
 
-// CountOpenConversations [085] 进行中(open)会话总数，给「全部 (N)」显示。
-func (s *Store) CountOpenConversations(ctx context.Context) (int, error) {
+// CountAllVisitors [088]「全部」客户总数（所有来过的去重访客，跨 open/closed）。
+func (s *Store) CountAllVisitors(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM conversations WHERE status='open'`).Scan(&n)
+		`SELECT COUNT(DISTINCT visitor_id) FROM conversations`).Scan(&n)
 	return n, err
 }
 
@@ -732,8 +566,9 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	//   4. 全程参数化 SQL（占位符 ?），杜绝注入
 	switch m.Sender {
 	case "visitor":
+		// [088] 访客发消息/图片 = 主动操作过 → 置 visitor_engaged（「已联系」口径用）
 		_, err = s.db.ExecContext(ctx,
-			`UPDATE conversations SET updated_at=?, unread_agent=unread_agent+1 WHERE id=?`,
+			`UPDATE conversations SET updated_at=?, unread_agent=unread_agent+1, visitor_engaged=1 WHERE id=?`,
 			m.CreatedAt, m.ConvID)
 	case "agent":
 		_, err = s.db.ExecContext(ctx,
@@ -743,7 +578,12 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		// 系统消息：仅刷新 updated_at（客服会话列表按 updated_at 倒序，让有最新活动的会话排前面）。
 		// [072] 例外：page_navigation（访客浏览动作，sender_ref="page:<url>"）只落库展示、不刷 updated_at，
 		//   不让「访客访问了 X 页面」顶起会话列表的时间和排序；voice 来电(voice:*)/问候等其他 sys 照旧上浮。
-		if !strings.HasPrefix(m.SenderRef, "page:") {
+		if strings.HasPrefix(m.SenderRef, "voice") {
+			// [088] voice 通话事件 = 访客主动打来电话(含未接/秒挂) → 置 visitor_engaged（「已联系」口径用）
+			_, err = s.db.ExecContext(ctx,
+				`UPDATE conversations SET updated_at=?, visitor_engaged=1 WHERE id=?`,
+				m.CreatedAt, m.ConvID)
+		} else if !strings.HasPrefix(m.SenderRef, "page:") {
 			_, err = s.db.ExecContext(ctx,
 				`UPDATE conversations SET updated_at=? WHERE id=?`,
 				m.CreatedAt, m.ConvID)

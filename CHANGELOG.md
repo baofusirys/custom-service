@@ -4,6 +4,46 @@
 
 ---
 
+## [088] 2026-06-07 22:28 — 列表口径按爷爷最终定义重构：删「待回复」，「全部/已联系」都按客户聚合（后端+Web+App）· v0.7.0
+
+**起因 / 需求**
+
+爷爷最终敲定列表口径（推翻 [085][086][087] 的中间方案）：
+1. 「待回复」tab **不需要，删掉**——列表只保留「全部 / 已联系」。
+2. 「已联系」真义 = 访客**主动操作过**（手动打字 / 发图片 / 打语音电话），**不管客服是否回复**；纯浏览(page_navigation)、系统自动问候(greeting)、访客进入 都不算。
+3. 「全部」= **所有来过的访客**，不管人走没走（关浏览器/关机/离线）、会话开着还是已关(open/closed)、说没说话。
+4. 「全部」「已联系」都**按客户(访客)聚合，一人一条**（同一人多次来访/会话被拆段，合并成一条显示最新）。
+
+**改了什么**
+
+后端（migration 010 新增 + store + http）：
+- `migrations/010_visitor_engaged.sql`（新增）：加 `visitor_engaged` 标记列（访客主动发消息/图片 或 打语音电话）+ 回填 + 索引；幂等。
+- `store.go` `InsertMessage`：访客消息 → 置 `visitor_engaged=1`；voice 通话事件(sys + sender_ref 'voice%') → 也置 1。
+- `store.go` 新增 `listVisitorAggregated(onlyContacted)`：按 visitor_id 窗口函数去重、每人取最新会话、跨 open/closed，每行带 contacted。→ `ListAllVisitorConversations`(全部) / `ListContactedConversations`(已联系，filter visitor_engaged=1)。
+- `store.go`：`CountAllVisitors`(全部去重客户) / `CountContactedVisitors`(改 visitor_engaged)；**删** `ListOpenConversations`/`ListPendingConversations`/`CountPendingConversations`/`CountOpenConversations`。
+- `http.go`：`mode=all`→ListAll、`mode=contacted`→ListContacted、**删** `mode=pending` 分支 + total。
+
+Web（admin）：
+- `Console.vue`：tab 三个→两个「全部 / 已联系」，删 pendingTotal/待回复 button/refreshSideTotals 的 pending 预取；空列表文案改「暂无访客 / 暂无主动联系过的客户」。
+
+App（custom_service_swift）：
+- `Store.swift`：删 pendingConvs/pendingTotal/分页状态/loadConvs pending 分支/reloadPending/refreshPendingTotal。
+- `Views.swift`：segmented 三段→两段；TabView 删待回复页；onChange 删 pending。
+
+**业务流程对比**
+
+- 改动前([085]~[087])：已联系=客服回复过(漏新客户)→ 加待回复 tab 补救(又误收浏览/问候/voice)。三个 tab，口径绕。
+- 改动后：两个 tab。**全部**=所有来过的客户(含只逛的/已走的/已关的)，一人一条；**已联系**=访客真动过手的客户(打字/图片/语音)，不管客服回没回、不管会话结没结束，一人一条。
+
+**触发场景与边界 + 验证**
+
+- 进「已联系」：访客发过文字/图片 或 打过语音电话(visitor_engaged=1)。不进：纯浏览/系统问候/访客进入(均不置 visitor_engaged)。
+- 「全部」：所有有过会话的访客(含 visitor_engaged=0 的只浏览客户)，按客户聚合一人一条，跨 open/closed。
+- 边界：窗口函数 ROW_NUMBER 一客户一条；voice 含未接/秒挂也算主动联系；migration 010 幂等(全新库0行/可重跑)；filter 代码常量拼接非用户输入、limit/offset 参数化无注入。
+- 验证：后端 `go build`、Web `vite build`、App `xcodebuild BUILD SUCCEEDED` 全通过；部署后查「已联系」=COUNT(DISTINCT visitor WHERE visitor_engaged=1)、「全部」=COUNT(DISTINCT visitor)。
+
+---
+
 ## [087] 2026-06-07 21:55 — 修复「待回复」误收纯浏览/问候/voice 会话：必须有访客真实消息打底（后端）· v0.7.0
 
 **起因 / 需求**
