@@ -689,7 +689,11 @@ onMounted(async () => {
   ws = new AgentWS({
     url: `${proto}://${location.host}/ws/agent`,
     token: session.token,
-    onOpen: () => { resendPending() },   // [079] 重连成功自动重发未确认消息
+    onOpen: () => {                      // [079] 重连重发 + [092] 重连对账拉最新
+      resendPending()                    // [079] 重连自动重发未确认消息
+      refreshConvs()                     // [092] 重连对账：拉最新第一页，补断线期间漏的消息（先显缓存，后台静默刷新）
+      refreshSideTotals()                // 顺带刷新「已联系」总数
+    },
     onMessage: (env) => {
       // hello：记住自己的 connID（多端同步去重必需）
       if (env.type === 'hello') {
