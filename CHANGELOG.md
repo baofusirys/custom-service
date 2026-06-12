@@ -4,6 +4,37 @@
 
 ---
 
+## [093] 2026-06-12 23:57 — 修复 App 下拉刷新卡顿：格式化器全局复用 + 排序预解析 + 刷新走增量合并（仅 App）· v0.7.0
+
+**起因 / 需求**
+
+爷爷反馈：两个列表界面（全部/已联系）下拉刷新拉数据时，App 界面出现卡顿。
+
+**根因（三个叠加，全在主线程）**
+
+1. `parseDate` 每次调用**新建一个 ISO8601DateFormatter**（创建约 1ms/个，很贵）；[092] 的合并排序比较器里每比较一对会话调 2 次 `parseDate` → 几十条会话排序比较几百次 → **一次下拉刷新主线程创建上千个格式化器**。
+2. 列表每行时间 `fmtConvTime`/`fmtMsgTime` 每次渲染都新建 DateFormatter，重绘几十行又叠几十个。
+3. `.refreshable` 下拉刷新走老的 `refreshConvs` **整列表重置**（数组整体替换）→ SwiftUI 全列表 diff 重建。
+
+**改了什么（App 3 文件，Mac c31f482）**
+
+- `Models.swift`：格式化器**全局只建一次、永久复用**（`_isoFrac/_isoPlain` + 4 个 DateFormatter + `_csCal/_csTZ` 东八区；iOS7+ 两类 formatter 线程安全）；`parseDate/fmtConvTime/fmtMsgTime` 改用；新增 `nowISOString()`。
+- `Store.swift`：`mergeLatestPage` **排序前先把时间预解析好**再排（比较器零解析）；`bumpConv` 复用全局 formatter；`refreshLatest` 在已联系 tab 上即使列表还空也对账。
+- `Views.swift`：下拉刷新 `.refreshable` 改走 `refreshLatest(force:true)` **增量对账合并**——只动有变化的行，不整列表重置。
+
+**业务流程对比**
+
+- 改动前：下拉刷新 → 主线程被上千次格式化器创建 + 全列表重建堵住 → 界面卡顿。
+- 改动后：格式化器零新建 + 排序零重复解析 + 列表只更新变化行 → 下拉刷新主线程开销降约两个数量级，顺滑。
+
+**触发场景与边界 + 验证**
+
+- 触发：两个列表下拉刷新 / 进入对账 / WSS 重连对账，全部受益。
+- 边界：全局 formatter 统一锁 Asia/Shanghai（时区行为与之前一致）；增量合并保留已加载分页。
+- 验证：`xcodebuild BUILD SUCCEEDED` + 装机 seq 3476；爷爷真机下拉实测。仅 App 改动，后端/Web/服务器零变更。
+
+---
+
 ## [092] 2026-06-12 23:32 — 进入/返回/回前台/重连 列表都对账拉最新：推拉结合保证不漏（App + Web）· v0.7.0
 
 **起因 / 需求**
