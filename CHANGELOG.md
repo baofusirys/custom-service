@@ -4,6 +4,36 @@
 
 ---
 
+## [094] 2026-06-16 10:09 — App 7天免费证书自动重签装机：Mac launchd 每天高频重试（仅 App 构建环境）· v0.7.0
+
+**起因 / 需求**
+
+App 又到 7 天该重装了——爷爷先让重装（已装好，seq 3596，新有效期到 2026-06-23），并问"能不能 7 天自动重新安装"。
+
+**查明根因**
+
+当前 App 用**免费个人 Apple 账号**签名（证书 `Apple Development: baofusir@gmail.com`，team 名"华 张"），provisioning profile **只签 7 天**（创建 06-16 → 过期 06-23）。**7 天是 Apple 对免费账号的硬性规定**，免费签名下无法绕过。付费 Apple Developer Program($99/年)可签 1 年——爷爷选了「免费 + Mac 定时自动重装」方案。
+
+**改了什么（Mac custom_service_swift 仓库 fa976a9 + launchd）**
+
+- `auto_reinstall.sh`（新增）：自动重装脚本——设备在线检查 → 解锁钥匙串 → 重新签名编译 → 装机；全程日志记 `auto_reinstall.log`（爷爷日志铁律）。iPhone 不在线则本次跳过、不报警。
+- `launchd.autoinstall.plist`（新增，留痕；实际部署在 `~/Library/LaunchAgents/`）：每天 **9点/14点/21点** 三次触发。
+- 已 `launchctl load` 生效。
+
+**为什么这样设计（高频重试 = 坚固）**
+
+- 每天 3 次 × 7 天 = **21 次机会**，只要这 7 天里 iPhone 有任意一次在家 Wi-Fi 在线，就自动刷新有效期，App 永不过期。
+- launchd 错过触发（Mac 睡眠）会在唤醒后补跑。
+- 比"每 6 天才跑一次"坚固得多（那种当天 iPhone 不在线就漏，App 直接过期）。
+
+**前提与边界**
+
+- 前提：Mac 保持开机 + iPhone 与 Mac 在同一局域网(家 Wi-Fi) + iPhone 解锁。
+- 边界：iPhone 不在线则跳过等下次；免费账号签名 + Apple 通信偶尔失败也只是这次跳过、下次再来。
+- 验证：手动跑脚本 9 秒跑通（装机 seq 3604），launchd 已加载。**纯 App 构建环境，后端/Web/服务器零变更。**
+
+---
+
 ## [093] 2026-06-12 23:57 — 修复 App 下拉刷新卡顿：格式化器全局复用 + 排序预解析 + 刷新走增量合并（仅 App）· v0.7.0
 
 **起因 / 需求**
