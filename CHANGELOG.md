@@ -4,6 +4,18 @@
 
 ---
 
+## [096] 2026-07-06 14:40 — 修复 App 发消息转圈后「未送达」：重连后会话没重挂 → App+后端双保险自愈 · v0.7.1
+
+**起因**：爷爷反馈 App 每次发消息都卡很久、最后「未送达·重发」。查生产日志坐实（App 实际连的是**发卡密国内服 49.233.156.149** 的 cs-backend，不是 38.76.193.68 测试服）：14:03、14:04 两条 `agent_msg_no_conv`，前后 22s 内该 agent 连了 10 条 WSS。
+
+**根因**：WSS 断线重连（[095] 回前台/点通知强制重连）产生「全新连接」，后端 `c.ConvID` 为空；聊天界面虽开着却没对新连接重新 `/assign`，发消息命中 `PreprocessAgentMessage` 空 ConvID 分支被拒——后端只回 `error` 不回 `ack`，App 干等 12s ackTimeout 才标红；且 App 从不处理 `error`。附带：`onOpenURL`+`scenePhase.active` 双触发导致回前台重连风暴。
+
+**做了什么**：① 后端 hub.go/service.go 新增自愈——agent chat 若 `c.ConvID` 空但带了 `conv` 且 `AgentOwnsConv` 校验归属通过，补 attach（伪造/越权被 SQL 挡，不破坏 [077]/[068] 防串台）；② App（Mac 仓库 a2e532a）onAlive 重连先 `reattachActiveConv`(/assign) 再重发、onEnvelope 处理 `error` 做 3s 节流自愈、onForeground 加 1.5s 防抖。
+
+**验证/注意**：后端 golang:1.22 容器 `go build`+`go vet` PASS；App 模拟器 `xcodebuild` BUILD SUCCEEDED。**遗留动作**：后端要 push→CI 出镜像→在发卡密国内服 `docker compose pull && up -d`（见回复升级文案）；App 待下次自动/手动重装生效。两端各自单独就能修好，一起上=双保险。
+
+---
+
 ## [095] 2026-06-18 21:39 — 修复从通知进入 App 立即发消息转圈：回前台强制重连 WSS 解决「假活」（仅 App）· v0.7.0
 
 **起因 / 需求**

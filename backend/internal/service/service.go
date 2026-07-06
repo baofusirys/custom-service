@@ -114,6 +114,22 @@ func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c 
 	return true
 }
 
+// AgentOwnsConv [096] 实现 ws.MessageSink：hub 在 WSS 重连后「自愈 attach」时调用，
+// 判断 agent 是否拥有（或该会话未分配）该会话。包一层 store.AgentOwnsConversation，
+// 出错记日志并按 false 处理（宁可不 attach 走原「请先点开会话」提示，也不放行越权）。
+func (s *Service) AgentOwnsConv(ctx context.Context, convID, agentID string) bool {
+	if convID == "" || agentID == "" {
+		return false
+	}
+	ok, err := s.store.AgentOwnsConversation(ctx, convID, agentID)
+	if err != nil {
+		s.bizLog.Warn("agent_owns_conv_check_err",
+			zap.Error(err), zap.String("conv", convID), zap.String("agent", agentID))
+		return false
+	}
+	return ok
+}
+
 // OnPageNavigation 访客每打开/跳转一个页面时触发。
 //
 // 设计（按爷爷要求：不做服务端去重，每次都立即上报展示）：

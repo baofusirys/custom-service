@@ -1,8 +1,15 @@
-### 当前版本：v0.6.9 · 2026-06-02
+### 当前版本：v0.7.1 · 2026-07-06
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
 ---
+
+## 实际部署实例（爷爷自用，2026-07-06 核实）
+> 排查 App/客服问题时看这里，别被下面的模板占位坐标误导。
+- **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
+- **测试服（闲置，别再当生产查）**：`38.76.193.68`（MCP [10]），只有 `/api/health` 心跳，无真实流量。
+- **App(SwiftUI) 源码**：在 Mac `192.168.1.75`（MCP [18]）`~/code/custom_service_swift`（独立 git 仓库；本 Windows 仓库里的 `mobile_app` 是已存档旧 Flutter 版，[089] 起弃用）。构建装机走 `auto_reinstall.sh` / launchd。
+- **后端升级到该生产**：`git push`（触发 CI 出 `:latest` 镜像）→ 该服务器 `cd <cs 代码目录> && docker compose pull cs-backend && docker compose up -d cs-backend`（只动 cs-backend，不碰 fakami）。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -69,13 +76,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
-- **[073] 2026-06-02 v0.6.9**：客服点开会话不再把会话时间顶成「点击时间」。起因：爷爷反馈列表时间应是「消息来的时间」而非「客服点开的时间」（9:00 来消息、9:10 点开看 → 列表变 9:10）。根因（后端三端共性 bug）：列表 ORDER BY updated_at + web/Swift/Flutter 三端都显示 updated_at，而客服点开路径上 `AssignAgent`(接管)/`MarkRead`/`UpdateLastRead`(已读) 三个写操作都顺手刷了 updated_at；[072] 只拦了 page_navigation、漏了这三条直接 UPDATE。改动：仅后端 store.go 这三个函数去掉 `updated_at=?`，updated_at 自此只由真实消息(InsertMessage)维护 = 最后消息时间。无需改前端，三端自动好。go build PASS，需服务器 `docker pull` 生效。
-- **[072] 2026-06-01 v0.6.8**：页面访问不再顶起会话列表的时间和排序。起因：爷爷发现「访客访问了 XX 页面」这种浏览动作把会话顶到列表最上、改了最新消息时间。根因：InsertMessage 对所有 sys 消息刷 updated_at + 列表 ORDER BY updated_at。改 3 端（精确只动 `page:` 前缀，voice 来电等其他 sys 照旧上浮）：① backend store.go InsertMessage `page:` 前缀不刷 updated_at + getLastMessagePreview 排除 `page:` + import strings；② admin Console.vue + ③ app_state.dart WSS onMessage 页面访问只显示在聊天记录、不更新时间/不上浮。
-- **[071] 2026-06-01 v0.6.7**：「已联系」口径放宽——访客来电也算（含秒挂取消）。爷爷要"上来直接打电话"的访客也进已联系列表、别漏来电访客（与 [067] 相反）。AskUserQuestion 确认后爷爷拍板"有来电就算"。改 3 端：① backend store.go ListOpenConversations EXISTS 加回 `OR (m.sender='sys' AND m.sender_ref LIKE 'voice%')`；② admin Console.vue + ③ mobile app_state.dart WSS onMessage 收到 voice_finished 实时翻 has_visitor_msg。isContacted 信后端字段不改。go build/vet + flutter analyze + vite build 全 PASS。
-- **[070] 2026-06-01 v0.6.6**：进会话不再转圈——三端消息本地缓存 + 增量同步（微信级秒显）。起因：爷爷反馈 App+web 每次点进会话都转几秒「加载消息中」才显示，跟微信不一样。根因：前端无本地缓存、每次进会话现拉海外服务器（东京/美国，RTT 高）。改动：① backend `ListMessages` 加 after 增量参数（store.go/http.go）；② App messages 单例→按会话缓存 Map + shared_preferences 持久化 + openConv 三段式（内存秒显→持久化垫底→后台增量 merge），app_state/settings/http_client/models.dart；③ Web Console.vue 同款 + localStorage 持久化 + session.js 登出清缓存。乐观 local- 消息按内容去重防重复，LRU 60会话×200条防膨胀，延续 [068] 防串台铁律。
-- **[069] 2026-06-01 v0.6.5**：iOS 客服 App 接听后 17s 无声 → 修复 race / 异常静默 + backend 5s 看门狗 + voice_finished reason。起因：集成方 [073] 工单 iOS 客服接听后浮窗显示「通话中」但访客完全听不到客服，访客 17s 后 ICE 超时强断、客服端永不弹错。根因三层叠加：① mobile `_onOffer` `setRemoteDescription / createAnswer / setLocalDescription` 三步同一 try/catch 异常静默；② APNs 冷启 race：offer 先到、`_pc==null`、`_onIce` candidate 直接 drop → DTLS 永远握不上；③ accept() mic preflight 缺失，后端从未感知失败。改动 3 个文件 5 patch：① mobile `voice_controller.dart` Patch 1 三阶段独立 try/catch + sdp 空值校验 + `voice_signal_error{phase, reason, call_id, agent_id}` 上报；② Patch 2 accept() mic preflight + `_classifyMicError` 归一 5 种 reason + `voice_accept_failed` 上报；③ Patch 4 新增 `_prepareForIncomingCall` + `_pcReady` + `_earlyIceQueue` 缓存早到 ICE candidate + setRemote 后 flush + 所有 `await _pc!.xxx` 全包独立 try/catch；④ backend `hub.go` Patch 3 加 `pendingAccepts/acceptTimers sync.Map` + 5s 看门狗 + `fireAcceptWatchdog` LoadAndDelete 原子 dedup + voice_answer/end/reject 取消看门狗；⑤ `service.go` Patch 5 `codeToText(code, reason, durSec)` 优先按 reason 渲染 9 种中文 + `OnVoiceCallFinished` 签名加 reason + SenderRef 升级为 `voice:reason` 形式。验证：go build/vet PASS；真机三脚本：mic 关 / kill App 接听 / 故意丢 answer。
-- **[068] 2026-06-01 v0.6.4**：修复客服发消息串台严重 bug（敏感账密泄露给陌生访客）。起因：爷爷截图反馈客服在 A 会话输了账密草稿未发 → 切到 B 会话 textarea 仍留 A 草稿 → 误按回车发给 B → critical 数据泄露。根因：`admin/src/views/Console.vue` 的 `draft = ref('')` 是全局单例 + pickConv 切会话不清 draft + sendText 用 `activeConv.value.id` 实时读存在 race。改动：① admin Console.vue 改成 `drafts = ref({})` per-conv 字典 + 新 computed `currentDraft/currentPendingFiles` + sendText 入口 `const sendingConvId = activeConv.value?.id` snapshot 锁定 + ws.send / messages.push 守卫全用 snapshot + uploadAndSendFile 改签名 (file, convId) + addPendingFile/removePendingFile/clearPendingFor 全部 per-conv（blob URL revoke 防内存泄漏）+ pickFile/onPasteDraft 入口 snapshot；② `mobile_app/lib/state/app_state.dart` sendChat/uploadAndSendFile 入口加 `convIdSnap/textSnap` snapshot + 乐观渲染 `if (activeConv?.id == convIdSnap)` 守卫范式对齐 admin（mobile 因 ChatPage push 隔离原本不串台，仅做防御性硬化）。TODO：backend `hub.go case "chat"` agent 路径需加 `agentInConv(c.ID, e.ConvID)` 校验防恶意客户端伪造 conv_id。
-- **[067] 2026-06-01 v0.6.3**：「已联系」口径收紧——voice 通话事件不再算主动联系。起因：[065] 把 sys voice 事件也算 has_visitor_msg=true，导致访客只点来电立即挂掉也被误判「已联系」。改动 3 端齐改：① `backend/internal/store/store.go` ListOpenConversations EXISTS 子句去掉 `OR (m.sender='sys' AND m.sender_ref='voice')`，只保留 `m.sender='visitor'`；② `admin/src/views/Console.vue` isContacted 去掉 `unread>0` 兜底，严格只信 `has_visitor_msg`；③ `mobile_app/lib/api/models.dart` Conversation.isContacted getter 同步去 unread 兜底；④ `mobile_app/lib/state/app_state.dart` WSS onMessage 删除 voice sys → hasVisitorMsg 翻牌逻辑（voice 仍刷新预览/排序，只是不算已联系）。验证：访客只点接听立即挂掉 → 三端 isContacted=false；真发文字 → 三端立刻 true。
+- **[096] 2026-07-06 v0.7.1**：修复 App 发消息转圈后「未送达」。根因：WSS 重连产生的新连接后端 `c.ConvID` 为空，聊天界面没对新连接重新 `/assign`，发消息命中后端空 ConvID 分支被拒（只回 error 不回 ack）→ App 干等 12s 标红。生产日志（发卡密国内服）14:03/14:04 两条 `agent_msg_no_conv` 坐实。双保险：① 后端 hub.go/service.go 自愈（agent chat 带 conv 且 `AgentOwnsConv` 校验归属通过就补 attach，伪造被 SQL 挡，不破坏 [077]/[068] 防串台）；② App（Mac a2e532a）onAlive 重连先重挂会话再重发 + 处理 error 自愈 + onForeground 1.5s 防抖。后端需 pull 重部署、App 需重装。
+- **[095] 2026-06-18 v0.7.0**：修复从通知进入 App 立即发消息转圈（仅 App）。根因 WSS 后台挂起「假活」（wsAlive 仍 true）。改 WSManager.start 幂等强制新鲜连接 + App.swift scenePhase/onOpenURL → onForeground 强制重连 + Store.onForeground 对账。Mac 1a3635f。
+- **[094] 2026-06-16 v0.7.0**：App 7 天免费证书自动重签装机（仅 App 构建环境）。Mac launchd 每天 9/14/21 点触发 auto_reinstall.sh，iPhone 在线即刷新有效期。免费个人账号签名 7 天硬限，付费账号可签 1 年。Mac fa976a9 + launchd。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）

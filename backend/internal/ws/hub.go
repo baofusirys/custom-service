@@ -119,6 +119,11 @@ type MessageSink interface {
 	PreprocessAgentMessage(ctx context.Context, e *Envelope, c *Client) bool
 	PersistMessageAsync(e *Envelope, c *Client, sender string)
 
+	// AgentOwnsConv [096] 校验 agent 是否拥有（或该会话尚未分配）该会话。
+	//   仅供 hub 在 WSS 重连后「自愈 attach」时判断能否信任客户端声明的 conv；
+	//   底层复用 store.AgentOwnsConversation（伪造/越权 conv 会被 SQL 挡下），出错按 false 处理。
+	AgentOwnsConv(ctx context.Context, convID, agentID string) bool
+
 	// PersistReadAsync 异步落库「读到时刻」：把指定 role 的 last_read_*_at 推到现在。
 	// role: "agent" 或 "visitor"。失败仅记日志，不阻塞 WSS 广播。
 	PersistReadAsync(e *Envelope, c *Client, role string)
@@ -327,6 +332,20 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			}
 		} else {
 			e.From = "agent:" + c.ID
+			// [096] 重连自愈：WSS 断线重连会产生「全新连接」，其 c.ConvID 为空
+			//   （openConv 时的 HTTP /assign→AttachAgentToConv 只 attach 了当时已存在的旧连接）。
+			//   客户端从通知/回前台唤醒后强制重连（[095]），若此时聊天界面还开着并发消息，
+			//   新连接空 ConvID 会命中下方 PreprocessAgentMessage 的 c.ConvID=="" 分支被拒
+			//   （agent_msg_no_conv，只回 error 不回 ack）→ App 端干等 12s ackTimeout 才标红「未送达」。
+			//   这里做兜底：客户端 chat 带了 conv 且该会话确属本 agent（或未分配）时，把新连接补 attach，
+			//   让本条及后续消息正常收发。安全性：AgentOwnsConv 校验归属，伪造/越权 conv 会被挡，
+			//   不放开 [077]/[068] 的「服务器权威 conv 防串台」铁律（仅在 c.ConvID 为空这一窗口生效）。
+			if c.ConvID == "" && e.ConvID != "" && h.sink.AgentOwnsConv(ctx, e.ConvID, c.ID) {
+				c.ConvID = e.ConvID
+				h.attachConv(c)
+				h.bizLog.Info("agent_conv_self_heal",
+					zap.String("agent", c.ID), zap.String("conv", c.ConvID), zap.String("conn", c.ConnID))
+			}
 			e.ConvID = c.ConvID // [077] 对齐 visitor(上方)：agent 也用服务器权威 c.ConvID，不信任前端传的 conv 字段
 			sender = "agent"
 			if !h.sink.PreprocessAgentMessage(ctx, e, c) {
