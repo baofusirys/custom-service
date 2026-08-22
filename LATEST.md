@@ -7,7 +7,7 @@
 ## 实际部署实例（爷爷自用，2026-07-06 核实）
 > 排查 App/客服问题时看这里，别被下面的模板占位坐标误导。
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
-- **测试服（闲置，别再当生产查）**：`38.76.193.68`（MCP [10]），只有 `/api/health` 心跳，无真实流量。
+- **测试服（当前已启动，无真实流量）**：`38.76.193.68`（MCP [10]）。2026-08-22 临时停止同机 `weixian-douxiaoyin` 后，已用 `/custom-service` 现有代码执行 `docker compose --env-file /srv/cs-data/.env up -d --build`；外网 `/api/health` 返回 200，运行版本为 `v0.7.0`（落后本地 `v0.7.1`，未上传覆盖本地代码）。
 - **App(SwiftUI) 源码**：在 Mac `192.168.1.75`（MCP [18]）`~/code/custom_service_swift`（独立 git 仓库；本 Windows 仓库里的 `mobile_app` 是已存档旧 Flutter 版，[089] 起弃用）。构建装机走 `auto_reinstall.sh` / launchd。
 - **后端升级到该生产**：`git push`（触发 CI 出 `:latest` 镜像）→ 该服务器 `cd <cs 代码目录> && docker compose pull cs-backend && docker compose up -d cs-backend`（只动 cs-backend，不碰 fakami）。
 
@@ -76,9 +76,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[097] 2026-08-22 运维切换**：测试服 `38.76.193.68` 已安全 down 同机 `weixian-douxiaoyin`（未带 `-v`，命名卷保留），随后构建启动 `custom-service`；7 个服务均 Up，后端/MySQL/Redis healthy，内外网健康接口均 200。服务器现有代码为 v0.7.0，与本地 v0.7.1 有版本差异。
 - **[096] 2026-07-06 v0.7.1**：修复 App 发消息转圈后「未送达」。根因：WSS 重连产生的新连接后端 `c.ConvID` 为空，聊天界面没对新连接重新 `/assign`，发消息命中后端空 ConvID 分支被拒（只回 error 不回 ack）→ App 干等 12s 标红。生产日志（发卡密国内服）14:03/14:04 两条 `agent_msg_no_conv` 坐实。双保险：① 后端 hub.go/service.go 自愈（agent chat 带 conv 且 `AgentOwnsConv` 校验归属通过就补 attach，伪造被 SQL 挡，不破坏 [077]/[068] 防串台）；② App（Mac a2e532a）onAlive 重连先重挂会话再重发 + 处理 error 自愈 + onForeground 1.5s 防抖。后端需 pull 重部署、App 需重装。
 - **[095] 2026-06-18 v0.7.0**：修复从通知进入 App 立即发消息转圈（仅 App）。根因 WSS 后台挂起「假活」（wsAlive 仍 true）。改 WSManager.start 幂等强制新鲜连接 + App.swift scenePhase/onOpenURL → onForeground 强制重连 + Store.onForeground 对账。Mac 1a3635f。
-- **[094] 2026-06-16 v0.7.0**：App 7 天免费证书自动重签装机（仅 App 构建环境）。Mac launchd 每天 9/14/21 点触发 auto_reinstall.sh，iPhone 在线即刷新有效期。免费个人账号签名 7 天硬限，付费账号可签 1 年。Mac fa976a9 + launchd。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）
