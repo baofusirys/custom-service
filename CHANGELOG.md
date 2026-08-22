@@ -4,6 +4,14 @@
 
 ---
 
+## [101] 2026-08-22 19:08 — v0.7.2 七镜像完成 GHCR 与阿里云 ACR 双源发布
+
+**起因 / 需求**：爷爷明确授权正式推送，并要求生成可直接交给下游执行的版本升级通知。
+
+**做了什么**：原子推送 main 与不可变 `v0.7.2` tag；确认 GHCR 7 个 `0.7.2` 镜像已生成；修复 ACR attestation 兼容问题后，从 GHCR 向 ACR 提升同版本 amd64 镜像。
+
+**验证 / 注意**：ACR 提升 run `32569490774` 为 7/7 success，每项均核对源/目标 image ID 一致；生产服与下游尚未拉取，需将 `IMAGE_TAG=0.7.2` 后按既有 compose 流程更新，禁止使用 `latest`。
+
 ## [100] 2026-08-22 19:03 — 修复阿里云 ACR 拒绝 OCI provenance 导致版本发布失败
 
 **起因 / 需求**：`v0.7.2` tag 与 GHCR 镜像已发布，但 7 个 CI job 在推送阿里云 ACR 时均被 `unknown manifest class for application/vnd.oci.empty.v1+json` 拒绝。

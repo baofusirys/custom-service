@@ -9,7 +9,7 @@
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（当前运行 v0.7.2）**：`38.76.193.68`（MCP [10]）。同机 `weixian-douxiaoyin` 已安全停止且命名卷保留；`v0.7.2` 已按三步流程全量部署，经 `maihaocs.icu` 公网 TLS/WSS 验证持久化 ACK、重复帧幂等与数据库单行落库均通过。
 - **App(SwiftUI) 源码**：在 Mac `192.168.1.75`（MCP [18]）`~/code/custom_service_swift`（独立 git 仓库；本 Windows 仓库里的 `mobile_app` 是已存档旧 Flutter 版，[089] 起弃用）。构建装机走 `auto_reinstall.sh` / launchd。
-- **发布到生产/下游**：创建并推送明确版本 tag（如 `v0.7.2`）→ CI 双推 GHCR/阿里云 ACR 的 `:0.7.2` 镜像 → 下游将 `.env` 的 `IMAGE_TAG=0.7.2` 后拉取并启动。禁止依赖 `latest`；任何远端发布必须先经爷爷逐次同意。
+- **发布到生产/下游**：`v0.7.2` 已于 2026-08-22 发布到 GHCR 与阿里云 ACR，7 个 `:0.7.2` 镜像均验证成功；下游将 `.env` 的 `IMAGE_TAG=0.7.2` 后拉取并启动。禁止依赖 `latest`；生产服 `49.233.156.149` 当前仍未更新。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -79,9 +79,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[101] 2026-08-22 v0.7.2 发布**：不可变 tag 已推送；GHCR 与阿里云 ACR 的 7 个 `0.7.2` 镜像全部发布，ACR 提升流水线 7/7 success 且逐项核对 image ID。
 - **[100] 2026-08-22 发布修复**：修复阿里云 ACR 不支持 Buildx provenance 附加清单导致 7 镜像推送失败；新增从 GHCR 不可变版本向 ACR 提升的受控流水线，不移动既有 `v0.7.2` tag。
 - **[099] 2026-08-22 测试服验收**：`v0.7.2` 已全量部署至 `38.76.193.68`；7 服务运行、健康接口/后台/Widget 为 200，公网 TLS/WSS 首次 ACK=`persisted`、同 ID 重发=`duplicate=true`、数据库仅 1 行；三处北京时间一致。
-- **[098] 2026-08-22 v0.7.2**：修复 Web 当前会话缓存引用失联；消息改为事务落库后 ACK，补齐密码学稳定 ID、持久 outbox、逐条 persisted/delivered/read、离线重放去重、服务端回执防伪与单调读游标；WSS JWT 日志脱敏并统一 `+08:00` JSON Lines。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）
