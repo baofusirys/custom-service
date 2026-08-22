@@ -422,6 +422,17 @@
 
   var STORE_KEY = 'cs_visitor_' + siteID;
 
+  function newMessageID() {
+    if (!window.crypto || !window.crypto.getRandomValues) {
+      throw new Error('当前浏览器不支持安全随机数，无法安全发送消息');
+    }
+    var bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    var hex = '';
+    for (var i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, '0');
+    return 'm2-' + hex;
+  }
+
   // [055-F] vid 双轨读写：localStorage 主 + cookie 兜底
   // 防 localStorage 被用户清掉（部分隐私插件 / 浏览器设置 / 用户手动清）后 vid 丢失
   // cookie 同域有效期 365 天，SameSite=Lax 兼容跨域 iframe；HttpOnly 不设（JS 要读）
@@ -454,6 +465,8 @@
   var alive = false;
   var retry = 0;
   var unread = 0;
+  var seenMessageIDs = Object.create(null);
+  var lastAgentMessageID = '';
   var pingTimer = null;
   // [054] 重连控制：防 connectWS 多实例并发打爆 backend rl:wsh 限流
   var reconnectTimer = null;   // 保存待执行 setTimeout id，防多个 onclose 各自排队
@@ -851,11 +864,18 @@
       lastGroup.bubbles.appendChild(ind);
     }
   }
-  function sendReadAck() {
+  function sendReadAck(messageID) {
     if (alive && convID) {
-      try { ws.send(JSON.stringify({ type: 'read', conv: convID, ts: Date.now() })); }
+      var targetID = messageID || lastAgentMessageID;
+      try { ws.send(JSON.stringify({ type: 'read', conv: convID, id: targetID || undefined, ts: Date.now() })); }
       catch {}
     }
+  }
+
+  function sendDeliveryAck(messageID) {
+    if (!alive || !convID || !messageID) return;
+    try { ws.send(JSON.stringify({ type: 'delivery', conv: convID, id: messageID, ts: Date.now() })); }
+    catch {}
   }
 
   // Fallback：同域时 chat.html 自己读 parent.location，不依赖 loader.js postMessage。
@@ -1188,14 +1208,28 @@
   function loadHistoryFromCache() {
     try {
       var cache = JSON.parse(localStorage.getItem(STORE_KEY + '_msgs') || '[]');
-      cache.slice(-50).forEach(render);
+      cache.slice(-50).forEach(function (message) {
+        if (message.id) seenMessageIDs[message.id] = true;
+        if (message.sender === 'agent' && message.id) lastAgentMessageID = message.id;
+        render(message);
+      });
     } catch {}
   }
 
   function persistMsg(m) {
     try {
       var cache = JSON.parse(localStorage.getItem(STORE_KEY + '_msgs') || '[]');
-      cache.push(m);
+      var replaced = false;
+      if (m.id) {
+        for (var i = 0; i < cache.length; i++) {
+          if (cache[i] && cache[i].id === m.id) {
+            cache[i] = Object.assign({}, cache[i], m);
+            replaced = true;
+            break;
+          }
+        }
+      }
+      if (!replaced) cache.push(m);
       if (cache.length > 200) cache = cache.slice(-200);
       localStorage.setItem(STORE_KEY + '_msgs', JSON.stringify(cache));
     } catch {}
@@ -1280,23 +1314,34 @@
       }
       if (env.type === 'chat') {
         if (env.from && env.from.indexOf('visitor:') === 0) return;
+        var isAgentMessage = !!(env.from && env.from.indexOf('agent:') === 0);
         var m = {
-          sender: 'agent',
+          id: env.id || '',
+          conv_id: env.conv || convID,
+          sender: isAgentMessage ? 'agent' : 'sys',
           content: env.content || '',
           media_url: env.media || '',
           media_kind: env.mkind || '',
           media_name: env.mname || '',
           created_at: new Date(env.ts || Date.now()).toISOString()
         };
-        render(m); persistMsg(m);
-        playNotify(); // 收到客服 / 系统消息播声
-        // 只在 widget 收起时累计未读。loader.js 通过 widget_state 通知。
-        if (!isWidgetOpen) {
+        var duplicate = !!(m.id && seenMessageIDs[m.id]);
+        if (!duplicate) {
+          if (m.id) seenMessageIDs[m.id] = true;
+          render(m); persistMsg(m);
+          playNotify(); // 重放按 ID 去重，不重复气泡、不重复提示音
+        }
+        if (isAgentMessage && m.id) lastAgentMessageID = m.id;
+        // DOM 已渲染（或确认本地已有同 ID）后，才向后端确认送达。
+        if (isAgentMessage) sendDeliveryAck(m.id);
+        // 重连补发的同 ID 消息只补 delivery，不重复累计未读；避免断线一次 badge 暴涨。
+        // 新消息在 widget 收起时累计未读，loader.js 通过 widget_state 通知。
+        if (!duplicate && !isWidgetOpen) {
           unread++;
           parent.postMessage({ __cs: 1, type: 'unread', count: unread }, '*');
-        } else {
+        } else if (isWidgetOpen) {
           // widget 当前是打开的，访客看到了客服消息 → 立即发 read 通知客服
-          sendReadAck();
+          if (isAgentMessage) sendReadAck(m.id);
         }
       }
     };
@@ -1408,8 +1453,10 @@
     if (!text && files.length === 0) return;
     if (!alive) { setStatus('未连接', false); return; }
     if (text) {
-      ws.send(JSON.stringify({ type: 'chat', conv: convID, content: text, ts: Date.now(), prio: 0 }));
-      var m = { sender: 'visitor', content: text, created_at: new Date().toISOString() };
+      var messageID = newMessageID();
+      ws.send(JSON.stringify({ type: 'chat', conv: convID, id: messageID, content: text, ts: Date.now(), prio: 0 }));
+      var m = { id: messageID, conv_id: convID, sender: 'visitor', content: text, created_at: new Date().toISOString() };
+      seenMessageIDs[messageID] = true;
       render(m); persistMsg(m);
       setReadIndicator(false);
       inputEl.value = '';
@@ -1439,16 +1486,19 @@
       });
       var data = await r.json();
       if (data.code !== 0) throw new Error(data.msg);
+      var messageID = newMessageID();
       ws.send(JSON.stringify({
-        type: 'chat', conv: convID, content: '',
+        type: 'chat', conv: convID, id: messageID, content: '',
         media: data.url, mkind: data.kind, mname: data.name, msize: data.size,
         ts: Date.now(), prio: 0
       }));
       var m = {
+        id: messageID, conv_id: convID,
         sender: 'visitor', content: '',
         media_url: data.url, media_kind: data.kind, media_name: data.name,
         created_at: new Date().toISOString()
       };
+      seenMessageIDs[messageID] = true;
       render(m); persistMsg(m);
       setReadIndicator(false);
     } catch (err) {

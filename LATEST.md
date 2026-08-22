@@ -1,4 +1,4 @@
-### 当前版本：v0.7.1 · 2026-07-06
+### 当前版本：v0.7.2 · 2026-08-22
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -7,9 +7,9 @@
 ## 实际部署实例（爷爷自用，2026-07-06 核实）
 > 排查 App/客服问题时看这里，别被下面的模板占位坐标误导。
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
-- **测试服（当前已启动，无真实流量）**：`38.76.193.68`（MCP [10]）。2026-08-22 临时停止同机 `weixian-douxiaoyin` 后，已用 `/custom-service` 现有代码执行 `docker compose --env-file /srv/cs-data/.env up -d --build`；外网 `/api/health` 返回 200，运行版本为 `v0.7.0`（落后本地 `v0.7.1`，未上传覆盖本地代码）。
+- **测试服（当前已启动，无真实流量）**：`38.76.193.68`（MCP [10]）。同机 `weixian-douxiaoyin` 已安全停止且命名卷保留；当前仍运行远端旧代码 `v0.7.0`，本地 `v0.7.2` 消息可靠性修复尚待本次提交后全量部署验收。
 - **App(SwiftUI) 源码**：在 Mac `192.168.1.75`（MCP [18]）`~/code/custom_service_swift`（独立 git 仓库；本 Windows 仓库里的 `mobile_app` 是已存档旧 Flutter 版，[089] 起弃用）。构建装机走 `auto_reinstall.sh` / launchd。
-- **后端升级到该生产**：`git push`（触发 CI 出 `:latest` 镜像）→ 该服务器 `cd <cs 代码目录> && docker compose pull cs-backend && docker compose up -d cs-backend`（只动 cs-backend，不碰 fakami）。
+- **发布到生产/下游**：创建并推送明确版本 tag（如 `v0.7.2`）→ CI 双推 GHCR/阿里云 ACR 的 `:0.7.2` 镜像 → 下游将 `.env` 的 `IMAGE_TAG=0.7.2` 后拉取并启动。禁止依赖 `latest`；任何远端发布必须先经爷爷逐次同意。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -18,6 +18,7 @@
 - 远端代码目录：`/custom-service/`（或任意目录，与 docker-compose 上下文匹配即可）
 - 远端数据目录：`/srv/cs-data/{logs,uploads,ssl}`（铁律：必须在代码仓库外，详见 [CLAUDE.md 数据安全铁律]）
 - **远端 .env 路径**：`/srv/cs-data/.env`（[061] 起永久搬到仓库目录外，避免被 rsync/sftp 部署误删）
+- **最近一次本地备份留存**：未记录；超过 7 天视为未完成，需补做并登记。
 - **启动命令**：`cd /custom-service && docker compose --env-file /srv/cs-data/.env up -d --build`
 - **国内镜像源（pull 加速，可选）**：`REGISTRY_BASE=crpi-saarj7fitzff243d.cn-zhangjiakou.personal.cr.aliyuncs.com/baofusir`（阿里云张家口个人版，镜像公开免登录；配 `docker-compose.production.yml` + `docker compose pull` 用。CI 已配 4 个 ALIYUN_* Secret 自动双推 GHCR+阿里云。详见 CHANGELOG [074][075]）
 - 入口：
@@ -45,6 +46,8 @@
 | 服务总配置（端口/JWT/DB/Redis） | `.env`（部署时基于 `.env.example` 生成） | 根目录 |
 | 全局时区 | `backend/internal/config/config.go` | `LoadTimezone()` |
 | WSS 心跳/读写超时 | `backend/internal/ws/hub.go` | 文件顶部常量 |
+| 消息 ACK/回执/离线补发 | `backend/internal/service/message_pipeline.go` | 整个模块 |
+| Web 消息状态/缓存幂等合并 | `admin/src/modules/messageState.js` | 整个模块 |
 | 限流参数（按 IP / 按访客） | `backend/internal/security/ratelimit.go` | 文件顶部常量 |
 | 文件上传大小上限 | `backend/internal/config/config.go` | `MaxUploadSize` |
 | 数据库自动迁移开关 | `backend/internal/db/migrate.go` | 启动时强制执行，无开关 |
@@ -76,9 +79,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[098] 2026-08-22 v0.7.2**：修复 Web 当前会话缓存引用失联；消息改为事务落库后 ACK，补齐密码学稳定 ID、持久 outbox、逐条 persisted/delivered/read、离线重放去重、服务端回执防伪与单调读游标；WSS JWT 日志脱敏并统一 `+08:00` JSON Lines。代码已本地验证，测试服待部署验收。
 - **[097] 2026-08-22 运维切换**：测试服 `38.76.193.68` 已安全 down 同机 `weixian-douxiaoyin`（未带 `-v`，命名卷保留），随后构建启动 `custom-service`；7 个服务均 Up，后端/MySQL/Redis healthy，内外网健康接口均 200。服务器现有代码为 v0.7.0，与本地 v0.7.1 有版本差异。
 - **[096] 2026-07-06 v0.7.1**：修复 App 发消息转圈后「未送达」。根因：WSS 重连产生的新连接后端 `c.ConvID` 为空，聊天界面没对新连接重新 `/assign`，发消息命中后端空 ConvID 分支被拒（只回 error 不回 ack）→ App 干等 12s 标红。生产日志（发卡密国内服）14:03/14:04 两条 `agent_msg_no_conv` 坐实。双保险：① 后端 hub.go/service.go 自愈（agent chat 带 conv 且 `AgentOwnsConv` 校验归属通过就补 attach，伪造被 SQL 挡，不破坏 [077]/[068] 防串台）；② App（Mac a2e532a）onAlive 重连先重挂会话再重发 + 处理 error 自愈 + onForeground 1.5s 防抖。后端需 pull 重部署、App 需重装。
-- **[095] 2026-06-18 v0.7.0**：修复从通知进入 App 立即发消息转圈（仅 App）。根因 WSS 后台挂起「假活」（wsAlive 仍 true）。改 WSManager.start 幂等强制新鲜连接 + App.swift scenePhase/onOpenURL → onForeground 强制重连 + Store.onForeground 对账。Mac 1a3635f。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）

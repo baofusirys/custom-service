@@ -76,13 +76,13 @@ docker compose pull && docker compose up -d
 ```
 
 镜像来自 GitHub Container Registry（ghcr.io），公开免授权：
-- `ghcr.io/baofusirys/cs-backend:latest`
-- `ghcr.io/baofusirys/cs-admin:latest`
-- `ghcr.io/baofusirys/cs-widget:latest`
-- `ghcr.io/baofusirys/cs-nginx:latest`
-- `ghcr.io/baofusirys/cs-mysql:latest`
-- `ghcr.io/baofusirys/cs-redis:latest`
-- `ghcr.io/baofusirys/cs-coturn:latest`
+- `ghcr.io/baofusirys/cs-backend:0.7.2`
+- `ghcr.io/baofusirys/cs-admin:0.7.2`
+- `ghcr.io/baofusirys/cs-widget:0.7.2`
+- `ghcr.io/baofusirys/cs-nginx:0.7.2`
+- `ghcr.io/baofusirys/cs-mysql:0.7.2`
+- `ghcr.io/baofusirys/cs-redis:0.7.2`
+- `ghcr.io/baofusirys/cs-coturn:0.7.2`
 
 升级：`docker compose pull && docker compose up -d`（不编译，5 分钟）。
 
@@ -328,8 +328,8 @@ curl -s https://raw.githubusercontent.com/baofusirys/custom-service/main/VERSION
 
 无停机（除了 backend 容器重启的几秒）。数据库迁移自动跑。
 
-**锁定版本**（生产推荐，防 latest 突变）：
-编辑 `docker-compose.yml` 把 `image: ghcr.io/baofusirys/cs-backend:latest` 改成 `:0.2.0`，
+**锁定版本**（生产强制，防镜像漂移）：
+编辑 `.env` 的 `IMAGE_TAG`（例如 `0.7.2`），
 全部 release tag 见 https://github.com/baofusirys/custom-service/releases
 
 ---

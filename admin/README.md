@@ -13,6 +13,7 @@ Vue 3 + Element Plus（原生样式，无自定义皮肤）实现的客服工作
 | 路由 base = `/admin/` | `src/router/index.js` | createWebHistory 第一参 |
 | 接口 base | `src/api/http.js` | `baseURL` |
 | WSS 客户端（自动重连、心跳） | `src/api/ws.js` | `AgentWS` 类 |
+| 消息状态机 / 幂等合并 / 密码学 ID | `src/modules/messageState.js` | 纯函数统一实现 |
 | 中文 + 北京时间 | `src/main.js` | `dayjs.tz.setDefault('Asia/Shanghai')` |
 
 ## 已知坑
@@ -20,4 +21,4 @@ Vue 3 + Element Plus（原生样式，无自定义皮肤）实现的客服工作
 - 直接 `npm run build` 生成的 dist 会被 Dockerfile COPY 进 nginx:alpine。CI/CD 不依赖本地 node_modules。
 
 ## 上次重大改动
-- 2026-05-21 [001] 首版上线。
+- 2026-08-22 [098] 修复访客维度缓存引用失联；新增持久 outbox 与逐条 `已发送/已送达/已读` 单调状态。

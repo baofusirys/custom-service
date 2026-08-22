@@ -18,6 +18,8 @@
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Trace-ID $request_id;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
@@ -36,6 +38,8 @@
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Trace-ID $request_id;
         # 重声明 server 块那几条（覆盖原 SAMEORIGIN 同时不丢 HSTS / nosniff / Referrer-Policy）
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
@@ -54,6 +58,8 @@
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Trace-ID $request_id;
     }
 
     # [062] 一般 API 移除按 IP 限速
@@ -64,6 +70,8 @@
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Trace-ID $request_id;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 60s;
         proxy_send_timeout 60s;
@@ -77,6 +85,8 @@
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Trace-ID $request_id;
         proxy_buffering off;
     }
 
@@ -91,6 +101,8 @@
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Request-ID $request_id;
+        proxy_set_header X-Trace-ID $request_id;
         # 长连接不能让 Nginx 超时干掉
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;

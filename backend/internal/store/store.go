@@ -22,6 +22,10 @@ var (
 	ErrDuplicateUsername = errors.New("store: duplicate username")
 	// 字段长度超过 schema 定义（理论上 handler 入参校验应已拦截，这是兜底）
 	ErrFieldTooLong = errors.New("store: field value too long")
+	// 相同消息 ID 携带不同 payload：可能是多标签页碰撞或伪造重放，必须拒绝并审计。
+	ErrMessageIDConflict = errors.New("store: message id conflicts with existing payload")
+	// delivery/read 回执目标不属于当前会话或发送方向不正确。
+	ErrReceiptTarget = errors.New("store: invalid receipt target")
 )
 
 // mapMySQLError 把 driver 层原始 *mysql.MySQLError 归类成业务 sentinel error。
@@ -97,6 +101,9 @@ type Message struct {
 	// Read 由 ListMessages 计算填充：自己（sender）的消息是否已被对端读过
 	// （比较 created_at vs 对端的 last_read_*_at）
 	Read bool `json:"read"`
+	// Status 是对外的单调状态：persisted → delivered → read。
+	// sending/failed 只存在客户端 outbox，不由历史接口伪造。
+	Status string `json:"status"`
 }
 
 type Agent struct {
@@ -531,10 +538,23 @@ func (s *Store) AgentOwnsConversation(ctx context.Context, convID, agentID strin
 	return true, nil
 }
 
+// InsertMessage 写入系统消息等服务端生成消息；整条消息与会话计数在同一事务提交。
 func (s *Store) InsertMessage(ctx context.Context, m *Message) error {
+	_, err := s.insertMessageTx(ctx, m, false)
+	return err
+}
+
+// InsertMessageIdempotent 写入客户端带稳定 ID 的消息。
+// 返回 inserted=false 表示同 ID、同 payload 已经持久化（ACK 丢失后的安全重试）；
+// 同 ID、不同 payload 返回 ErrMessageIDConflict，绝不覆盖历史消息。
+func (s *Store) InsertMessageIdempotent(ctx context.Context, m *Message) (bool, error) {
+	return s.insertMessageTx(ctx, m, true)
+}
+
+func (s *Store) insertMessageTx(ctx context.Context, m *Message, allowIdempotent bool) (bool, error) {
 	// [077] 兜底：conv_id 不能为空（防任何路径写入孤儿消息；同步层 PreprocessAgentMessage 已拦，这里双保险）
 	if m.ConvID == "" {
-		return errors.New("insert_message: conv_id 不能为空")
+		return false, errors.New("insert_message: conv_id 不能为空")
 	}
 	if m.ID == "" {
 		m.ID = uuid.NewString()
@@ -542,13 +562,30 @@ func (s *Store) InsertMessage(ctx context.Context, m *Message) error {
 	if m.CreatedAt.IsZero() {
 		m.CreatedAt = time.Now()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `
 INSERT INTO messages(id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at)
 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.ConvID, m.Sender, m.SenderRef, m.Content,
 		m.MediaURL, m.MediaKind, m.MediaName, m.MediaSize, m.DeliveredWS, m.CreatedAt)
 	if err != nil {
-		return err
+		var mysqlErr *mysql.MySQLError
+		if allowIdempotent && errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
+			_ = tx.Rollback()
+			existing, getErr := s.GetMessageByID(ctx, m.ID)
+			if getErr != nil {
+				return false, getErr
+			}
+			if sameMessagePayload(existing, m) {
+				return false, nil
+			}
+			return false, ErrMessageIDConflict
+		}
+		return false, err
 	}
 
 	// ===== [065] 修复：sys 消息不再错算 unread_agent =====
@@ -567,11 +604,11 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	switch m.Sender {
 	case "visitor":
 		// [088] 访客发消息/图片 = 主动操作过 → 置 visitor_engaged（「已联系」口径用）
-		_, err = s.db.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`UPDATE conversations SET updated_at=?, unread_agent=unread_agent+1, visitor_engaged=1 WHERE id=?`,
 			m.CreatedAt, m.ConvID)
 	case "agent":
-		_, err = s.db.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`UPDATE conversations SET updated_at=?, unread_visitor=unread_visitor+1 WHERE id=?`,
 			m.CreatedAt, m.ConvID)
 	case "sys":
@@ -580,21 +617,124 @@ VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		//   不让「访客访问了 X 页面」顶起会话列表的时间和排序；voice 来电(voice:*)/问候等其他 sys 照旧上浮。
 		if strings.HasPrefix(m.SenderRef, "voice") {
 			// [088] voice 通话事件 = 访客主动打来电话(含未接/秒挂) → 置 visitor_engaged（「已联系」口径用）
-			_, err = s.db.ExecContext(ctx,
+			_, err = tx.ExecContext(ctx,
 				`UPDATE conversations SET updated_at=?, visitor_engaged=1 WHERE id=?`,
 				m.CreatedAt, m.ConvID)
 		} else if !strings.HasPrefix(m.SenderRef, "page:") {
-			_, err = s.db.ExecContext(ctx,
+			_, err = tx.ExecContext(ctx,
 				`UPDATE conversations SET updated_at=? WHERE id=?`,
 				m.CreatedAt, m.ConvID)
 		}
 	default:
 		// 防御性：未来万一引入新 sender 类型却忘了改这里，兜底只刷 updated_at，不污染 unread
-		_, err = s.db.ExecContext(ctx,
+		_, err = tx.ExecContext(ctx,
 			`UPDATE conversations SET updated_at=? WHERE id=?`,
 			m.CreatedAt, m.ConvID)
 	}
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) GetMessageByID(ctx context.Context, messageID string) (*Message, error) {
+	m := &Message{}
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
+FROM messages WHERE id=? LIMIT 1`, messageID).Scan(
+		&m.ID, &m.ConvID, &m.Sender, &m.SenderRef, &m.Content,
+		&m.MediaURL, &m.MediaKind, &m.MediaName, &m.MediaSize, &m.DeliveredWS, &m.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func sameMessagePayload(a, b *Message) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.ID == b.ID && a.ConvID == b.ConvID && a.Sender == b.Sender &&
+		a.SenderRef == b.SenderRef && a.Content == b.Content &&
+		a.MediaURL == b.MediaURL && a.MediaKind == b.MediaKind &&
+		a.MediaName == b.MediaName && a.MediaSize == b.MediaSize
+}
+
+// MarkMessageDelivered 只允许访客为当前会话中的客服消息确认送达。
+// 重复 ACK 幂等成功；不存在/方向错误统一返回 ErrReceiptTarget，防枚举消息归属。
+func (s *Store) MarkMessageDelivered(ctx context.Context, convID, messageID string) error {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE messages SET delivered_ws=1
+WHERE id=? AND conv_id=? AND sender='agent' AND delivered_ws=0`, messageID, convID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var exists int
+	err = s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM messages WHERE id=? AND conv_id=? AND sender='agent' LIMIT 1`,
+		messageID, convID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrReceiptTarget
+	}
 	return err
+}
+
+// ResolveReadReceipt 用目标消息的服务端 created_at 推进读游标，禁止信任客户端时间。
+// 旧客户端未带 messageID 时仍兼容使用服务器接收时间，但 conv 已由 WSS 连接权威绑定。
+func (s *Store) ResolveReadReceipt(ctx context.Context, convID, role, messageID string, receivedAt time.Time) (time.Time, error) {
+	readAt := receivedAt
+	if messageID != "" {
+		expectedSender := "visitor"
+		if role == "visitor" {
+			expectedSender = "agent"
+		} else if role != "agent" {
+			return time.Time{}, ErrReceiptTarget
+		}
+		if err := s.db.QueryRowContext(ctx, `
+SELECT created_at FROM messages WHERE id=? AND conv_id=? AND sender=? LIMIT 1`,
+			messageID, convID, expectedSender).Scan(&readAt); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return time.Time{}, ErrReceiptTarget
+			}
+			return time.Time{}, err
+		}
+	}
+	if err := s.UpdateLastRead(ctx, convID, role, readAt); err != nil {
+		return time.Time{}, err
+	}
+	return readAt, nil
+}
+
+// ListUndeliveredAgentMessages 返回访客重连后需要补发的客服消息，按时间正序且有硬上限。
+func (s *Store) ListUndeliveredAgentMessages(ctx context.Context, convID string, limit int) ([]Message, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
+FROM messages WHERE conv_id=? AND sender='agent' AND delivered_ws=0
+ORDER BY created_at ASC LIMIT ?`, convID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Message, 0, limit)
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.ConvID, &m.Sender, &m.SenderRef, &m.Content,
+			&m.MediaURL, &m.MediaKind, &m.MediaName, &m.MediaSize, &m.DeliveredWS, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		m.Status = "persisted"
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) MarkRead(ctx context.Context, convID, by string) error {
@@ -610,25 +750,55 @@ func (s *Store) MarkRead(ctx context.Context, convID, by string) error {
 	return err
 }
 
-// UpdateLastRead 把指定 role 的 last_read_*_at 推到 at；同时把对应 unread 清零。
+// UpdateLastRead 把指定 role 的 last_read_*_at 单调推进到 at；同时重算游标之后的对应 unread。
 // role: "agent" 或 "visitor"。
 // 这是「已读」语义的服务端落地：所有 created_at <= at 且 sender 为对端的消息视为已读。
 func (s *Store) UpdateLastRead(ctx context.Context, convID, role string, at time.Time) error {
-	var col, unreadCol string
+	var col, unreadCol, unreadSender string
 	switch role {
 	case "agent":
-		col, unreadCol = "last_read_agent_at", "unread_agent"
+		col, unreadCol, unreadSender = "last_read_agent_at", "unread_agent", "visitor"
 	case "visitor":
-		col, unreadCol = "last_read_visitor_at", "unread_visitor"
+		col, unreadCol, unreadSender = "last_read_visitor_at", "unread_visitor", "agent"
 	default:
 		return errors.New("invalid role for UpdateLastRead")
 	}
-	// [073] 已读不再刷 updated_at（同 MarkRead / AssignAgent）：避免客服点开会话标记已读
-	//   把会话时间顶成点击时间。只推 last_read_*_at + 清对应未读。
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE conversations SET `+col+`=?, `+unreadCol+`=0 WHERE id=?`,
-		at, convID)
-	return err
+
+	// 锁住会话读游标，保证乱序/重复 read ACK 只能前进不能回退；同时按最终游标重算未读，
+	// 避免「读到旧消息」误把其后刚到的新消息也清零。列名来自上方固定白名单，不接收外部输入。
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var current sql.NullTime
+	if err := tx.QueryRowContext(ctx,
+		`SELECT `+col+` FROM conversations WHERE id=? FOR UPDATE`, convID).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrReceiptTarget
+		}
+		return err
+	}
+	effective := monotonicReadTime(current, at)
+	var unread int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages WHERE conv_id=? AND sender=? AND created_at>?`,
+		convID, unreadSender, effective).Scan(&unread); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE conversations SET `+col+`=?, `+unreadCol+`=? WHERE id=?`,
+		effective, unread, convID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func monotonicReadTime(current sql.NullTime, incoming time.Time) time.Time {
+	if current.Valid && current.Time.After(incoming) {
+		return current.Time
+	}
+	return incoming
 }
 
 // GetLastReadTimes 返回会话的两个已读时间戳，用于 ListMessages 计算 read 字段。
@@ -698,9 +868,27 @@ FROM messages WHERE conv_id=? ORDER BY created_at DESC LIMIT ?`, convID, limit)
 					out[i].Read = true
 				}
 			}
+			setMessageStatus(&out[i])
+		}
+	} else {
+		for i := range out {
+			setMessageStatus(&out[i])
 		}
 	}
 	return out, nil
+}
+
+func setMessageStatus(m *Message) {
+	if m.Read {
+		m.Status = "read"
+		return
+	}
+	// 历史 delivered_ws 曾被无条件写真。只有 m2-* 新协议消息才把它解释为访客明确送达。
+	if strings.HasPrefix(m.ID, "m2-") && m.DeliveredWS {
+		m.Status = "delivered"
+		return
+	}
+	m.Status = "persisted"
 }
 
 // ListMessagesByVisitor [090] 按「客户(访客)」查其所有会话段的消息，合并成一条完整时间流。
@@ -761,6 +949,7 @@ ORDER BY m.created_at DESC LIMIT ?`, visitorID, limit)
 				m.Read = true
 			}
 		}
+		setMessageStatus(&m)
 		out = append(out, m)
 	}
 	return out, rows.Err()

@@ -20,7 +20,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/baofusirys/custom-service/ma
 
 自动装 Docker / 生成强密码 / 拉预编译镜像 / 启动。无需 git clone、无需本地编译。
 
-镜像在 GitHub Container Registry，公开免授权拉取：`ghcr.io/baofusirys/cs-{backend,admin,widget,nginx,mysql,redis,coturn}:latest`
+镜像在 GitHub Container Registry，公开免授权拉取：`ghcr.io/baofusirys/cs-{backend,admin,widget,nginx,mysql,redis,coturn}:0.7.2`。生产禁止使用漂移的 `latest`。
 
 ## 检查版本 / 升级
 
@@ -37,7 +37,7 @@ curl -s https://raw.githubusercontent.com/baofusirys/custom-service/main/VERSION
 cd /opt/custom-service && docker compose pull && docker compose up -d
 ```
 
-锁定特定版本（生产推荐，避免 latest 突变）：把 `docker-compose.yml` 里 `:latest` 改成具体 tag 如 `:0.2.0`，全部 release tag 见 https://github.com/baofusirys/custom-service/releases
+切换版本：修改 `.env` 的 `IMAGE_TAG`（例如 `0.7.2`）后重新拉取；全部 release tag 见 https://github.com/baofusirys/custom-service/releases
 
 ---
 

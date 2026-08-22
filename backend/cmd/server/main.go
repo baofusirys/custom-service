@@ -42,7 +42,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("[FATAL] 日志初始化失败: %v", err)
 	}
-	defer logs.Sync()
+	defer logs.Close()
 	bizLog := logs.Business
 	secLog := logs.Security
 	auditLog := logs.Audit

@@ -13,6 +13,7 @@
 | 默认主题色 | `public/loader.js` | `data-cs-theme-color` 标签属性 |
 | 默认按钮文字 | `public/loader.js` | `data-cs-button-text` 标签属性 |
 | iframe 内消息持久缓存（最近 200 条） | `public/chat.html` | `persistMsg()` |
+| delivery/read 回执与重放去重 | `public/chat.html` | `sendDeliveryAck()` / `sendReadAck()` |
 | 重连退避（最高 30s） | `public/chat.html` | `connectWS()` 中的 backoff |
 
 ## 已知坑
@@ -20,4 +21,4 @@
 - 因为给任意第三方域名嵌入，X-Frame-Options 必须留空（已在 nginx.conf 中处理）。
 
 ## 上次重大改动
-- 2026-05-21 [001] 首版。
+- 2026-08-22 [098] 新增密码学稳定消息 ID、客服消息送达/已读回执、重连补发去重且不重复累加未读。

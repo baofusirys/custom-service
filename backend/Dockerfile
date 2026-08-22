@@ -1,5 +1,5 @@
 # ===== 构建阶段 =====
-FROM golang:1.22-alpine AS builder
+FROM golang:1.26.7-alpine3.23 AS builder
 ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath GOPROXY=https://goproxy.cn,direct
 WORKDIR /src
 # 把源码先全部 COPY 进来，go mod tidy 需要分析 import 来补全间接依赖
@@ -15,7 +15,7 @@ RUN go build -ldflags="-s -w" -o /out/server ./cmd/server
 # 文件名说明：仓库 v3.0 后把 ip2region.xdb 拆成 ip2region_v4.xdb（~10MB IPv4，国内全市级）
 # 和 ip2region_v6.xdb（~35MB IPv6）。我们只用 IPv4 库够用（国内访客 100%、海外访客主流），
 # 落地文件名统一存成 ip2region.xdb 方便运行时代码不区分 v4/v6 命名。
-FROM alpine:3.20 AS geoip
+FROM alpine:3.23.3 AS geoip
 RUN apk add --no-cache wget ca-certificates
 WORKDIR /geo
 RUN set -eux; \
@@ -38,7 +38,7 @@ RUN set -eux; \
     echo "FATAL: all ip2region mirrors failed"; exit 1
 
 # ===== 运行阶段 =====
-FROM alpine:3.20
+FROM alpine:3.23.3
 ENV TZ=Asia/Shanghai
 RUN apk add --no-cache ca-certificates tzdata wget && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \

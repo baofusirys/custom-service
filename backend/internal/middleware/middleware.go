@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/custom-service/backend/internal/security"
@@ -17,17 +18,32 @@ func AccessLog(log *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
-		raw := c.Request.URL.RawQuery
+		requestID := c.GetHeader("X-Request-ID")
+		if !security.ValidTraceID(requestID) {
+			requestID = uuid.NewString()
+		}
+		traceID := c.GetHeader("X-Trace-ID")
+		if !security.ValidTraceID(traceID) {
+			traceID = requestID
+		}
+		c.Set("request_id", requestID)
+		c.Set("trace_id", traceID)
+		c.Header("X-Request-ID", requestID)
+		c.Header("X-Trace-ID", traceID)
 		c.Next()
-		log.Info("http_access",
+		log.Info("HTTP request completed",
+			zap.String("trace_id", traceID),
+			zap.String("request_id", requestID),
+			zap.String("event", "http_access"),
 			zap.String("method", c.Request.Method),
 			zap.String("path", path),
-			zap.String("query", raw),
+			zap.String("query", security.RedactRawQuery(c.Request.URL.RawQuery)),
 			zap.String("ip", security.ClientIP(c)),
 			zap.String("ua", c.Request.UserAgent()),
 			zap.Int("status", c.Writer.Status()),
-			zap.Int("size", c.Writer.Size()),
-			zap.Duration("latency", time.Since(start)))
+			zap.Int64("request_bytes", c.Request.ContentLength),
+			zap.Int("response_bytes", c.Writer.Size()),
+			zap.Int64("latency_ms", time.Since(start).Milliseconds()))
 	}
 }
 
@@ -36,9 +52,11 @@ func Recovery(log *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Error("panic", zap.Any("err", r), zap.String("path", c.Request.URL.Path))
+				traceID, _ := c.Get("trace_id")
+				log.Error("HTTP panic recovered", zap.String("event", "http_panic"), zap.Any("err", r), zap.String("path", c.Request.URL.Path),
+					zap.Any("trace_id", traceID), zap.Stack("stack"))
 				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
-					"code": 50000, "msg": "服务器内部异常",
+					"code": 50000, "msg": "服务器内部异常", "trace_id": traceID,
 				})
 			}
 		}()

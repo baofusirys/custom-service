@@ -118,6 +118,8 @@ type MessageSink interface {
 	PreprocessVisitorMessage(ctx context.Context, e *Envelope, c *Client) bool
 	PreprocessAgentMessage(ctx context.Context, e *Envelope, c *Client) bool
 	PersistMessageAsync(e *Envelope, c *Client, sender string)
+	// PersistDeliveryAsync 校验访客身份与消息归属后，幂等持久化送达状态并广播。
+	PersistDeliveryAsync(e *Envelope, c *Client)
 
 	// AgentOwnsConv [096] 校验 agent 是否拥有（或该会话尚未分配）该会话。
 	//   仅供 hub 在 WSS 重连后「自愈 attach」时判断能否信任客户端声明的 conv；
@@ -230,13 +232,13 @@ func (h *Hub) handleRegister(ctx context.Context, c *Client) {
 		Type:     "hello",
 		ID:       uuid.NewString(),
 		TS:       NowMS(),
-		ConvID:   c.ConvID,
+		ConvID:   c.ConversationID(),
 		Priority: 0,
 		Extra: map[string]any{
-			"conn_id":         c.ConnID,
-			"heartbeat_sec":   30,
-			"server_now":      time.Now().In(beijing()).Format("2006-01-02 15:04:05"),
-			"server_node":     h.cfg.NodeID,
+			"conn_id":       c.ConnID,
+			"heartbeat_sec": 30,
+			"server_now":    time.Now().In(beijing()).Format("2006-01-02 15:04:05"),
+			"server_node":   h.cfg.NodeID,
 		},
 	})
 }
@@ -270,18 +272,20 @@ func (h *Hub) handleUnregister(ctx context.Context, c *Client) {
 }
 
 func (h *Hub) attachConv(c *Client) {
-	if c.ConvID == "" {
+	convID := c.ConversationID()
+	if convID == "" {
 		return
 	}
-	m, _ := h.byConv.LoadOrStore(c.ConvID, &sync.Map{})
+	m, _ := h.byConv.LoadOrStore(convID, &sync.Map{})
 	m.(*sync.Map).Store(c.ConnID, c)
 }
 
 func (h *Hub) detachConv(c *Client) {
-	if c.ConvID == "" {
+	convID := c.ConversationID()
+	if convID == "" {
 		return
 	}
-	if m, ok := h.byConv.Load(c.ConvID); ok {
+	if m, ok := h.byConv.Load(convID); ok {
 		m.(*sync.Map).Delete(c.ConnID)
 	}
 }
@@ -293,7 +297,7 @@ func (h *Hub) AttachAgentToConv(agentID, convID string) {
 		v.(*sync.Map).Range(func(_, cv any) bool {
 			c := cv.(*Client)
 			h.detachConv(c)
-			c.ConvID = convID
+			c.SetConversationID(convID)
 			h.attachConv(c)
 			return true
 		})
@@ -306,7 +310,9 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 
 	// 服务器盖时间戳（防客户端伪造）+ 强制北京时 + 盖发起方 ConnID（多端去重用）
 	e.TS = NowMS()
-	if e.ID == "" {
+	// delivery 必须精确引用被送达的消息；read 允许旧客户端不带目标 ID，
+	// 由服务端以接收时间作为兼容游标。不能在这里为两类回执伪造目标消息 ID。
+	if e.ID == "" && e.Type != "delivery" && e.Type != "read" {
 		e.ID = uuid.NewString()
 	}
 	e.ConnID = c.ConnID
@@ -316,21 +322,24 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 		c.Send(&Envelope{Type: "pong", ID: e.ID, TS: e.TS, Priority: 0})
 		return
 	case "chat":
-		// ============================================================
-		// 顺序（WSS 优先，爷爷需求）：
-		//   1) Preprocess 同步：限流 + 清洗（必须先做，挡住违规消息）
-		//   2) Fanout 立即广播：实时通道不被 DB 写入拖累
-		//   3) Persist 异步：后台 goroutine 入库
-		// ============================================================
+		if !ValidMessageID(e.ID) {
+			h.secLog.Warn("message_id_rejected", zap.String("conn", c.ConnID), zap.String("actor", c.ID), zap.Int("id_length", len(e.ID)))
+			c.Send(&Envelope{Type: "error", Content: "消息标识无效，请重试", TS: NowMS()})
+			return
+		}
+		// [098] 顺序：同步风控 → 有界异步队列持久化 → persisted ACK → WSS 广播。
+		// DB 写入不阻塞 Hub 主循环，但成功 ACK 与访客可见消息都严格晚于事务提交。
 		var sender string
 		if c.Kind == KindVisitor {
+			boundConv := c.ConversationID()
 			e.From = "visitor:" + c.ID
-			e.ConvID = c.ConvID
+			e.ConvID = boundConv
 			sender = "visitor"
 			if !h.sink.PreprocessVisitorMessage(ctx, e, c) {
 				return // 被限流或拒绝，不广播也不入库
 			}
 		} else {
+			boundConv := c.ConversationID()
 			e.From = "agent:" + c.ID
 			// [096] 重连自愈：WSS 断线重连会产生「全新连接」，其 c.ConvID 为空
 			//   （openConv 时的 HTTP /assign→AttachAgentToConv 只 attach 了当时已存在的旧连接）。
@@ -340,30 +349,39 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			//   这里做兜底：客户端 chat 带了 conv 且该会话确属本 agent（或未分配）时，把新连接补 attach，
 			//   让本条及后续消息正常收发。安全性：AgentOwnsConv 校验归属，伪造/越权 conv 会被挡，
 			//   不放开 [077]/[068] 的「服务器权威 conv 防串台」铁律（仅在 c.ConvID 为空这一窗口生效）。
-			if c.ConvID == "" && e.ConvID != "" && h.sink.AgentOwnsConv(ctx, e.ConvID, c.ID) {
-				c.ConvID = e.ConvID
+			if boundConv == "" && e.ConvID != "" && h.sink.AgentOwnsConv(ctx, e.ConvID, c.ID) {
+				boundConv = e.ConvID
+				c.SetConversationID(boundConv)
 				h.attachConv(c)
 				h.bizLog.Info("agent_conv_self_heal",
-					zap.String("agent", c.ID), zap.String("conv", c.ConvID), zap.String("conn", c.ConnID))
+					zap.String("agent", c.ID), zap.String("conv", boundConv), zap.String("conn", c.ConnID))
 			}
-			e.ConvID = c.ConvID // [077] 对齐 visitor(上方)：agent 也用服务器权威 c.ConvID，不信任前端传的 conv 字段
+			e.ConvID = boundConv // [077] 对齐 visitor(上方)：agent 也用服务器权威会话，不信任前端传的 conv 字段
 			sender = "agent"
 			if !h.sink.PreprocessAgentMessage(ctx, e, c) {
 				return
 			}
-			// [079] 回 ACK：服务器已收到 agent 消息且校验通过，客户端据此把"发送中"标记为"已送达"。
-			//   解决：WS 断开/不稳定时 task?.send 静默丢弃但客户端乐观显示"已发送"→ 消息从未到服务器却假成功。
-			//   客户端发送时带 id(本地消息 id)，这里原样回 type=ack + 同 id，客户端按 id 匹配确认。
-			if e.ID != "" {
-				c.Send(&Envelope{Type: "ack", ID: e.ID, ConvID: e.ConvID, TS: NowMS()})
-			}
 		}
-		// 立即广播（实时 WSS 优先）
-		h.FanoutToConv(ctx, e)
-		// 异步入库（不阻塞实时通道）
+		// Service 的有界工作队列完成持久化后再 ACK + Fanout。
 		h.sink.PersistMessageAsync(e, c, sender)
+	case "delivery":
+		// 只有访客客户端能确认客服消息已送达；conv 永远使用服务器绑定值，拒绝伪造路由。
+		boundConv := c.ConversationID()
+		if c.Kind != KindVisitor || boundConv == "" || !ValidMessageID(e.ID) {
+			h.secLog.Warn("delivery_receipt_rejected",
+				zap.String("conn", c.ConnID), zap.String("actor", c.ID), zap.String("msg_id", e.ID))
+			return
+		}
+		e.From = "visitor:" + c.ID
+		e.ConvID = boundConv
+		h.sink.PersistDeliveryAsync(e, c)
 	case "read":
-		// 已读事件：盖发送者 + 异步落库 last_read_*_at + 广播给会话内对端
+		// 已读事件：conv 使用服务器权威绑定；Service 校验目标消息归属后才广播。
+		if e.ID != "" && !ValidMessageID(e.ID) {
+			h.secLog.Warn("read_receipt_id_rejected",
+				zap.String("conn", c.ConnID), zap.String("actor", c.ID), zap.Int("id_length", len(e.ID)))
+			return
+		}
 		var role string
 		if c.Kind == KindVisitor {
 			e.From = "visitor:" + c.ID
@@ -372,14 +390,17 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			e.From = "agent:" + c.ID
 			role = "agent"
 		}
-		if c.ConvID != "" {
-			e.ConvID = c.ConvID
+		boundConv := c.ConversationID()
+		if boundConv == "" {
+			h.secLog.Warn("read_receipt_no_conv", zap.String("conn", c.ConnID), zap.String("actor", c.ID))
+			return
 		}
+		e.ConvID = boundConv
 		h.sink.PersistReadAsync(e, c, role)
-		h.FanoutToConv(ctx, e)
 	case "page":
 		// 访客跳转页面：只接受 visitor 上报；agent 不允许伪造页面事件
-		if c.Kind != KindVisitor || c.ConvID == "" {
+		boundConv := c.ConversationID()
+		if c.Kind != KindVisitor || boundConv == "" {
 			return
 		}
 		var url, title string
@@ -391,7 +412,7 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 				title = v
 			}
 		}
-		h.sink.OnPageNavigation(c.ID, c.ConvID, url, title)
+		h.sink.OnPageNavigation(c.ID, boundConv, url, title)
 	case "typing":
 		// 仅转发，不落库
 		h.FanoutToConv(ctx, e)
@@ -740,17 +761,27 @@ func (h *Hub) fanoutVoiceLocal(e *Envelope) {
 	}
 }
 
+type FanoutResult struct {
+	VisitorTargets int
+	VisitorQueued  int
+	AgentTargets   int
+	AgentQueued    int
+}
+
 // FanoutToConv 给会话内所有成员投递；同时通过 Redis 广播到其他节点。
 //
 // 单节点部署时 Redis 订阅了自己 publish 的频道（环回），
 // 所以必须给消息盖节点 ID，订阅端遇到自己节点的回环要跳过 —— 否则消息会在本节点被广播 2 次。
-func (h *Hub) FanoutToConv(ctx context.Context, e *Envelope) {
+func (h *Hub) FanoutToConv(ctx context.Context, e *Envelope) FanoutResult {
 	e.Priority = 0 // 所有实时聊天都走高优队列
 	e.Node = h.cfg.NodeID
-	h.fanoutLocal(e)
+	result := h.fanoutLocal(e)
 	if h.rdb != nil {
-		_ = h.rdb.Publish(ctx, h.pub, mustJSON(e)).Err()
+		if err := h.rdb.Publish(ctx, h.pub, mustJSON(e)).Err(); err != nil {
+			h.bizLog.Error("redis_fanout_publish_failed", zap.Error(err), zap.String("msg_id", e.ID), zap.String("conv", e.ConvID))
+		}
 	}
+	return result
 }
 
 // fanoutLocal 给本节点对应连接投递消息。
@@ -763,15 +794,30 @@ func (h *Hub) FanoutToConv(ctx context.Context, e *Envelope) {
 //  3. typing 不外溢（节省带宽，且只有正在打字的会话才关心）
 //
 // 用 ConnID 去重，每个连接只收到一份。
-func (h *Hub) fanoutLocal(e *Envelope) {
+func (h *Hub) fanoutLocal(e *Envelope) FanoutResult {
+	var result FanoutResult
 	if e.ConvID == "" {
-		return
+		return result
 	}
 	sent := make(map[string]struct{}, 8)
 	if m, ok := h.byConv.Load(e.ConvID); ok {
 		m.(*sync.Map).Range(func(_, v any) bool {
 			c := v.(*Client)
-			c.Send(e)
+			if c.Kind == KindVisitor {
+				// assign/重连并发时 byConv 可能短暂残留旧索引；再次核对权威绑定，防跨会话误投。
+				if c.ConversationID() != e.ConvID {
+					return true
+				}
+				result.VisitorTargets++
+				if c.Send(e) {
+					result.VisitorQueued++
+				}
+			} else {
+				result.AgentTargets++
+				if c.Send(e) {
+					result.AgentQueued++
+				}
+			}
 			sent[c.ConnID] = struct{}{}
 			return true
 		})
@@ -781,13 +827,17 @@ func (h *Hub) fanoutLocal(e *Envelope) {
 			v.(*sync.Map).Range(func(_, cv any) bool {
 				c := cv.(*Client)
 				if _, dup := sent[c.ConnID]; !dup {
-					c.Send(e)
+					result.AgentTargets++
+					if c.Send(e) {
+						result.AgentQueued++
+					}
 				}
 				return true
 			})
 			return true
 		})
 	}
+	return result
 }
 
 func (h *Hub) fanoutFromRedis(ctx context.Context) {

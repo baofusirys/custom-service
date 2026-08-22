@@ -1,6 +1,7 @@
 package security
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -27,6 +28,43 @@ var sqlInjectionPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(--|#|/\*|\*/)`),
 	regexp.MustCompile(`(?i)('\s+or\s+'?\d|'\s+or\s+1=1)`),
 	regexp.MustCompile(`(?i)(load_file|outfile|into\s+outfile)`),
+}
+
+// RedactRawQuery 保留请求参数名与非敏感值，同时固定脱敏 token/密码/密钥类字段。
+// WebSocket JWT 绝不允许以完整 query 进入长期日志。
+func RedactRawQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		return "[malformed-query]"
+	}
+	for key := range values {
+		lower := strings.ToLower(key)
+		if strings.Contains(lower, "token") || strings.Contains(lower, "password") ||
+			strings.Contains(lower, "secret") || strings.Contains(lower, "credential") ||
+			lower == "key" || strings.HasSuffix(lower, "_key") {
+			values.Set(key, "[REDACTED]")
+		}
+	}
+	return values.Encode()
+}
+
+// ValidTraceID 只接受短小的可打印标识；非法外部值由中间件替换为服务端 UUID。
+func ValidTraceID(value string) bool {
+	if len(value) < 8 || len(value) > 64 {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '-' || b == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func DetectSQLInjection(s string) (bool, string) {

@@ -8,6 +8,15 @@ import http from '../api/http'
 import { AgentWS } from '../api/ws'
 import { playSound, unlockAudio, playRingLoop, stopRingLoop } from '../api/sound'
 import { useSession } from '../store/session'
+import {
+  advanceMessageStatus,
+  canonicalMessageStatus,
+  createClientMessageId,
+  isPendingMessage,
+  latestServerMessageId,
+  mergeMessageLists,
+  messageStatusLabel,
+} from '../modules/messageState'
 
 dayjs.extend(relativeTime)
 dayjs.locale('zh-cn')
@@ -37,19 +46,15 @@ const activeConv = ref(null)
 const messages = ref([])
 // ============================================================
 // [070] 消息本地缓存（进会话秒显，刷新页面/重开也不丢）—— 对齐 App 端方案
-//   msgCache[convId]：内存消息数组（当前会话时与 messages.value 同引用）
-//   localStorage 'cs_msgs:<convId>'：持久化最近 N 条；'cs_msgs:_index' 维护 LRU 顺序
-//   进会话先显缓存（0 转圈），再后台增量(after)补新消息；乐观 local- 消息按内容去重
+//   msgCache[visitorId]：内存消息数组（当前访客时与 messages.value 同引用）
+//   localStorage 'cs_msgs:<visitorId>'：持久化最近 N 条；'cs_msgs:_index' 维护 LRU 顺序
+//   HTTP / WSS / 本地 outbox 统一按稳定密码学消息 ID 幂等合并。
 // ============================================================
 const msgCache = {}
 const MSG_PREFIX = 'cs_msgs:'
 const MSG_INDEX = 'cs_msgs:_index'
 const MSG_MAX_CONVS = 60
 const MSG_MAX_PER_CONV = 200
-function mediaUrlOf(m) {
-  const u = m && m.media_url
-  return (u && typeof u === 'object') ? (u.String || '') : (u || '')
-}
 function loadCachedMsgs(convId) {
   try {
     const v = JSON.parse(localStorage.getItem(MSG_PREFIX + convId) || '[]')
@@ -57,9 +62,8 @@ function loadCachedMsgs(convId) {
   } catch { return [] }
 }
 function saveCachedMsgs(convId) {
-  const list = (msgCache[convId] || [])
-    .filter(m => !String(m.id).startsWith('local-'))
-    .slice(-MSG_MAX_PER_CONV)
+  // pending outbox 也必须持久化；刷新/崩溃后沿用同一 m2-* ID 重发，后端按 ID 幂等。
+  const list = (msgCache[convId] || []).slice(-MSG_MAX_PER_CONV)
   try {
     localStorage.setItem(MSG_PREFIX + convId, JSON.stringify(list))
     let idx = []
@@ -70,31 +74,14 @@ function saveCachedMsgs(convId) {
   } catch {}
 }
 function lastRealId(convId) {
-  const list = msgCache[convId] || []
-  for (let i = list.length - 1; i >= 0; i--) {
-    if (!String(list[i].id).startsWith('local-')) return list[i].id
-  }
-  return null
+  return latestServerMessageId(msgCache[convId] || [])
 }
-// 合并服务器消息到会话缓存：replace=全量以服务器为权威 / 否则增量并入。
-// 去重按 id；乐观 local- 消息已被服务器确认(同 agent+content+media+时间≈)的丢弃，未确认的保留。
-function mergeMessages(convId, incoming, replace) {
-  const cur = msgCache[convId] || []
-  const localPending = cur.filter(m => String(m.id).startsWith('local-'))
-  const byId = new Map()
-  if (!replace) {
-    for (const m of cur) if (!String(m.id).startsWith('local-')) byId.set(m.id, m)
-  }
-  for (const m of incoming) byId.set(m.id, m)
-  const tsOf = x => new Date(x).getTime()
-  const realList = [...byId.values()].sort((a, b) => tsOf(a.created_at) - tsOf(b.created_at))
-  const confirmed = lo => realList.some(r =>
-    r.sender === 'agent' && (r.content || '') === (lo.content || '') &&
-    mediaUrlOf(r) === mediaUrlOf(lo) && Math.abs(tsOf(r.created_at) - tsOf(lo.created_at)) <= 120000)
-  const stillPending = localPending.filter(lo => !confirmed(lo))
-  const merged = [...realList, ...stillPending].sort((a, b) => tsOf(a.created_at) - tsOf(b.created_at))
-  msgCache[convId] = merged
-  if (activeConv.value?.id === convId) messages.value = merged
+function mergeMessages(visitorID, incoming, replace) {
+  const merged = mergeMessageLists(msgCache[visitorID] || [], incoming, replace)
+  msgCache[visitorID] = merged
+  // [098] 缓存键是 visitor_id，活动判断必须使用同一维度；这是 A01 的直接根因修复。
+  if (activeConv.value?.visitor_id === visitorID) messages.value = merged
+  return merged
 }
 // ============================================================
 // [068] per-conv 草稿 / 附件隔离 —— 防"切会话串台"导致敏感账密泄露
@@ -219,7 +206,10 @@ watch(filterMode, () => { loadConvs(true) })
 
 // [090] 按「客户(访客)」加载其所有会话段的完整历史消息（合并成一条时间流）。
 //   配合 [088] 列表按客户聚合：详情也按客户聚合。缓存键统一用 visitorID。
+const messageLoadVersion = Object.create(null)
 async function loadMessages(visitorID) {
+  const requestVersion = (messageLoadVersion[visitorID] || 0) + 1
+  messageLoadVersion[visitorID] = requestVersion
   // [070] 1) 缓存秒显：内存没有就读 localStorage，立即铺到 UI（0 转圈）
   let cached = msgCache[visitorID]
   if (!cached) {
@@ -234,6 +224,8 @@ async function loadMessages(visitorID) {
   const lastReal = lastRealId(visitorID)
   const q = lastReal ? `?limit=200&after=${encodeURIComponent(lastReal)}` : `?limit=100`
   const r = await http.get(`/agent/visitor/${visitorID}/messages${q}`)
+  // 同一访客如果已有更新的一次加载完成，旧慢响应不得覆盖新状态。
+  if (messageLoadVersion[visitorID] !== requestVersion) return
   // 全量接口返回 DESC（最新在前）→ reverse 成 ASC；增量 after 已是 ASC
   const fetched = r.data || []
   const norm = lastReal ? fetched : fetched.slice().reverse()
@@ -254,31 +246,39 @@ async function pickConv(c) {
     loadMessages(c.visitor_id),   // [090] 按客户拉完整历史（跨该访客所有会话段）
     http.post(`/agent/conversations/${c.id}/assign`),
   ])
+  // 刷新/崩溃恢复出的本地 outbox 在会话重新接管后立即用原 ID 幂等重发。
+  resendPending()
   // assign 后 agent 已加入 byConv[c.id]，立即发 WSS read：
   // 触发后端 UpdateLastRead + FanoutToConv 通知访客「客服已读」
-  sendReadAck(c.id)
+  const latestVisitorMessage = [...messages.value].reverse().find(m =>
+    m.sender === 'visitor' && (!m.conv_id || m.conv_id === c.id))
+  sendReadAck(c.id, latestVisitorMessage?.id)
   // 本地把所有访客消息直接标 read（自己看到了）
   for (const m of messages.value) {
     if (m.sender === 'visitor') m.read = true
   }
 }
 
-function sendReadAck(convID) {
+function sendReadAck(convID, messageID) {
   if (ws?.alive && convID) {
-    ws.send({ type: 'read', conv: convID, ts: Date.now() })
+    ws.send({ type: 'read', conv: convID, id: messageID || undefined, ts: Date.now() })
   }
 }
 
-// 标记「自己发过的、created_at <= upToTs 的消息」为已读（被对端读了）
-function markMineReadUpTo(upToTs) {
+// 标记「自己发过的、目标消息之前」为已读；messageID 优先，时间仅兼容旧端。
+function markMineReadUpTo(convID, messageID, upToTs) {
   const myID = String(session.agent?.id)
+  const target = messageID ? messages.value.find(m => m.id === messageID) : null
+  const targetTs = target ? new Date(target.created_at).getTime() : upToTs
   for (const m of messages.value) {
-    if (m.read) continue
-    if (m.sender === 'agent' && String(m.sender_ref) === myID) {
+    if (m.sender === 'agent' && String(m.sender_ref) === myID &&
+        (!m.conv_id || !convID || m.conv_id === convID)) {
       const mTs = new Date(m.created_at).getTime()
-      if (mTs <= upToTs) m.read = true
+      if (mTs <= targetTs) advanceMessageStatus(m, 'read')
     }
   }
+  const visitorID = activeConv.value?.visitor_id
+  if (visitorID) saveCachedMsgs(visitorID)
 }
 
 // 该组是否是「页面跳转」横幅（不是普通消息组）
@@ -301,18 +301,8 @@ function pageTitle(m) {
   return ''
 }
 
-// 自己发的最新一条消息（用于在它下方显示「已读」角标，不在每组都显示）
-const lastMineMsg = computed(() => {
-  const myID = String(session.agent?.id)
-  for (let i = messages.value.length - 1; i >= 0; i--) {
-    const m = messages.value[i]
-    if (m.sender === 'agent' && String(m.sender_ref) === myID) return m
-  }
-  return null
-})
-
-// [079] 发送可靠性 —— ACK 确认 + 超时 failed + 点击重发 + 重连自动重发
-//   解决: WS 断开/不稳定时消息静默丢失但 UI 假"已发送"。发送带 id, 服务器收到回 ACK;
+// [079][098] 发送可靠性 —— 数据库提交 ACK + 超时 failed + 点击重发 + 重连自动重发
+//   ACK 仅表示数据库提交成功（persisted/已发送）；delivery/read 是访客端的独立确认。
 //   12s 未收 ACK→未送达(红可重发); WS 重连(onOpen)自动重发未确认。
 const ackTimers = {}
 function scheduleAckTimeout(mid) {
@@ -320,8 +310,18 @@ function scheduleAckTimeout(mid) {
   ackTimers[mid] = setTimeout(() => { markStatus(mid, 'failed') }, 12000)
 }
 function markStatus(mid, st) {
-  const mm = messages.value.find(x => x.id === mid)
-  if (mm) mm.status = st
+  let found = null
+  let cacheKey = ''
+  for (const [key, list] of Object.entries(msgCache)) {
+    const message = list.find(x => x.id === mid)
+    if (message) { found = message; cacheKey = key; break }
+  }
+  if (!found) found = messages.value.find(x => x.id === mid)
+  if (found) {
+    if (st === 'sending') found.status = st
+    else advanceMessageStatus(found, st)
+    if (cacheKey) saveCachedMsgs(cacheKey)
+  }
   if (st !== 'sending' && ackTimers[mid]) { clearTimeout(ackTimers[mid]); delete ackTimers[mid] }
 }
 function buildResendEnv(m, convId) {
@@ -332,17 +332,23 @@ function buildResendEnv(m, convId) {
 }
 function resendMsg(m) {
   if (!m || !activeConv.value) return
+  if (m.conv_id && m.conv_id !== activeConv.value.id) {
+    ElMessage.warning('该消息属于历史会话，不能发送到当前会话')
+    return
+  }
   markStatus(m.id, 'sending')
-  if (ws?.send(buildResendEnv(m, activeConv.value.id))) scheduleAckTimeout(m.id)
+  if (ws?.send(buildResendEnv(m, m.conv_id || activeConv.value.id))) scheduleAckTimeout(m.id)
   else markStatus(m.id, 'failed')
 }
 function resendPending() {
   if (!activeConv.value) return
   for (const m of messages.value) {
-    if (m.sender === 'agent' && (m.status === 'sending' || m.status === 'failed')) {
-      if (ws?.send(buildResendEnv(m, activeConv.value.id))) { m.status = 'sending'; scheduleAckTimeout(m.id) }
+    if (m.sender === 'agent' && (!m.conv_id || m.conv_id === activeConv.value.id) &&
+        (m.status === 'sending' || m.status === 'failed')) {
+      if (ws?.send(buildResendEnv(m, m.conv_id || activeConv.value.id))) { m.status = 'sending'; scheduleAckTimeout(m.id) }
     }
   }
+  saveCachedMsgs(activeConv.value.visitor_id)
 }
 
 // [040] 发送：先发文本（如果有），再依次上传 pendingFiles 队列里的所有附件
@@ -366,7 +372,7 @@ async function sendText() {
     if (text) {
       const now = new Date().toISOString()
       // [068] WSS 路由用 sendingConvId（锁定的会话），不读 activeConv
-      const sentMid = 'local-' + Date.now()
+      const sentMid = createClientMessageId()
       const sentOk = ws.send({ type: 'chat', conv: sendingConvId, content: text, id: sentMid, ts: Date.now(), prio: 0 })   // [079] 带 id 供 ACK 匹配
       // [068] 仅当 UI 仍停留在 sendingConvId 才做本地乐观渲染，
       // 否则切走后 push 到 messages.value 会污染新会话视图
@@ -375,10 +381,12 @@ async function sendText() {
           id: sentMid,
           sender: 'agent',
           sender_ref: String(session.agent?.id),
+          conv_id: sendingConvId,
           content: text,
           created_at: now,
           status: sentOk ? 'sending' : 'failed'   // [079] 没发出→未送达
         })
+        saveCachedMsgs(sendingConv.visitor_id)
       }
       if (sentOk) scheduleAckTimeout(sentMid)
       // 不论是否切走，conv 对象本身的 last_message / updated_at 都要更新（左侧列表预览）
@@ -419,7 +427,7 @@ async function uploadAndSendFile(file, convId) {
   fd.append('conv_id', convId)
   try {
     const r = await http.post('/upload', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
-    const upMid = 'local-' + Date.now()
+    const upMid = createClientMessageId()
     const upOk = ws?.send({
       type: 'chat', conv: convId, id: upMid,
       content: '', media: r.url, mkind: r.kind, mname: r.name, msize: r.size,
@@ -428,7 +436,7 @@ async function uploadAndSendFile(file, convId) {
     // [068] 仅当 UI 仍停在 convId 才本地乐观渲染，否则只发不渲染（避免污染新会话）
     if (activeConv.value?.id === convId) {
       messages.value.push({
-        id: upMid, sender: 'agent', sender_ref: String(session.agent?.id),
+        id: upMid, conv_id: convId, sender: 'agent', sender_ref: String(session.agent?.id),
         content: '',
         media_url: { String: r.url, Valid: true },
         media_kind: { String: r.kind, Valid: true },
@@ -436,10 +444,13 @@ async function uploadAndSendFile(file, convId) {
         created_at: new Date().toISOString(),
         status: upOk ? 'sending' : 'failed'   // [079]
       })
+      saveCachedMsgs(activeConv.value.visitor_id)
       nextTick(scrollToBottom)
       if (upOk) scheduleAckTimeout(upMid)
     }
-  } catch {}
+  } catch (error) {
+    ElMessage.error(error?.message || '文件发送失败，请重试')
+  }
 }
 
 // [040] 选附件：multiple 支持，所有文件追加到 pendingFiles 队列
@@ -700,11 +711,18 @@ onMounted(async () => {
         myConnId.value = env.extra?.conn_id || ''
         return
       }
-      // [079] 服务器 ACK：把"发送中"消息标"已送达"（解决断连/丢包时假"已发送"）
+      // [098] ACK 与数据库提交绑定，只表示 persisted（已发送），不能冒充已送达。
       if (env.type === 'ack') {
-        const mm = messages.value.find(x => x.id === env.id)
-        if (mm) mm.status = 'sent'
-        if (ackTimers[env.id]) { clearTimeout(ackTimers[env.id]); delete ackTimers[env.id] }
+        markStatus(env.id, 'persisted')
+        return
+      }
+      if (env.type === 'delivery') {
+        markStatus(env.id, 'delivered')
+        return
+      }
+      if (env.type === 'error') {
+        if (env.id) markStatus(env.id, 'failed')
+        if (env.content) ElMessage.error(env.content)
         return
       }
 
@@ -730,7 +748,7 @@ onMounted(async () => {
         }
         // 访客读了客服消息 → 当前会话标 mine 已读
         if (fromVisitor && activeConv.value && env.conv === activeConv.value.id) {
-          markMineReadUpTo(env.ts || Date.now())
+          markMineReadUpTo(env.conv, env.id, env.ts || Date.now())
         }
         return
       }
@@ -769,8 +787,9 @@ onMounted(async () => {
         const senderRef = isPageNav
           ? 'page:' + (env.extra?.url || '')
           : (env.from?.includes(':') ? env.from.split(':')[1] : (fromSys ? 'system' : ''))
-        messages.value.push({
+        const realtimeMessage = {
           id: env.id,
+          conv_id: env.conv,
           sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
           sender_ref: senderRef,
           content: env.content || '',
@@ -780,8 +799,11 @@ onMounted(async () => {
           created_at: new Date(env.ts || Date.now()).toISOString(),
           // 给前端渲染用：标记是否是页面跳转 + URL
           page_url: isPageNav ? env.extra.url : '',
-          page_title: isPageNav ? env.extra.title : ''
-        })
+          page_title: isPageNav ? env.extra.title : '',
+          status: fromAgent ? 'persisted' : undefined,
+        }
+        // 按 ID 幂等合并，重放/Redis 回环/HTTP 对账不会生成重复气泡。
+        mergeMessages(activeConv.value.visitor_id, [realtimeMessage], false)
         nextTick(scrollToBottom)
         saveCachedMsgs(activeConv.value?.visitor_id)  // [090] 按客户缓存（详情已按客户聚合）
         // 同步更新当前会话的 last_message 预览（保持左侧列表跟实时一致）
@@ -799,7 +821,7 @@ onMounted(async () => {
         // 访客发到当前会话：发 WSS read 通知访客「客服已读」+ 播声
         if (fromVisitor) {
           activeConv.value.has_visitor_msg = true   // [065] 当前会话也实时翻成「已联系」
-          sendReadAck(env.conv)
+          sendReadAck(env.conv, env.id)
           playSound(agentSound.value)
         }
         // [071] 访客来电（voice 通话事件）也实时翻「已联系」——爷爷：有来电就算（含秒挂）
@@ -1226,46 +1248,51 @@ function voiceCleanup() {
               </el-avatar>
               <div class="msg-stack">
                 <div class="msg-stack-name">{{ senderName(g) }}</div>
-                <div
-                  v-for="m in g.items"
-                  :key="m.id"
-                  class="bubble"
-                  :class="{ 'bubble--mine': isMineGroup(g) }"
-                  :title="fmtAbs(m.created_at)">
-                  <template v-if="mediaURL(m)">
-                    <el-image
-                      v-if="mediaKind(m) === 'image'"
-                      :src="mediaURL(m)"
-                      :preview-src-list="[mediaURL(m)]"
-                      :initial-index="0"
-                      preview-teleported
-                      hide-on-click-modal
-                      fit="cover"
-                      class="bubble-img"
-                    />
-                    <a v-else :href="mediaURL(m)" target="_blank" class="bubble-file">
-                      <el-icon><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/></svg></el-icon>
-                      <span>{{ mediaName(m) }}</span>
-                    </a>
-                  </template>
-                  <span v-if="m.content" class="bubble-text">{{ m.content }}</span>
-                  <span class="bubble-time" style="display:block;font-size:11px;opacity:0.55;margin-top:3px;text-align:right">{{ fmtMsgTime(m.created_at) }}</span>
-                  <!-- 复制按钮：文本消息显示。点击复制消息内容到剪贴板 -->
-                  <span
-                    v-if="m.content || mediaURL(m)"
-                    class="bubble-copy"
-                    :class="{ 'bubble-copy--mine': isMineGroup(g) }"
-                    title="复制"
-                    @click.stop="copyMessage(m)">
-                    <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-                  </span>
-                </div>
-                <!-- [079] 发送状态/已读角标 -->
-                <div v-if="isMineGroup(g)" class="read-indicator">
-                  <span v-if="g.items[g.items.length-1].status === 'sending'" style="color:#909399">发送中…</span>
-                  <span v-else-if="g.items[g.items.length-1].status === 'failed'" style="color:#f56c6c;cursor:pointer" @click.stop="resendMsg(g.items[g.items.length-1])">⚠ 未送达 · 点击重发</span>
-                  <span v-else-if="lastMineMsg && lastMineMsg.read && g.items[g.items.length-1].id === lastMineMsg.id">已读</span>
-                </div>
+                <template v-for="m in g.items" :key="m.id">
+                  <div
+                    class="bubble"
+                    :class="{ 'bubble--mine': isMineGroup(g) }"
+                    :title="fmtAbs(m.created_at)">
+                    <template v-if="mediaURL(m)">
+                      <el-image
+                        v-if="mediaKind(m) === 'image'"
+                        :src="mediaURL(m)"
+                        :preview-src-list="[mediaURL(m)]"
+                        :initial-index="0"
+                        preview-teleported
+                        hide-on-click-modal
+                        fit="cover"
+                        class="bubble-img"
+                      />
+                      <a v-else :href="mediaURL(m)" target="_blank" class="bubble-file">
+                        <el-icon><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/></svg></el-icon>
+                        <span>{{ mediaName(m) }}</span>
+                      </a>
+                    </template>
+                    <span v-if="m.content" class="bubble-text">{{ m.content }}</span>
+                    <span class="bubble-time" style="display:block;font-size:11px;opacity:0.55;margin-top:3px;text-align:right">{{ fmtMsgTime(m.created_at) }}</span>
+                    <span
+                      v-if="m.content || mediaURL(m)"
+                      class="bubble-copy"
+                      :class="{ 'bubble-copy--mine': isMineGroup(g) }"
+                      title="复制"
+                      @click.stop="copyMessage(m)">
+                      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </span>
+                  </div>
+                  <!-- [098] 每条消息保留自己的状态，后续消息不会覆盖前一条已读。 -->
+                  <div v-if="isMineGroup(g)" class="read-indicator">
+                    <el-link
+                      v-if="canonicalMessageStatus(m) === 'failed'"
+                      type="danger"
+                      :underline="false"
+                      @click.stop="resendMsg(m)">
+                      <el-icon><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5"/><path d="M12 18h.01"/></svg></el-icon>
+                      <span>{{ messageStatusLabel(m) }}</span>
+                    </el-link>
+                    <el-text v-else size="small" type="info">{{ messageStatusLabel(m) }}</el-text>
+                  </div>
+                </template>
               </div>
             </div>
           </div>

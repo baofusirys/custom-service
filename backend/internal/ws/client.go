@@ -2,6 +2,7 @@ package ws
 
 import (
 	"encoding/json"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,20 +26,26 @@ const (
 	KindAgent   Kind = 2
 )
 
+type outboundFrame struct {
+	data    []byte
+	traceID string
+}
+
 type Client struct {
 	hub  *Hub
 	conn *websocket.Conn
 
-	ConnID  string
-	Kind    Kind
-	ID      string // visitor id 或 agent id
-	SiteID  string // 关联站点
-	ConvID  string // 当前会话（visitor 必带，agent 动态切换）
+	ConnID string
+	Kind   Kind
+	ID     string // visitor id 或 agent id
+	SiteID string // 关联站点
+	convMu sync.RWMutex
+	convID string // 当前会话（visitor 必带，agent 动态切换）
 
 	// 双优先级出队（爷爷需求：消息处理顺序 WSS 优先 ——
 	// WSS 即时消息走 high；DB 加载历史等慢通道走 low）
-	high chan []byte
-	low  chan []byte
+	high chan outboundFrame
+	low  chan outboundFrame
 
 	closed atomic.Bool
 	log    *zap.Logger
@@ -52,35 +59,56 @@ func newClient(h *Hub, conn *websocket.Conn, kind Kind, id, site, conv, connID s
 		Kind:   kind,
 		ID:     id,
 		SiteID: site,
-		ConvID: conv,
+		convID: conv,
 		ConnID: connID,
-		high:   make(chan []byte, sendBufHigh),
-		low:    make(chan []byte, sendBufLow),
+		high:   make(chan outboundFrame, sendBufHigh),
+		low:    make(chan outboundFrame, sendBufLow),
 		log:    log,
 		rawLog: rawLog,
 	}
 }
 
-// Send 往该连接异步发消息；high 队列满 → 关连接（防慢客户端拖累全局）。
-func (c *Client) Send(env *Envelope) {
+// ConversationID/SetConversationID 统一保护动态会话绑定；HTTP assign、Hub 和持久化工作协程可并发访问。
+func (c *Client) ConversationID() string {
+	c.convMu.RLock()
+	defer c.convMu.RUnlock()
+	return c.convID
+}
+
+func (c *Client) SetConversationID(convID string) {
+	c.convMu.Lock()
+	c.convID = convID
+	c.convMu.Unlock()
+}
+
+// Send 往该连接异步发消息；返回是否成功进入发送队列。
+// high 队列满 → 关连接（防慢客户端拖累全局），调用方可据此统计真实入队数。
+func (c *Client) Send(env *Envelope) bool {
 	if c.closed.Load() {
-		return
+		return false
 	}
 	data, err := json.Marshal(env)
 	if err != nil {
-		return
+		c.log.Error("client envelope marshal failed", zap.Error(err), zap.String("conn", c.ConnID))
+		return false
 	}
 	q := c.high
 	if env.Priority >= 1 {
 		q = c.low
 	}
+	traceID := env.ID
+	if traceID == "" {
+		traceID = c.ConnID
+	}
 	select {
-	case q <- data:
+	case q <- outboundFrame{data: data, traceID: traceID}:
+		return true
 	default:
 		// 队列满：保护性断连，避免阻塞 hub
 		c.log.Warn("client send queue full, dropping",
 			zap.String("conn", c.ConnID), zap.Int("kind", int(c.Kind)))
 		c.close()
+		return false
 	}
 }
 
@@ -109,17 +137,20 @@ func (c *Client) readPump() {
 			}
 			return
 		}
-		// 原始报文长效落盘（爷爷铁律：保留最原始）
-		c.rawLog.Info("rx",
-			zap.String("conn", c.ConnID),
-			zap.Int("kind", int(c.Kind)),
-			zap.String("id", c.ID),
-			zap.ByteString("payload", raw))
-
 		var env Envelope
-		if err := json.Unmarshal(raw, &env); err != nil {
+		decodeErr := json.Unmarshal(raw, &env)
+		traceID := env.ID
+		if traceID == "" {
+			traceID = c.ConnID
+		}
+		// 原始报文长效落盘；解析失败也保留原帧，并使用连接 ID 贯通排查。
+		c.rawLog.Info("WebSocket frame received",
+			zap.String("event", "ws_frame_rx"), zap.String("trace_id", traceID), zap.String("request_id", traceID),
+			zap.String("conn", c.ConnID), zap.Int("kind", int(c.Kind)), zap.String("actor_id", c.ID),
+			zap.ByteString("payload", raw))
+		if decodeErr != nil {
 			c.log.Warn("ws malformed json",
-				zap.String("conn", c.ConnID), zap.Error(err))
+				zap.String("conn", c.ConnID), zap.Error(decodeErr))
 			continue
 		}
 		c.hub.incoming <- incoming{Client: c, Env: &env}
@@ -134,16 +165,15 @@ func (c *Client) writePump() {
 		c.close()
 	}()
 
-	send := func(b []byte) bool {
+	send := func(frame outboundFrame) bool {
 		_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-		if err := c.conn.WriteMessage(websocket.TextMessage, b); err != nil {
+		if err := c.conn.WriteMessage(websocket.TextMessage, frame.data); err != nil {
 			return false
 		}
-		c.rawLog.Info("tx",
-			zap.String("conn", c.ConnID),
-			zap.Int("kind", int(c.Kind)),
-			zap.String("id", c.ID),
-			zap.ByteString("payload", b))
+		c.rawLog.Info("WebSocket frame sent",
+			zap.String("event", "ws_frame_tx"), zap.String("trace_id", frame.traceID), zap.String("request_id", frame.traceID),
+			zap.String("conn", c.ConnID), zap.Int("kind", int(c.Kind)), zap.String("actor_id", c.ID),
+			zap.ByteString("payload", frame.data))
 		return true
 	}
 

@@ -27,18 +27,23 @@ type Service struct {
 	visMsgPM int
 	hub      *ws.Hub      // 由 main.go 创建 Hub 后通过 SetHub 注入（解决 Hub<->Service 循环依赖）
 	push     *push.Client // luckfast APNs 推送客户端，全局单例
+	// 有界异步槽位：DB 抖动或恶意高并发时限制 goroutine 数，保护 CPU/内存与连接池。
+	messageSlots chan struct{}
+	receiptSlots chan struct{}
 }
 
 func New(st *store.Store, cipher *security.Cipher, biz, sec, audit *zap.Logger, lim *security.RateLimiter, visMsgPM int) *Service {
 	return &Service{
-		store:    st,
-		cipher:   cipher,
-		bizLog:   biz,
-		secLog:   sec,
-		auditLog: audit,
-		limiter:  lim,
-		visMsgPM: visMsgPM,
-		push:     push.NewClient(biz),
+		store:        st,
+		cipher:       cipher,
+		bizLog:       biz,
+		secLog:       sec,
+		auditLog:     audit,
+		limiter:      lim,
+		visMsgPM:     visMsgPM,
+		push:         push.NewClient(biz),
+		messageSlots: make(chan struct{}, 256),
+		receiptSlots: make(chan struct{}, 512),
 	}
 }
 
@@ -48,14 +53,16 @@ func (s *Service) SetHub(h *ws.Hub) { s.hub = h }
 // ============ MessageSink 实现 ============
 
 func (s *Service) OnVisitorConnect(ctx context.Context, c *ws.Client) error {
+	convID := c.ConversationID()
 	s.bizLog.Info("visitor_ws_connect",
-		zap.String("vid", c.ID), zap.String("conv", c.ConvID), zap.String("conn", c.ConnID))
+		zap.String("vid", c.ID), zap.String("conv", convID), zap.String("conn", c.ConnID))
+	s.ReplayUndeliveredAsync(c)
 	return nil
 }
 
 func (s *Service) OnVisitorDisconnect(ctx context.Context, c *ws.Client) error {
 	s.bizLog.Info("visitor_ws_disconnect",
-		zap.String("vid", c.ID), zap.String("conv", c.ConvID), zap.String("conn", c.ConnID))
+		zap.String("vid", c.ID), zap.String("conv", c.ConversationID()), zap.String("conn", c.ConnID))
 	return nil
 }
 
@@ -73,8 +80,8 @@ func (s *Service) OnAgentDisconnect(ctx context.Context, c *ws.Client) error {
 // 返回 false 表示消息被拒（如限流），Hub 不再广播。
 func (s *Service) PreprocessVisitorMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) bool {
 	if ok, _ := s.limiter.AllowVisitorMessage(ctx, c.ID, s.visMsgPM); !ok {
-		s.limiter.RecordViolation(ctx, "visitor:"+c.ID, "visitor_msg_flood", c.ConvID)
-		c.Send(&ws.Envelope{Type: "error", Content: "发送过于频繁，请稍后再试", TS: ws.NowMS()})
+		s.limiter.RecordViolation(ctx, "visitor:"+c.ID, "visitor_msg_flood", c.ConversationID())
+		c.Send(&ws.Envelope{Type: "error", ID: e.ID, Content: "发送过于频繁，请稍后再试", TS: ws.NowMS()})
 		return false
 	}
 	if e.Content != "" {
@@ -88,24 +95,25 @@ func (s *Service) PreprocessVisitorMessage(ctx context.Context, e *ws.Envelope, 
 
 // PreprocessAgentMessage 同步阶段：[077] conv 强制校验（杜绝 agent 孤儿消息）+ 内容清洗。
 func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) bool {
+	convID := c.ConversationID()
 	// [077] 根因：客服 WSS 刚建连时 c.ConvID 为空，必须点开会话(AssignSelf→AttachAgentToConv)才填上。
 	//   在「建连→接管」窗口内发消息，空 c.ConvID 会被原样入库 → 孤儿消息（按会话 conv_id 查不到、界面"消失"）。
 	//   visitor 路径有兜底(PersistMessageAsync OpenOrGetConversation)，但 agent 不能自动补会话（会错关联到别的会话），
 	//   只能拒绝并提示客服先点开会话；同时防越权写入他人会话（[069] 遗留 TODO 一并落地）。
-	if c.ConvID == "" {
-		c.Send(&ws.Envelope{Type: "error", Content: "请先点开一个会话再发送消息", TS: ws.NowMS()})
+	if convID == "" {
+		c.Send(&ws.Envelope{Type: "error", ID: e.ID, Content: "请先点开一个会话再发送消息", TS: ws.NowMS()})
 		s.bizLog.Warn("agent_msg_no_conv", zap.String("agent", c.ID), zap.String("msg_id", e.ID))
 		return false
 	}
-	ok, err := s.store.AgentOwnsConversation(ctx, c.ConvID, c.ID)
+	ok, err := s.store.AgentOwnsConversation(ctx, convID, c.ID)
 	if err != nil {
-		s.bizLog.Error("agent_conv_check_err", zap.Error(err), zap.String("conv", c.ConvID))
-		c.Send(&ws.Envelope{Type: "error", Content: "会话校验失败，请重试", TS: ws.NowMS()})
+		s.bizLog.Error("agent_conv_check_err", zap.Error(err), zap.String("conv", convID))
+		c.Send(&ws.Envelope{Type: "error", ID: e.ID, Content: "会话校验失败，请重试", TS: ws.NowMS()})
 		return false
 	}
 	if !ok {
-		c.Send(&ws.Envelope{Type: "error", Content: "会话不存在或您未接管该会话", TS: ws.NowMS()})
-		s.bizLog.Warn("agent_conv_forbidden", zap.String("agent", c.ID), zap.String("conv", c.ConvID))
+		c.Send(&ws.Envelope{Type: "error", ID: e.ID, Content: "会话不存在或您未接管该会话", TS: ws.NowMS()})
+		s.bizLog.Warn("agent_conv_forbidden", zap.String("agent", c.ID), zap.String("conv", convID))
 		return false
 	}
 	if e.Content != "" {
@@ -205,81 +213,6 @@ func (s *Service) OnPageNavigation(visitorID, convID, url, title string) {
 		s.bizLog.Info("page_navigation broadcast",
 			zap.String("vid", visitorID), zap.String("conv", convID),
 			zap.String("url", url), zap.String("title", title))
-	}()
-}
-
-// PersistReadAsync 异步落库已读时刻：把对应 role 的 last_read_*_at 推到 time.Now()。
-// 失败仅记日志，不影响 WSS 广播给对端。
-func (s *Service) PersistReadAsync(e *ws.Envelope, c *ws.Client, role string) {
-	convID := e.ConvID
-	if convID == "" {
-		convID = c.ConvID
-	}
-	if convID == "" {
-		return
-	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.bizLog.Error("persist_read panic", zap.Any("err", r))
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := s.store.UpdateLastRead(ctx, convID, role, time.Now()); err != nil {
-			s.bizLog.Error("persist read err", zap.Error(err),
-				zap.String("conv", convID), zap.String("role", role))
-		}
-	}()
-}
-
-// PersistMessageAsync 异步阶段：后台 goroutine 入库 + 兜底 conv。
-// 失败只记日志（原始报文已落 raw_ws.log，可重放）。
-func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender string) {
-	// 拷贝出当前 envelope 的快照，避免外部修改影响异步写入
-	snap := *e
-	convID := c.ConvID
-	siteID := c.SiteID
-	clientID := c.ID
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.bizLog.Error("persist_message panic", zap.Any("err", r), zap.String("id", snap.ID))
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		// 兜底：visitor 首次发消息但 client.ConvID 还没填
-		if convID == "" && sender == "visitor" {
-			conv, err := s.store.OpenOrGetConversation(ctx, siteID, clientID)
-			if err != nil {
-				s.bizLog.Error("persist open conv err", zap.Error(err), zap.String("vid", clientID))
-				return
-			}
-			convID = conv.ID
-			c.ConvID = conv.ID
-			snap.ConvID = conv.ID
-		}
-		snap.ConvID = convID
-		m := buildMsg(&snap, sender, clientID)
-		if err := s.store.InsertMessage(ctx, m); err != nil {
-			s.bizLog.Error("persist insert msg err",
-				zap.Error(err), zap.String("id", snap.ID), zap.String("conv", convID))
-		}
-		// [085] 客服回复 → 标记会话 agent_replied=1（「已联系」口径按访客聚合此标记，
-		//   解决会话超时重建后「已联系」丢失：只要该客户被回复过，名下任一会话都算已联系）
-		if sender == "agent" && convID != "" {
-			if err := s.store.MarkAgentReplied(ctx, convID); err != nil {
-				s.bizLog.Warn("mark_agent_replied err", zap.Error(err), zap.String("conv", convID))
-			}
-		}
-		// 仅访客消息触发 APNs 推送（让客服 iPhone 锁屏时也能收到）
-		if sender == "visitor" {
-			preview := buildPushPreview(&snap)
-			if preview != "" {
-				go s.pushVisitorMessageAPNs(preview, clientID)
-			}
-		}
 	}()
 }
 
@@ -549,6 +482,7 @@ func (s *Service) Cipher() *security.Cipher       { return s.cipher }
 func (s *Service) Limiter() *security.RateLimiter { return s.limiter }
 func (s *Service) BizLog() *zap.Logger            { return s.bizLog }
 func (s *Service) AuditLog() *zap.Logger          { return s.auditLog }
+func (s *Service) SecurityLog() *zap.Logger       { return s.secLog }
 
 // ============ Settings ============
 
@@ -752,7 +686,7 @@ func buildMsg(e *ws.Envelope, sender, senderRef string) *store.Message {
 		SenderRef:   senderRef,
 		Content:     e.Content,
 		CreatedAt:   time.Now(),
-		DeliveredWS: true,
+		DeliveredWS: false,
 	}
 	if e.MediaURL != "" {
 		m.MediaURL = sql.NullString{String: e.MediaURL, Valid: true}

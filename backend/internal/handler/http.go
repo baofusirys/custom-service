@@ -495,15 +495,29 @@ func (h *HTTP) RelatedVisitors(c *gin.Context) {
 
 func (h *HTTP) MarkRead(c *gin.Context) {
 	convID := c.Param("id")
+	agentIDValue, _ := c.Get("agent_id")
+	agentID := fmt.Sprintf("%v", agentIDValue)
+	allowed, err := h.svc.Store().AgentOwnsConversation(c.Request.Context(), convID, agentID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50009, "msg": "会话校验失败"})
+		return
+	}
+	if !allowed {
+		requestID, _ := c.Get("request_id")
+		h.svc.SecurityLog().Warn("http_read_receipt_forbidden",
+			zap.String("agent", agentID), zap.String("conv", convID),
+			zap.String("request_id", fmt.Sprintf("%v", requestID)))
+		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或无权操作"})
+		return
+	}
 	if err := h.svc.Store().UpdateLastRead(c.Request.Context(), convID, "agent", time.Now()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50009, "msg": "失败"})
 		return
 	}
 	// 通过 WSS 把已读事件推给对端访客（让 UI 实时更新「已读」角标）
-	agentID, _ := c.Get("agent_id")
 	h.hub.FanoutToConv(c.Request.Context(), &ws.Envelope{
 		Type:   "read",
-		From:   fmt.Sprintf("agent:%v", agentID),
+		From:   "agent:" + agentID,
 		ConvID: convID,
 		TS:     ws.NowMS(),
 	})
