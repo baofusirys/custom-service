@@ -4,6 +4,14 @@
 
 ---
 
+## [100] 2026-08-22 19:03 — 修复阿里云 ACR 拒绝 OCI provenance 导致版本发布失败
+
+**起因 / 需求**：`v0.7.2` tag 与 GHCR 镜像已发布，但 7 个 CI job 在推送阿里云 ACR 时均被 `unknown manifest class for application/vnd.oci.empty.v1+json` 拒绝。
+
+**做了什么**：Buildx 明确关闭 ACR 不兼容的 provenance/SBOM 附加清单；新增独立、参数校验、7 镜像并行的 ACR 提升流水线，从不可变 GHCR 版本复制 amd64 镜像并核对 image ID，不移动既有 Git tag。
+
+**注意事项 / 遗留**：应用代码与 `v0.7.2` 内容未变化；须推送本提交、等待 main CI 成功，再手动触发 `Promote Version to Aliyun ACR` 输入 `0.7.2`，以实际 7/7 成功为发布完成标准。
+
 ## [099] 2026-08-22 18:52 — v0.7.2 全量部署测试服并完成真实消息链路验收
 
 **起因 / 需求**：将 [098] 修复实际部署到测试服务器，证明落库后 ACK、幂等重发与页面入口不是只在单元测试中成立。
