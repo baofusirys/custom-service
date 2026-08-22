@@ -4,6 +4,16 @@
 
 ---
 
+## [099] 2026-08-22 18:52 — v0.7.2 全量部署测试服并完成真实消息链路验收
+
+**起因 / 需求**：将 [098] 修复实际部署到测试服务器，证明落库后 ACK、幂等重发与页面入口不是只在单元测试中成立。
+
+**做了什么**：清空并全量上传代码后仅执行 `docker compose up -d --build`；没有 `down`、没有触碰命名卷或 `/srv` 数据；完成公网入口、日志脱敏、容器/数据库/宿主机时区及 WSS 重发链路验收。
+
+**验证**：7 服务均 Up，backend/MySQL/Redis healthy；健康接口、后台、Widget 均 200；经 `maihaocs.icu` 公网 TLS/WSS 验证首次 ACK=`persisted`、同 ID 第二次 ACK=`duplicate=true`、数据库 `COUNT(*)=1`；Go/Vue/Widget 自动化测试已在 [098] 通过。
+
+**注意事项 / 遗留**：未发布 GitHub/GHCR/阿里云 ACR；远端 `govulncheck` 隔离容器首轮 768MB OOM、第二轮未形成结论，保留 [098] 本地扫描结论。现有 compose 仍缺 stdout 轮转、资源上限与 `no-new-privileges`，Coturn 使用 host/root，宿主机公网监听 3306/37425，CSP 缺失；测试触发两条 APNs 过期令牌 410 警告，均需独立加固。
+
 ## [098] 2026-08-22 18:16 — 修复 Web 消息延迟与虚假状态，建立可验证的可靠投递协议 · v0.7.2
 
 **起因 / 需求**：诊断确认访客缓存键迁移遗漏导致 HTTP 新消息不刷新，并存在 ACK 早于落库、`delivered_ws` 固定真、逐条已读缺失、离线无补发及 WSS JWT 进入长期日志等问题。

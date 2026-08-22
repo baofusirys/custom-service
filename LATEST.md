@@ -7,7 +7,7 @@
 ## 实际部署实例（爷爷自用，2026-07-06 核实）
 > 排查 App/客服问题时看这里，别被下面的模板占位坐标误导。
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
-- **测试服（当前已启动，无真实流量）**：`38.76.193.68`（MCP [10]）。同机 `weixian-douxiaoyin` 已安全停止且命名卷保留；当前仍运行远端旧代码 `v0.7.0`，本地 `v0.7.2` 消息可靠性修复尚待本次提交后全量部署验收。
+- **测试服（当前运行 v0.7.2）**：`38.76.193.68`（MCP [10]）。同机 `weixian-douxiaoyin` 已安全停止且命名卷保留；`v0.7.2` 已按三步流程全量部署，经 `maihaocs.icu` 公网 TLS/WSS 验证持久化 ACK、重复帧幂等与数据库单行落库均通过。
 - **App(SwiftUI) 源码**：在 Mac `192.168.1.75`（MCP [18]）`~/code/custom_service_swift`（独立 git 仓库；本 Windows 仓库里的 `mobile_app` 是已存档旧 Flutter 版，[089] 起弃用）。构建装机走 `auto_reinstall.sh` / launchd。
 - **发布到生产/下游**：创建并推送明确版本 tag（如 `v0.7.2`）→ CI 双推 GHCR/阿里云 ACR 的 `:0.7.2` 镜像 → 下游将 `.env` 的 `IMAGE_TAG=0.7.2` 后拉取并启动。禁止依赖 `latest`；任何远端发布必须先经爷爷逐次同意。
 
@@ -79,9 +79,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
-- **[098] 2026-08-22 v0.7.2**：修复 Web 当前会话缓存引用失联；消息改为事务落库后 ACK，补齐密码学稳定 ID、持久 outbox、逐条 persisted/delivered/read、离线重放去重、服务端回执防伪与单调读游标；WSS JWT 日志脱敏并统一 `+08:00` JSON Lines。代码已本地验证，测试服待部署验收。
+- **[099] 2026-08-22 测试服验收**：`v0.7.2` 已全量部署至 `38.76.193.68`；7 服务运行、健康接口/后台/Widget 为 200，公网 TLS/WSS 首次 ACK=`persisted`、同 ID 重发=`duplicate=true`、数据库仅 1 行；三处北京时间一致。
+- **[098] 2026-08-22 v0.7.2**：修复 Web 当前会话缓存引用失联；消息改为事务落库后 ACK，补齐密码学稳定 ID、持久 outbox、逐条 persisted/delivered/read、离线重放去重、服务端回执防伪与单调读游标；WSS JWT 日志脱敏并统一 `+08:00` JSON Lines。
 - **[097] 2026-08-22 运维切换**：测试服 `38.76.193.68` 已安全 down 同机 `weixian-douxiaoyin`（未带 `-v`，命名卷保留），随后构建启动 `custom-service`；7 个服务均 Up，后端/MySQL/Redis healthy，内外网健康接口均 200。服务器现有代码为 v0.7.0，与本地 v0.7.1 有版本差异。
-- **[096] 2026-07-06 v0.7.1**：修复 App 发消息转圈后「未送达」。根因：WSS 重连产生的新连接后端 `c.ConvID` 为空，聊天界面没对新连接重新 `/assign`，发消息命中后端空 ConvID 分支被拒（只回 error 不回 ack）→ App 干等 12s 标红。生产日志（发卡密国内服）14:03/14:04 两条 `agent_msg_no_conv` 坐实。双保险：① 后端 hub.go/service.go 自愈（agent chat 带 conv 且 `AgentOwnsConv` 校验归属通过就补 attach，伪造被 SQL 挡，不破坏 [077]/[068] 防串台）；② App（Mac a2e532a）onAlive 重连先重挂会话再重发 + 处理 error 自愈 + onForeground 1.5s 防抖。后端需 pull 重部署、App 需重装。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）
