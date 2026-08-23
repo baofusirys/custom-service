@@ -4,6 +4,14 @@
 
 ---
 
+## [104] 2026-08-23 21:21 — 测试服恢复 douxiaoyin 并下线 custom_service
+
+**起因 / 需求**：测试服务器临时结束客服系统联调，需要恢复同机 `weixian-douxiaoyin`，同时安全下线 `custom_service`。
+
+**做了什么**：先核对两项目的 named volume、`/srv` 外置数据、磁盘、时区和 Compose 配置；对 `custom_service` 执行不带 `-v` 的 `docker compose down`，随后在 `/weixian-douxiaoyin` 执行 `docker compose up -d --build`，未清理任何持久化卷。
+
+**验证 / 注意**：douxiaoyin 7 个常驻服务全部 healthy、一次性权限容器 Exited(0)，公网 HTTPS 健康接口和后台入口均 200，日志 78 行无 ERROR/FATAL/panic/Traceback；PostgreSQL 19 张表及原业务数据存在，最新启动备份 gzip 校验通过。custom_service 容器数为 0，但 MySQL/Redis/证书卷完整保留；生产服未改动。
+
 ## [103] 2026-08-23 11:09 — v0.7.3 全量部署测试服并完成重连与多连接验收
 
 **起因 / 需求**：将 [102] 的下游消息状态修复实际部署，验证别名 ACK、重连补发和多连接同步不是只在单元测试中成立。
