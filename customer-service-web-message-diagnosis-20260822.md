@@ -23,7 +23,8 @@
 - 根因补充：状态 reducer 只做 `message.id === ack.id` 精确比较，没有 `client_id/id_aliases`；重连在 `hello/conn_id` 前直接重发，没有先做 HTTP 落库对账；ACK 只回原连接，跨标签页/多节点连接缺少账号级状态广播。
 - v0.7.3 修复：消息对象持久保存 `client_id + id_aliases`；ACK、delivery、HTTP 和 WSS chat 统一走单调幂等 reducer；旧 `local-*` 的内容兜底改成按会话/发送者/媒体/最近时间一对一消费，避免相同文本误吞多条气泡。
 - 恢复与同步：收到 `hello` 后先 HTTP 对账，确认仍 pending 才按原 ID 限频重发；服务端将落库 ACK 精确广播给同客服账号的全部连接并经 Redis 跨节点同步，浏览器标签页再以不含正文/token 的 BroadcastChannel + storage 事件兜底。
-- 本地证据：修复前新增测试因不存在 alias reducer 直接报错；修复后管理端 10 项状态/同步测试、生产构建、Go 全量测试/vet、Hub 100 轮重复测试与 Widget 4 项协议测试通过。测试服与托管平台状态以 `LATEST.md` 为准。
+- 本地证据：修复前新增测试因不存在 alias reducer 直接报错；修复后管理端 10 项状态/同步测试、生产构建、Go 全量测试/vet、Hub 100 轮重复测试与 Widget 4 项协议测试通过。
+- 测试服证据：`38.76.193.68` 已运行 v0.7.3；公网 WSS 建立三个不同客服连接，首次 ACK 11.62ms、重连重复 ACK 7.71ms，`client_id` 在 ACK/chat 全链保留，delivery/read 均同步到两连接，重复补发后数据库仍仅 1 行；非法别名返回 error 且数据库 0 行。v0.7.3 尚未创建 tag、未上传托管镜像、生产服未更新。
 
 ## 1. 结论摘要
 
