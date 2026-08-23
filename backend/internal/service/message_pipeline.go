@@ -65,7 +65,7 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 				s.secLog.Warn("message_id_payload_conflict",
 					zap.String("message_id", snap.ID), zap.String("conv", convID),
 					zap.String("actor", sender+":"+clientID), zap.String("conn", c.ConnID))
-				c.Send(&ws.Envelope{Type: "error", ID: snap.ID, ConvID: convID, Content: "消息标识冲突，已拒绝发送", TS: ws.NowMS()})
+				c.Send(&ws.Envelope{Type: "error", ID: snap.ID, ClientID: snap.ClientID, ConvID: convID, Content: "消息标识冲突，已拒绝发送", TS: ws.NowMS()})
 				return
 			}
 			s.failMessage(c, &snap, "message_persist_failed", err)
@@ -73,11 +73,23 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 		}
 
 		// ACK 的唯一语义是数据库事务已经成功提交；重复重试也返回同一成功 ACK。
-		c.Send(&ws.Envelope{Type: "ack", ID: snap.ID, ConvID: convID, TS: ws.NowMS(),
-			Extra: map[string]any{"status": "persisted", "duplicate": !inserted}})
+		// agent ACK 按账号同步到所有连接，client_id 让旧 local-* outbox 与服务端稳定 ID 可归并。
+		ack := &ws.Envelope{Type: "ack", ID: snap.ID, ClientID: snap.ClientID, ConvID: convID, TS: ws.NowMS(),
+			Extra: map[string]any{"status": "persisted", "client_id": snap.ClientID, "duplicate": !inserted}}
+		ackTargets := 0
+		if sender == "agent" && s.hub != nil {
+			ackTargets = s.hub.FanoutToAgent(ctx, clientID, ack)
+		} else {
+			c.Send(ack)
+			ackTargets = 1
+		}
+		if ackTargets == 0 && c.Send(ack) {
+			ackTargets = 1
+		}
 		if !inserted {
 			s.bizLog.Info("message_idempotent_retry",
-				zap.String("message_id", snap.ID), zap.String("conv", convID), zap.String("actor", sender+":"+clientID))
+				zap.String("message_id", snap.ID), zap.String("client_message_id", snap.ClientID),
+				zap.String("conv", convID), zap.String("actor", sender+":"+clientID), zap.Int("ack_targets", ackTargets))
 			return
 		}
 
@@ -87,7 +99,8 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 		}
 		s.bizLog.Info("message_persisted_and_fanout",
 			zap.String("trace_id", snap.ID), zap.String("request_id", snap.ID),
-			zap.String("message_id", snap.ID), zap.String("conv", convID), zap.String("sender", sender),
+			zap.String("message_id", snap.ID), zap.String("client_message_id", snap.ClientID),
+			zap.String("conv", convID), zap.String("sender", sender), zap.Int("ack_targets", ackTargets),
 			zap.Int("visitor_targets", result.VisitorTargets), zap.Int("visitor_queued", result.VisitorQueued),
 			zap.Int("agent_targets", result.AgentTargets), zap.Int("agent_queued", result.AgentQueued))
 
@@ -105,7 +118,7 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 
 func (s *Service) failMessage(c *ws.Client, message *ws.Envelope, event string, err error) {
 	s.bizLog.Error(event, zap.Error(err), zap.String("message_id", message.ID), zap.String("conv", message.ConvID), zap.Stack("stack"))
-	c.Send(&ws.Envelope{Type: "error", ID: message.ID, ConvID: message.ConvID, Content: "消息保存失败，请重试", TS: ws.NowMS()})
+	c.Send(&ws.Envelope{Type: "error", ID: message.ID, ClientID: message.ClientID, ConvID: message.ConvID, Content: "消息保存失败，请重试", TS: ws.NowMS()})
 }
 
 // PersistDeliveryAsync 只在数据库确认目标是当前访客会话中的客服消息后广播 delivery。

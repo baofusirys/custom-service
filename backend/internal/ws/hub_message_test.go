@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 
@@ -56,7 +57,7 @@ func testHubAndClient(kind Kind, id, conv string) (*Hub, *Client, *messageSinkSp
 func TestChatQueuesPersistenceWithoutPrematureAck(t *testing.T) {
 	hub, client, spy := testHubAndClient(KindAgent, "7", "conv-a")
 	hub.handleIncoming(context.Background(), incoming{Client: client, Env: &Envelope{
-		Type: "chat", ID: "m2-0123456789abcdef0123456789abcdef", ConvID: "spoof", Content: "hello",
+		Type: "chat", ID: "m2-0123456789abcdef0123456789abcdef", ClientID: "local-1724312345678", ConvID: "spoof", Content: "hello",
 	}})
 	if spy.persisted != 1 {
 		t.Fatalf("消息应进入持久化流水线，实际=%d", spy.persisted)
@@ -64,8 +65,61 @@ func TestChatQueuesPersistenceWithoutPrematureAck(t *testing.T) {
 	if spy.last.ConvID != "conv-a" {
 		t.Fatalf("必须使用服务器绑定 conv，实际=%s", spy.last.ConvID)
 	}
+	if spy.last.ClientID != "local-1724312345678" {
+		t.Fatalf("离线 outbox client_id 未保留: %s", spy.last.ClientID)
+	}
 	if len(client.high) != 0 {
 		t.Fatal("数据库提交前不允许产生成功 ACK")
+	}
+}
+
+func TestChatDefaultsAndValidatesClientID(t *testing.T) {
+	hub, client, spy := testHubAndClient(KindAgent, "7", "conv-a")
+	id := "m2-0123456789abcdef0123456789abcdef"
+	hub.handleIncoming(context.Background(), incoming{Client: client, Env: &Envelope{
+		Type: "chat", ID: id, Content: "hello",
+	}})
+	if spy.persisted != 1 || spy.last.ClientID != id {
+		t.Fatalf("旧端 client_id 应回填为消息 ID: persisted=%d client_id=%s", spy.persisted, spy.last.ClientID)
+	}
+
+	hub, client, spy = testHubAndClient(KindAgent, "7", "conv-a")
+	hub.handleIncoming(context.Background(), incoming{Client: client, Env: &Envelope{
+		Type: "chat", ID: id, ClientID: "../invalid", Content: "hello",
+	}})
+	if spy.persisted != 0 {
+		t.Fatal("非法 client_id 不得进入持久化流水线")
+	}
+}
+
+func TestAgentAckFanoutReachesAllAccountConnections(t *testing.T) {
+	hub, first, _ := testHubAndClient(KindAgent, "7", "conv-a")
+	first.ConnID = "conn-first"
+	second := &Client{
+		hub: hub, Kind: KindAgent, ID: "7", convID: "conv-b", ConnID: "conn-second",
+		high: make(chan outboundFrame, 8), low: make(chan outboundFrame, 8), log: zap.NewNop(), rawLog: zap.NewNop(),
+	}
+	connections := &sync.Map{}
+	connections.Store(first.ConnID, first)
+	connections.Store(second.ConnID, second)
+	hub.agents.Store("7", connections)
+
+	ack := &Envelope{
+		Type: "ack", ID: "m2-0123456789abcdef0123456789abcdef", ClientID: "local-1724312345678",
+		ConvID: "conv-a", Extra: map[string]any{"status": "persisted"},
+	}
+	if queued := hub.FanoutToAgent(context.Background(), "7", ack); queued != 2 {
+		t.Fatalf("ACK 应投递同账号全部连接，实际=%d", queued)
+	}
+	for _, client := range []*Client{first, second} {
+		frame := <-client.high
+		var got Envelope
+		if err := json.Unmarshal(frame.data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.ClientID != ack.ClientID || got.To != "agent:7" {
+			t.Fatalf("ACK 关联信息错误: client_id=%s to=%s", got.ClientID, got.To)
+		}
 	}
 }
 

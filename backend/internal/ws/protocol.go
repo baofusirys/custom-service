@@ -18,17 +18,18 @@ import "time"
 
 type Envelope struct {
 	Type      string `json:"type"`
-	ID        string `json:"id,omitempty"`      // 消息 ID（UUID）
-	From      string `json:"from,omitempty"`    // visitor:xxx / agent:xxx / sys
-	To        string `json:"to,omitempty"`      // 同上
-	ConvID    string `json:"conv,omitempty"`    // 会话 ID
-	Content   string `json:"content,omitempty"` // 文本内容
-	MediaURL  string `json:"media,omitempty"`   // 图片/文件 URL（来自 upload API）
-	MediaKind string `json:"mkind,omitempty"`   // image | file
-	MediaName string `json:"mname,omitempty"`   // 原始文件名
-	MediaSize int64  `json:"msize,omitempty"`   // 字节
-	TS        int64  `json:"ts,omitempty"`      // 毫秒时间戳（北京时间转 UTC ms）
-	Priority  int    `json:"prio,omitempty"`    // 0 最高 / 1 次之
+	ID        string `json:"id,omitempty"`        // 服务端稳定消息 ID（UUID / m2-*）
+	ClientID  string `json:"client_id,omitempty"` // 客户端 outbox 关联 ID；兼容旧 local-* 与稳定 ID 映射
+	From      string `json:"from,omitempty"`      // visitor:xxx / agent:xxx / sys
+	To        string `json:"to,omitempty"`        // 同上
+	ConvID    string `json:"conv,omitempty"`      // 会话 ID
+	Content   string `json:"content,omitempty"`   // 文本内容
+	MediaURL  string `json:"media,omitempty"`     // 图片/文件 URL（来自 upload API）
+	MediaKind string `json:"mkind,omitempty"`     // image | file
+	MediaName string `json:"mname,omitempty"`     // 原始文件名
+	MediaSize int64  `json:"msize,omitempty"`     // 字节
+	TS        int64  `json:"ts,omitempty"`        // 毫秒时间戳（北京时间转 UTC ms）
+	Priority  int    `json:"prio,omitempty"`      // 0 最高 / 1 次之
 	// Node 标记消息来源节点 ID。FanoutToConv 时盖上本节点 ID；
 	// fanoutFromRedis 收到自己节点的回环消息时跳过，避免单节点部署的"广播两次"。
 	Node string `json:"node,omitempty"`

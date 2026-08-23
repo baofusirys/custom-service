@@ -1,6 +1,9 @@
 package ws
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestValidMessageID(t *testing.T) {
 	valid := []string{
@@ -18,5 +21,20 @@ func TestValidMessageID(t *testing.T) {
 		if ValidMessageID(id) {
 			t.Fatalf("非法消息 ID 被放行: %q", id)
 		}
+	}
+}
+
+func TestEnvelopeClientIDRoundTrip(t *testing.T) {
+	want := Envelope{Type: "ack", ID: "m2-0123456789abcdef0123456789abcdef", ClientID: "local-1724312345678"}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Envelope
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ClientID != want.ClientID {
+		t.Fatalf("client_id JSON 往返丢失: %s", got.ClientID)
 	}
 }

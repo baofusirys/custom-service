@@ -9,14 +9,17 @@ import { AgentWS } from '../api/ws'
 import { playSound, unlockAudio, playRingLoop, stopRingLoop } from '../api/sound'
 import { useSession } from '../store/session'
 import {
+  applyMessageReceipt,
   advanceMessageStatus,
   canonicalMessageStatus,
   createClientMessageId,
   isPendingMessage,
   latestServerMessageId,
+  messageIdentityKeys,
   mergeMessageLists,
   messageStatusLabel,
 } from '../modules/messageState'
+import { MessageStatusSync } from '../modules/messageStatusSync'
 
 dayjs.extend(relativeTime)
 dayjs.locale('zh-cn')
@@ -147,6 +150,7 @@ const agentSound = ref('agent1') // 由 /admin/settings 拉到的客服端通知
 const notifyVisitorEnter = ref(true) // [082] 新访客进入是否提醒(弹窗+声音)；前端二道保险，后端 service.go 也已按此 gate 下发
 const myConnId = ref('') // 自己 WSS 连接 ID（hello 时拿到，用于多端同步去重）
 let ws = null
+let statusSync = null
 
 async function loadSoundPref() {
   // 仅管理员可读全设置；普通客服 fallback 默认值
@@ -305,30 +309,53 @@ function pageTitle(m) {
 //   ACK 仅表示数据库提交成功（persisted/已发送）；delivery/read 是访客端的独立确认。
 //   12s 未收 ACK→未送达(红可重发); WS 重连(onOpen)自动重发未确认。
 const ackTimers = {}
+const resendLastAttempt = new Map()
+const RESEND_MIN_INTERVAL_MS = 1500
 function scheduleAckTimeout(mid) {
   if (ackTimers[mid]) clearTimeout(ackTimers[mid])
-  ackTimers[mid] = setTimeout(() => { markStatus(mid, 'failed') }, 12000)
+  ackTimers[mid] = setTimeout(() => { markStatus({ id: mid }, 'failed', false) }, 12000)
 }
-function markStatus(mid, st) {
-  let found = null
+function clearAckTimers(identities) {
+  for (const id of identities) {
+    if (ackTimers[id]) clearTimeout(ackTimers[id])
+    delete ackTimers[id]
+    resendLastAttempt.delete(id)
+  }
+}
+function markStatus(receiptOrID, st, shouldBroadcast = true) {
+  const receipt = typeof receiptOrID === 'string' ? { id: receiptOrID } : (receiptOrID || {})
+  let result = { matched: false, changed: false, identities: messageIdentityKeys(receipt) }
   let cacheKey = ''
   for (const [key, list] of Object.entries(msgCache)) {
-    const message = list.find(x => x.id === mid)
-    if (message) { found = message; cacheKey = key; break }
+    result = applyMessageReceipt(list, receipt, st)
+    if (result.matched) { cacheKey = key; break }
   }
-  if (!found) found = messages.value.find(x => x.id === mid)
-  if (found) {
-    if (st === 'sending') found.status = st
-    else advanceMessageStatus(found, st)
-    if (cacheKey) saveCachedMsgs(cacheKey)
+  if (!result.matched) result = applyMessageReceipt(messages.value, receipt, st)
+  if (result.matched && cacheKey) saveCachedMsgs(cacheKey)
+  if (st !== 'sending') clearAckTimers([...result.identities, ...messageIdentityKeys(receipt)])
+  // ACK 可能属于另一标签页的本地 outbox：即使本页没命中也发布无正文状态事件。
+  if (shouldBroadcast && (st === 'persisted' || st === 'delivered' || st === 'read')) {
+    statusSync?.publish(receipt, st, receipt.conv || result.message?.conv_id || '')
   }
-  if (st !== 'sending' && ackTimers[mid]) { clearTimeout(ackTimers[mid]); delete ackTimers[mid] }
+  return result
 }
 function buildResendEnv(m, convId) {
-  const d = { type: 'chat', conv: convId, id: m.id, ts: Date.now(), prio: 0 }
+  const d = {
+    type: 'chat', conv: convId, id: m.id,
+    client_id: m.client_id || m.local_id || m.id,
+    ts: Date.now(), prio: 0,
+  }
   if (m.media_url?.Valid) { d.content = ''; d.media = m.media_url.String; d.mkind = m.media_kind?.String; d.mname = m.media_name?.String }
   else { d.content = m.content }
   return d
+}
+function canAutoResend(m) {
+  const key = m.client_id || m.id
+  const now = Date.now()
+  const last = resendLastAttempt.get(key) || 0
+  if (now - last < RESEND_MIN_INTERVAL_MS) return false
+  resendLastAttempt.set(key, now)
+  return true
 }
 function resendMsg(m) {
   if (!m || !activeConv.value) return
@@ -336,19 +363,37 @@ function resendMsg(m) {
     ElMessage.warning('该消息属于历史会话，不能发送到当前会话')
     return
   }
-  markStatus(m.id, 'sending')
+  resendLastAttempt.set(m.client_id || m.id, Date.now())
+  markStatus(m, 'sending', false)
   if (ws?.send(buildResendEnv(m, m.conv_id || activeConv.value.id))) scheduleAckTimeout(m.id)
-  else markStatus(m.id, 'failed')
+  else markStatus(m, 'failed', false)
 }
 function resendPending() {
   if (!activeConv.value) return
   for (const m of messages.value) {
     if (m.sender === 'agent' && (!m.conv_id || m.conv_id === activeConv.value.id) &&
         (m.status === 'sending' || m.status === 'failed')) {
-      if (ws?.send(buildResendEnv(m, m.conv_id || activeConv.value.id))) { m.status = 'sending'; scheduleAckTimeout(m.id) }
+      if (!canAutoResend(m)) continue
+      if (ws?.send(buildResendEnv(m, m.conv_id || activeConv.value.id))) {
+        advanceMessageStatus(m, 'sending')
+        scheduleAckTimeout(m.id)
+      }
     }
   }
   saveCachedMsgs(activeConv.value.visitor_id)
+}
+
+let reconnectRecoveryVersion = 0
+async function recoverPendingAfterReconnect() {
+  const current = activeConv.value
+  if (!current) return
+  const version = ++reconnectRecoveryVersion
+  try {
+    // 先用 HTTP 对账吃掉「服务端已落库但 ACK 丢失」的消息，再只重发真正 pending。
+    await loadMessages(current.visitor_id)
+  } catch {}
+  if (version !== reconnectRecoveryVersion || !ws?.alive || activeConv.value?.id !== current.id) return
+  resendPending()
 }
 
 // [040] 发送：先发文本（如果有），再依次上传 pendingFiles 队列里的所有附件
@@ -373,12 +418,13 @@ async function sendText() {
       const now = new Date().toISOString()
       // [068] WSS 路由用 sendingConvId（锁定的会话），不读 activeConv
       const sentMid = createClientMessageId()
-      const sentOk = ws.send({ type: 'chat', conv: sendingConvId, content: text, id: sentMid, ts: Date.now(), prio: 0 })   // [079] 带 id 供 ACK 匹配
+      const sentOk = ws.send({ type: 'chat', conv: sendingConvId, content: text, id: sentMid, client_id: sentMid, ts: Date.now(), prio: 0 })   // [079] 带 id 供 ACK 匹配
       // [068] 仅当 UI 仍停留在 sendingConvId 才做本地乐观渲染，
       // 否则切走后 push 到 messages.value 会污染新会话视图
       if (activeConv.value?.id === sendingConvId) {
         messages.value.push({
           id: sentMid,
+          client_id: sentMid,
           sender: 'agent',
           sender_ref: String(session.agent?.id),
           conv_id: sendingConvId,
@@ -430,13 +476,14 @@ async function uploadAndSendFile(file, convId) {
     const upMid = createClientMessageId()
     const upOk = ws?.send({
       type: 'chat', conv: convId, id: upMid,
+      client_id: upMid,
       content: '', media: r.url, mkind: r.kind, mname: r.name, msize: r.size,
       ts: Date.now(), prio: 0
     })
     // [068] 仅当 UI 仍停在 convId 才本地乐观渲染，否则只发不渲染（避免污染新会话）
     if (activeConv.value?.id === convId) {
       messages.value.push({
-        id: upMid, conv_id: convId, sender: 'agent', sender_ref: String(session.agent?.id),
+        id: upMid, client_id: upMid, conv_id: convId, sender: 'agent', sender_ref: String(session.agent?.id),
         content: '',
         media_url: { String: r.url, Valid: true },
         media_kind: { String: r.kind, Valid: true },
@@ -694,14 +741,18 @@ function scheduleConvsRefresh() {
 let convsTimer
 onMounted(async () => {
   await Promise.all([refreshConvs(), refreshStats(), loadSoundPref(), refreshSideTotals()])
+  statusSync = new MessageStatusSync({
+    agentID: session.agent?.id,
+    onEvent: event => markStatus(event, event.status, false),
+  })
+  statusSync.start()
   // 解锁 AudioContext（Chrome 等需要用户手势）—— 用户既然能进到 console 页就算手势
   document.addEventListener('click', unlockAudio, { once: true, capture: true })
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   ws = new AgentWS({
     url: `${proto}://${location.host}/ws/agent`,
     token: session.token,
-    onOpen: () => {                      // [079] 重连重发 + [092] 重连对账拉最新
-      resendPending()                    // [079] 重连自动重发未确认消息
+    onOpen: () => {                      // 建连后等 hello 再做状态恢复，避免 connID 尚未建立时重发
       refreshConvs()                     // [092] 重连对账：拉最新第一页，补断线期间漏的消息（先显缓存，后台静默刷新）
       refreshSideTotals()                // 顺带刷新「已联系」总数
     },
@@ -709,19 +760,20 @@ onMounted(async () => {
       // hello：记住自己的 connID（多端同步去重必需）
       if (env.type === 'hello') {
         myConnId.value = env.extra?.conn_id || ''
+        recoverPendingAfterReconnect()
         return
       }
       // [098] ACK 与数据库提交绑定，只表示 persisted（已发送），不能冒充已送达。
       if (env.type === 'ack') {
-        markStatus(env.id, 'persisted')
+        markStatus(env, env.extra?.status || 'persisted')
         return
       }
       if (env.type === 'delivery') {
-        markStatus(env.id, 'delivered')
+        markStatus(env, 'delivered')
         return
       }
       if (env.type === 'error') {
-        if (env.id) markStatus(env.id, 'failed')
+        if (env.id || env.client_id || env.extra?.client_id) markStatus(env, 'failed', false)
         if (env.content) ElMessage.error(env.content)
         return
       }
@@ -789,6 +841,7 @@ onMounted(async () => {
           : (env.from?.includes(':') ? env.from.split(':')[1] : (fromSys ? 'system' : ''))
         const realtimeMessage = {
           id: env.id,
+          client_id: env.client_id || env.extra?.client_id || env.id,
           conv_id: env.conv,
           sender: fromAgent ? 'agent' : (fromSys ? 'sys' : 'visitor'),
           sender_ref: senderRef,
@@ -880,6 +933,9 @@ onMounted(async () => {
 
 onUnmounted(() => {
   ws?.stop()
+  statusSync?.stop()
+  statusSync = null
+  for (const timer of Object.values(ackTimers)) clearTimeout(timer)
   clearInterval(convsTimer)
   if (convsDebounce) clearTimeout(convsDebounce)
   if (voice.timer) { clearTimeout(voice.timer); clearInterval(voice.timer) }

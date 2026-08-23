@@ -1,4 +1,4 @@
-### 当前版本：v0.7.2 · 2026-08-22
+### 当前版本：v0.7.3 · 2026-08-23
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -7,9 +7,9 @@
 ## 实际部署实例（爷爷自用，2026-07-06 核实）
 > 排查 App/客服问题时看这里，别被下面的模板占位坐标误导。
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
-- **测试服（当前运行 v0.7.2）**：`38.76.193.68`（MCP [10]）。同机 `weixian-douxiaoyin` 已安全停止且命名卷保留；`v0.7.2` 已按三步流程全量部署，经 `maihaocs.icu` 公网 TLS/WSS 验证持久化 ACK、重复帧幂等与数据库单行落库均通过。
+- **测试服（当前运行 v0.7.2，v0.7.3 待部署）**：`38.76.193.68`（MCP [10]）。同机 `weixian-douxiaoyin` 已安全停止且命名卷保留；v0.7.3 已完成本地自动化验证，待按三步流程全量部署并执行公网 WSS 重连/别名 ACK 验收。
 - **App(SwiftUI) 源码**：在 Mac `192.168.1.75`（MCP [18]）`~/code/custom_service_swift`（独立 git 仓库；本 Windows 仓库里的 `mobile_app` 是已存档旧 Flutter 版，[089] 起弃用）。构建装机走 `auto_reinstall.sh` / launchd。
-- **发布到生产/下游**：`v0.7.2` 已于 2026-08-22 发布到 GHCR 与阿里云 ACR，7 个 `:0.7.2` 镜像均验证成功；下游将 `.env` 的 `IMAGE_TAG=0.7.2` 后拉取并启动。禁止依赖 `latest`；生产服 `49.233.156.149` 当前仍未更新。
+- **发布到生产/下游**：当前已发布稳定版仍是 `v0.7.2`（GHCR + 阿里云 ACR）；`v0.7.3` 尚未创建/推送 tag，也没有托管镜像。生产服 `49.233.156.149` 当前仍未更新。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -48,6 +48,7 @@
 | WSS 心跳/读写超时 | `backend/internal/ws/hub.go` | 文件顶部常量 |
 | 消息 ACK/回执/离线补发 | `backend/internal/service/message_pipeline.go` | 整个模块 |
 | Web 消息状态/缓存幂等合并 | `admin/src/modules/messageState.js` | 整个模块 |
+| Web 多标签页状态同步 | `admin/src/modules/messageStatusSync.js` | 整个模块 |
 | 限流参数（按 IP / 按访客） | `backend/internal/security/ratelimit.go` | 文件顶部常量 |
 | 文件上传大小上限 | `backend/internal/config/config.go` | `MaxUploadSize` |
 | 数据库自动迁移开关 | `backend/internal/db/migrate.go` | 启动时强制执行，无开关 |
@@ -79,9 +80,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[102] 2026-08-23 v0.7.3 消息归并修复**：新增 `local-* ↔ m2-*` 持久别名、ACK 单调幂等 reducer、先 HTTP 对账后重发、账号级多连接 ACK/送达同步及 BroadcastChannel/storage 双通道；本地 10 项前端状态测试、全量 Go 测试与构建通过。
 - **[101] 2026-08-22 v0.7.2 发布**：不可变 tag 已推送；GHCR 与阿里云 ACR 的 7 个 `0.7.2` 镜像全部发布，ACR 提升流水线 7/7 success 且逐项核对 image ID。
 - **[100] 2026-08-22 发布修复**：修复阿里云 ACR 不支持 Buildx provenance 附加清单导致 7 镜像推送失败；新增从 GHCR 不可变版本向 ACR 提升的受控流水线，不移动既有 `v0.7.2` tag。
-- **[099] 2026-08-22 测试服验收**：`v0.7.2` 已全量部署至 `38.76.193.68`；7 服务运行、健康接口/后台/Widget 为 200，公网 TLS/WSS 首次 ACK=`persisted`、同 ID 重发=`duplicate=true`、数据库仅 1 行；三处北京时间一致。
 
 ## AI 接手必读顺序
 1. 本文件（LATEST.md）

@@ -327,6 +327,16 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			c.Send(&Envelope{Type: "error", Content: "消息标识无效，请重试", TS: NowMS()})
 			return
 		}
+		// client_id 是离线 outbox 的稳定关联键。旧端未发送时回填为 id；显式值与 id
+		// 使用同一白名单，防超长/异常别名进入广播、日志和前端索引。
+		if e.ClientID == "" {
+			e.ClientID = e.ID
+		}
+		if !ValidMessageID(e.ClientID) {
+			h.secLog.Warn("message_client_id_rejected", zap.String("conn", c.ConnID), zap.String("actor", c.ID), zap.Int("client_id_length", len(e.ClientID)))
+			c.Send(&Envelope{Type: "error", ID: e.ID, Content: "消息关联标识无效，请重试", TS: NowMS()})
+			return
+		}
 		// [098] 顺序：同步风控 → 有界异步队列持久化 → persisted ACK → WSS 广播。
 		// DB 写入不阻塞 Hub 主循环，但成功 ACK 与访客可见消息都严格晚于事务提交。
 		var sender string
@@ -788,7 +798,7 @@ func (h *Hub) FanoutToConv(ctx context.Context, e *Envelope) FanoutResult {
 //
 // 投递策略：
 //  1. byConv[ConvID] 内所有连接：访客 + 已接管该会话的客服
-//  2. 所有在线 agent 的所有连接：让 chat 和 read 都能在双端实时同步
+//  2. 所有在线 agent 的所有连接：让 chat/read/delivery 都能在双端实时同步
 //     - chat 外溢：未接管的客服也能立刻看到「新消息 + unread+1 + 会话上浮」
 //     - read 外溢：同账号在另一端（web/app）读了消息时，本端能同步清未读
 //  3. typing 不外溢（节省带宽，且只有正在打字的会话才关心）
@@ -822,7 +832,7 @@ func (h *Hub) fanoutLocal(e *Envelope) FanoutResult {
 			return true
 		})
 	}
-	if e.Type == "chat" || e.Type == "read" {
+	if e.Type == "chat" || e.Type == "read" || e.Type == "delivery" {
 		h.agents.Range(func(_, v any) bool {
 			v.(*sync.Map).Range(func(_, cv any) bool {
 				c := cv.(*Client)
@@ -859,6 +869,11 @@ func (h *Hub) fanoutFromRedis(ctx context.Context) {
 			if e.Node == h.cfg.NodeID {
 				continue
 			}
+			// ACK 按 agent 账号精确同步到其全部连接；不能走 byConv，否则会把内部落库回执发给访客。
+			if e.Type == "ack" && strings.HasPrefix(e.To, "agent:") {
+				h.fanoutAgentLocal(strings.TrimPrefix(e.To, "agent:"), &e)
+				continue
+			}
 			// voice_* 走专用路由（按 To 字段精确转发），其它（chat/read/typing 等）按 ConvID
 			if strings.HasPrefix(e.Type, "voice_") {
 				h.fanoutVoiceLocal(&e)
@@ -867,6 +882,34 @@ func (h *Hub) fanoutFromRedis(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (h *Hub) fanoutAgentLocal(agentID string, e *Envelope) int {
+	queued := 0
+	if v, ok := h.agents.Load(agentID); ok {
+		v.(*sync.Map).Range(func(_, cv any) bool {
+			if cv.(*Client).Send(e) {
+				queued++
+			}
+			return true
+		})
+	}
+	return queued
+}
+
+// FanoutToAgent 把落库 ACK 同步给同一客服账号的全部 Web/App 连接，并经 Redis
+// 覆盖多节点部署。ACK 只含消息标识和状态，不含正文或凭证。
+func (h *Hub) FanoutToAgent(ctx context.Context, agentID string, e *Envelope) int {
+	e.Priority = 0
+	e.To = "agent:" + agentID
+	e.Node = h.cfg.NodeID
+	queued := h.fanoutAgentLocal(agentID, e)
+	if h.rdb != nil {
+		if err := h.rdb.Publish(ctx, h.pub, mustJSON(e)).Err(); err != nil {
+			h.bizLog.Error("redis_agent_status_publish_failed", zap.Error(err), zap.String("msg_id", e.ID), zap.String("agent", agentID))
+		}
+	}
+	return queued
 }
 
 // OnlineAgentCount 公开 API：当前在线客服数（按 agentID 数，不重复计同账号多端）。
@@ -885,16 +928,7 @@ func (h *Hub) OnlineVisitorCount() int {
 
 // PushToAgent 服务端主动给客服推消息（多端：同 agentID 所有连接都会收到）。
 func (h *Hub) PushToAgent(agentID string, e *Envelope) bool {
-	if v, ok := h.agents.Load(agentID); ok {
-		sent := false
-		v.(*sync.Map).Range(func(_, cv any) bool {
-			cv.(*Client).Send(e)
-			sent = true
-			return true
-		})
-		return sent
-	}
-	return false
+	return h.fanoutAgentLocal(agentID, e) > 0
 }
 
 // PushToVisitor 服务端主动给访客推消息（如客服离线时的系统提示）。

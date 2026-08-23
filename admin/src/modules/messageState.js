@@ -25,6 +25,60 @@ export function createClientMessageId(cryptoSource = globalThis.crypto) {
   return `m2-${hex}`
 }
 
+const MESSAGE_ID_PATTERN = /^[A-Za-z0-9-]{1,36}$/
+
+function validIdentity(value) {
+  const identity = typeof value === 'string' ? value : ''
+  return MESSAGE_ID_PATTERN.test(identity) ? identity : ''
+}
+
+// 同一消息在旧离线队列、重发帧、服务端落库后可能依次拥有 local-*、m2-* 两个 ID。
+// 所有 reducer / HTTP 对账 / WSS 回执都必须走这一份身份集合，不能再只比较 message.id。
+export function messageIdentityKeys(value) {
+  if (!value || typeof value !== 'object') return []
+  const extra = value.extra && typeof value.extra === 'object' ? value.extra : {}
+  const aliases = Array.isArray(value.id_aliases) ? value.id_aliases : []
+  const keys = [
+    value.id,
+    value.client_id,
+    value.local_id,
+    value.server_id,
+    extra.client_id,
+    extra.local_id,
+    extra.server_id,
+    ...aliases,
+  ].map(validIdentity).filter(Boolean)
+  return [...new Set(keys)]
+}
+
+function sameMessageIdentity(left, right) {
+  const rightKeys = new Set(messageIdentityKeys(right))
+  return messageIdentityKeys(left).some(key => rightKeys.has(key))
+}
+
+function isLegacyLocalID(id) {
+  return String(id || '').startsWith('local-')
+}
+
+function mergeIdentity(target, source) {
+  const before = messageIdentityKeys(target)
+  const sourceKeys = messageIdentityKeys(source)
+  const oldID = validIdentity(target.id)
+  const incomingID = validIdentity(source?.id)
+  const correlationID = validIdentity(source?.client_id) || validIdentity(source?.extra?.client_id)
+
+  // HTTP/WSS 服务端对象的稳定 ID 优先；但绝不让迟到的 local-* 把已经确认的 m2-* 倒退。
+  if (incomingID && (!oldID || isLegacyLocalID(oldID) || !isLegacyLocalID(incomingID))) {
+    if (!(isLegacyLocalID(incomingID) && oldID && !isLegacyLocalID(oldID))) target.id = incomingID
+  }
+  if (!target.client_id) {
+    target.client_id = correlationID || (oldID && oldID !== target.id ? oldID : '') || target.id
+  }
+  const all = [...new Set([...before, ...sourceKeys, ...messageIdentityKeys(target)])]
+  if (all.length > 1) target.id_aliases = all
+  return all
+}
+
 export function canonicalMessageStatus(message) {
   if (!message) return ''
   if (message.read === true || message.status === 'read') return 'read'
@@ -48,7 +102,8 @@ export function advanceMessageStatus(message, nextStatus) {
     return true
   }
   // 服务端迟到的 persisted/delivered/read 可以纠正本地超时 failed；已确认状态绝不回退。
-  if (current === 'failed' || nextRank >= currentRank) {
+  if (current === nextStatus || (current === 'persisted' && nextStatus === 'sent')) return false
+  if (current === 'failed' || nextRank > currentRank) {
     message.status = nextStatus === 'sent' ? 'persisted' : nextStatus
     if (message.status === 'read') message.read = true
     if (message.status === 'delivered' || message.status === 'read') message.delivered_ws = true
@@ -85,38 +140,75 @@ function mergeSameMessage(current, incoming) {
   const incomingStatus = canonicalMessageStatus(incoming)
   merged.status = STATE_RANK[currentStatus] > STATE_RANK[incomingStatus] ? currentStatus : incomingStatus
   if (current?.read || incoming?.read || merged.status === 'read') merged.read = true
+  mergeIdentity(merged, { ...incoming, id_aliases: [...messageIdentityKeys(current), ...messageIdentityKeys(incoming)] })
   return merged
+}
+
+// ACK / delivery / 跨标签页状态事件的唯一 reducer。返回命中的全部别名，供调用方
+// 同时清理 local-* 与 m2-* 两套超时定时器；重复、迟到、乱序回执均保持幂等单调。
+export function applyMessageReceipt(messages, receipt, nextStatus) {
+  const list = Array.isArray(messages) ? messages : []
+  const receiptConv = String(receipt?.conv || receipt?.conv_id || '')
+  const target = list.find(message => {
+    const messageConv = String(message?.conv_id || '')
+    return (!receiptConv || !messageConv || receiptConv === messageConv) && sameMessageIdentity(message, receipt)
+  })
+  if (!target) return { matched: false, changed: false, message: null, identities: messageIdentityKeys(receipt) }
+  const identities = mergeIdentity(target, receipt)
+  const status = nextStatus || receipt?.status || receipt?.extra?.status
+  const changed = status ? advanceMessageStatus(target, status) : false
+  return { matched: true, changed, message: target, identities }
 }
 
 export function mergeMessageLists(current, incoming, replace = false) {
   const existing = Array.isArray(current) ? current : []
   const fetched = Array.isArray(incoming) ? incoming : []
-  const pending = existing.filter(isPendingMessage)
-  const byID = new Map()
+  const pending = existing.filter(isPendingMessage).map(message => ({ ...message }))
+  const confirmed = []
+
+  const upsertConfirmed = (message) => {
+    const index = confirmed.findIndex(currentMessage => sameMessageIdentity(currentMessage, message))
+    if (index >= 0) confirmed[index] = mergeSameMessage(confirmed[index], message)
+    else confirmed.push(message)
+  }
 
   if (!replace) {
     for (const message of existing) {
-      if (!isPendingMessage(message) && message?.id) byID.set(message.id, { ...message })
+      if (!isPendingMessage(message) && message?.id) upsertConfirmed({ ...message })
     }
   }
+
   for (const message of fetched) {
     if (!message?.id) continue
-    const normalized = { ...message, status: canonicalMessageStatus(message) }
-    byID.set(message.id, byID.has(message.id) ? mergeSameMessage(byID.get(message.id), normalized) : normalized)
+    let normalized = { ...message, status: canonicalMessageStatus(message) }
+    let pendingIndex = pending.findIndex(local => sameMessageIdentity(local, normalized))
+
+    // 只给没有显式别名的旧 local-* 做内容/媒体/会话/时间兜底，并严格一对一消费，
+    // 防止连续发送相同文本时一个服务端消息吞掉多条本地气泡。
+    if (pendingIndex < 0 && normalized.sender === 'agent') {
+      let bestDistance = Number.POSITIVE_INFINITY
+      for (let i = 0; i < pending.length; i++) {
+        const local = pending[i]
+        if (!isLegacyLocalID(local?.id)) continue
+        if ((local.content || '') !== (normalized.content || '')) continue
+        if (mediaURLOf(local) !== mediaURLOf(normalized)) continue
+        if (local.conv_id && normalized.conv_id && local.conv_id !== normalized.conv_id) continue
+        if (local.sender_ref && normalized.sender_ref && String(local.sender_ref) !== String(normalized.sender_ref)) continue
+        const distance = Math.abs(timeOf(normalized) - timeOf(local))
+        if (distance <= 120000 && distance < bestDistance) {
+          pendingIndex = i
+          bestDistance = distance
+        }
+      }
+    }
+    if (pendingIndex >= 0) {
+      const local = pending.splice(pendingIndex, 1)[0]
+      normalized = mergeSameMessage(local, normalized)
+    }
+    upsertConfirmed(normalized)
   }
 
-  const serverMessages = [...byID.values()].sort((a, b) => timeOf(a) - timeOf(b))
-  const stillPending = pending.filter(local => {
-    if (local?.id && byID.has(local.id)) return false
-    // 仅兼容旧 local-* 客户端；新协议始终按稳定随机 ID 幂等合并。
-    if (!String(local?.id || '').startsWith('local-')) return true
-    return !serverMessages.some(server =>
-      server.sender === 'agent' &&
-      (server.content || '') === (local.content || '') &&
-      mediaURLOf(server) === mediaURLOf(local) &&
-      Math.abs(timeOf(server) - timeOf(local)) <= 120000)
-  })
-  return [...serverMessages, ...stillPending].sort((a, b) => timeOf(a) - timeOf(b))
+  return [...confirmed, ...pending].sort((a, b) => timeOf(a) - timeOf(b))
 }
 
 export function messageStatusLabel(message) {
