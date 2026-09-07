@@ -4,6 +4,14 @@
 
 ---
 
+## [105] 2026-09-08T06:58:12+08:00 — 家中 Mac 为 iPhone 重签安装客服 App
+
+**起因 / 需求**：用户要求使用当前家中 Mac 给自己的 iPhone 安装客服 App。
+**做了什么**：使用独立仓库 `/Users/chengmeiran/code/custom_service_swift` 的现有源码完成通用 iOS 真机构建和签名，再安装到已配对的 iPhone 16 Pro Max；未改 App 源码和服务器。
+**验证**：`BUILD SUCCEEDED`、codesign 校验退出码 0、目标设备在签名列表；设备返回 `App installed`、装机序号 2732；签名到期时间为 `2026-09-15T06:50:21+08:00`。
+**注意 / 遗留**：自动启动被 iOS 安全检查拒绝，提示签名、权限或描述文件未受信任，待用户检查开发者信任并打开 App；旧装机脚本存在硬编码钥匙串凭证，未使用其解锁步骤，凭证尚待用户轮换。
+**证据**：原始构建、安装和启动输出保存在上述 Swift 仓库 `build/install-evidence/20260908/`；仅本地保留，未上传。本次未重新配置定时任务。
+
 ## [104] 2026-08-23 21:21 — 测试服恢复 douxiaoyin 并下线 custom_service
 
 **起因 / 需求**：测试服务器临时结束客服系统联调，需要恢复同机 `weixian-douxiaoyin`，同时安全下线 `custom_service`。
