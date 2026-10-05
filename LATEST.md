@@ -9,7 +9,7 @@
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（custom_service 当前已下线）**：`38.76.193.68`（MCP [10]）。2026-08-23 21:17 已恢复同机 `weixian-douxiaoyin`，其 7 个常驻服务全部 healthy；`custom_service` 容器数为 0，但 `cs_mysql_data`、`cs_redis_data`、证书卷和 `/srv/cs-data/` 均完整保留，可随时重新切回。公网 `https://maihaocs.icu/healthz` 返回 200。
 - **App(SwiftUI) 源码**：当前家中 Mac `/Users/chengmeiran/code/custom_service_swift`（独立 git 仓库，旧 `mobile_app` Flutter 版已归档）。[105] 已重签安装至 iPhone 16 Pro Max，序号 2732；有效期至 `2026-09-15T06:50:21+08:00`，启动受 iOS 安全检查阻止，待用户核对开发者信任。原定时入口为 `auto_reinstall.sh` / launchd，本次未调整。
-- **发布到生产/下游**：v0.7.4 仅完成本地代码与隔离测试，尚未创建/推送 tag、构建托管镜像或部署；生产服 `49.233.156.149` 未更新。
+- **发布到生产/下游**：v0.7.4 已推送到 GitHub，`v0.7.4` 标签已创建；GitHub Actions 已成功构建并推送 7 个镜像到 GHCR 与阿里云 ACR。生产服 `49.233.156.149` 尚未拉取或更新。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -81,6 +81,7 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[107] 2026-10-05（北京时间）v0.7.4 已发布**：GitHub `main` 与 `v0.7.4` 标签已推送；Actions 7 个镜像已成功双推 GHCR 与阿里云 ACR；生产服尚未更新。
 - **[106] 2026-10-05（北京时间）v0.7.4 安全补丁**：消息与附件纯文本、上传三重类型校验、文件访问鉴权、WSS 子协议令牌、HttpOnly 后台会话 Cookie、JWT 会话版本吊销、对象权限、CORS 白名单、限流锁定/验证码、SSRF 和敏感静态文件防护；锁定基础镜像补丁版本；仅本地隔离验证，未连接其他项目服务器。
 - **[105] 2026-09-08（北京时间）iPhone 重签装机**：当前家中 Mac 构建、验签及安装成功（序号 2732）；自动启动受 iOS 安全检查阻止，待核对开发者信任，服务器未变更。
 - **[104] 2026-08-23 测试服项目切换**：安全下线 custom_service（不带 `-v`），恢复 weixian-douxiaoyin；7 个常驻服务 healthy、公网健康和后台入口 200、日志错误扫描为 0，两边持久化数据均保留。
