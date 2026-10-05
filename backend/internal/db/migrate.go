@@ -85,6 +85,43 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 	return applied, nil
 }
 
+// PendingMigrations 返回已建立 schema_migrations 后尚未执行的版本。
+// 首次初始化没有可备份的业务 schema，返回空列表；后续任何结构迁移都必须先备份。
+func PendingMigrations(ctx context.Context, db *sql.DB, dir string) ([]string, error) {
+	var tableName sql.NullString
+	if err := db.QueryRowContext(ctx, `SHOW TABLES LIKE 'schema_migrations'`).Scan(&tableName); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !tableName.Valid {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var pending []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		version := strings.TrimSuffix(e.Name(), ".sql")
+		var applied int
+		err := db.QueryRowContext(ctx, `SELECT 1 FROM schema_migrations WHERE version=?`, version).Scan(&applied)
+		if err == sql.ErrNoRows {
+			pending = append(pending, version)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	sort.Strings(pending)
+	return pending, nil
+}
+
 func simpleChecksum(b []byte) string {
 	// 用于校验同一版本号文件不被偷偷修改；不需要密码学强度，但要稳定。
 	var h uint64 = 1469598103934665603

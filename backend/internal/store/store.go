@@ -107,14 +107,15 @@ type Message struct {
 }
 
 type Agent struct {
-	ID        int64        `json:"id"`
-	Username  string       `json:"username"`
-	PassHash  string       `json:"-"` // 永不外泄
-	Role      string       `json:"role"`
-	Nickname  string       `json:"nickname"`
-	Active    bool         `json:"active"`
-	CreatedAt time.Time    `json:"created_at"`
-	LastLogin sql.NullTime `json:"last_login"`
+	ID           int64        `json:"id"`
+	Username     string       `json:"username"`
+	PassHash     string       `json:"-"` // 永不外泄
+	Role         string       `json:"role"`
+	Nickname     string       `json:"nickname"`
+	Active       bool         `json:"active"`
+	TokenVersion int64        `json:"-"`
+	CreatedAt    time.Time    `json:"created_at"`
+	LastLogin    sql.NullTime `json:"last_login"`
 }
 
 // ============ Visitor ============
@@ -529,6 +530,32 @@ func (s *Store) AgentOwnsConversation(ctx context.Context, convID, agentID strin
 	err := s.db.QueryRowContext(ctx,
 		`SELECT 1 FROM conversations WHERE id=? AND (agent_id=CAST(? AS UNSIGNED) OR agent_id IS NULL) LIMIT 1`,
 		convID, agentID).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) ConversationBelongsToVisitor(ctx context.Context, convID, siteID, visitorID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM conversations WHERE id=? AND site_id=? AND visitor_id=? LIMIT 1`, convID, siteID, visitorID).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) AgentCanAccessVisitor(ctx context.Context, visitorID, agentID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM conversations WHERE visitor_id=? AND (agent_id=CAST(? AS UNSIGNED) OR agent_id IS NULL) LIMIT 1`, visitorID, agentID).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -960,9 +987,9 @@ ORDER BY m.created_at DESC LIMIT ?`, visitorID, limit)
 func (s *Store) GetAgentByUsername(ctx context.Context, username string) (*Agent, error) {
 	a := &Agent{}
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, username, pass_hash, role, nickname, active, created_at, last_login
-FROM agents WHERE username=? LIMIT 1`, username).Scan(
-		&a.ID, &a.Username, &a.PassHash, &a.Role, &a.Nickname, &a.Active, &a.CreatedAt, &a.LastLogin)
+	SELECT id, username, pass_hash, role, nickname, active, token_version, created_at, last_login
+	FROM agents WHERE username=? LIMIT 1`, username).Scan(
+		&a.ID, &a.Username, &a.PassHash, &a.Role, &a.Nickname, &a.Active, &a.TokenVersion, &a.CreatedAt, &a.LastLogin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -974,9 +1001,9 @@ FROM agents WHERE username=? LIMIT 1`, username).Scan(
 func (s *Store) GetAgentByID(ctx context.Context, id int64) (*Agent, error) {
 	a := &Agent{}
 	err := s.db.QueryRowContext(ctx, `
-SELECT id, username, role, nickname, active, created_at, last_login
-FROM agents WHERE id=? LIMIT 1`, id).Scan(
-		&a.ID, &a.Username, &a.Role, &a.Nickname, &a.Active, &a.CreatedAt, &a.LastLogin)
+	SELECT id, username, role, nickname, active, token_version, created_at, last_login
+	FROM agents WHERE id=? LIMIT 1`, id).Scan(
+		&a.ID, &a.Username, &a.Role, &a.Nickname, &a.Active, &a.TokenVersion, &a.CreatedAt, &a.LastLogin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -997,7 +1024,7 @@ VALUES(?, ?, ?, ?, 1, ?)`,
 
 func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, username, pass_hash, role, nickname, active, created_at, last_login FROM agents ORDER BY id ASC`)
+		`SELECT id, username, pass_hash, role, nickname, active, token_version, created_at, last_login FROM agents ORDER BY id ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1005,7 +1032,7 @@ func (s *Store) ListAgents(ctx context.Context) ([]Agent, error) {
 	var out []Agent
 	for rows.Next() {
 		var a Agent
-		if err := rows.Scan(&a.ID, &a.Username, &a.PassHash, &a.Role, &a.Nickname, &a.Active, &a.CreatedAt, &a.LastLogin); err != nil {
+		if err := rows.Scan(&a.ID, &a.Username, &a.PassHash, &a.Role, &a.Nickname, &a.Active, &a.TokenVersion, &a.CreatedAt, &a.LastLogin); err != nil {
 			return nil, err
 		}
 		a.PassHash = "" // 不外泄
@@ -1020,35 +1047,54 @@ func (s *Store) UpdateAgentLastLogin(ctx context.Context, id int64) error {
 }
 
 func (s *Store) SetAgentActive(ctx context.Context, id int64, active bool) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET active=? WHERE id=?`, active, id)
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET active=?, token_version=token_version+1 WHERE id=?`, active, id)
 	return err
 }
 
 func (s *Store) ResetAgentPassword(ctx context.Context, id int64, passHash string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE agents SET pass_hash=? WHERE id=?`, passHash, id)
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET pass_hash=?, token_version=token_version+1 WHERE id=?`, passHash, id)
+	return err
+}
+
+// BumpAgentTokenVersion 立即吊销该账号签发的全部旧 token。
+func (s *Store) BumpAgentTokenVersion(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE agents SET token_version=token_version+1 WHERE id=?`, id)
 	return err
 }
 
 // ============ File ============
 
 type FileRecord struct {
-	ID          string    `json:"id"`
-	ConvID      string    `json:"conv_id"`
-	UploadBy    string    `json:"upload_by"`
-	UploaderRef string    `json:"uploader_ref"`
-	Filename    string    `json:"filename"`
-	StoreKey    string    `json:"store_key"`
-	Size        int64     `json:"size"`
-	MIME        string    `json:"mime"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID              string    `json:"id"`
+	ConvID          string    `json:"conv_id"`
+	UploadBy        string    `json:"upload_by"`
+	UploaderRef     string    `json:"uploader_ref"`
+	Filename        string    `json:"filename"`
+	StoreKey        string    `json:"store_key"`
+	Size            int64     `json:"size"`
+	MIME            string    `json:"mime"`
+	AccessTokenHash string    `json:"-"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 func (s *Store) InsertFile(ctx context.Context, f *FileRecord) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO files(id, conv_id, upload_by, uploader_ref, filename, store_key, size, mime, created_at)
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		f.ID, f.ConvID, f.UploadBy, f.UploaderRef, f.Filename, f.StoreKey, f.Size, f.MIME, f.CreatedAt)
+INSERT INTO files(id, conv_id, upload_by, uploader_ref, filename, store_key, size, mime, access_token_hash, created_at)
+VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		f.ID, f.ConvID, f.UploadBy, f.UploaderRef, f.Filename, f.StoreKey, f.Size, f.MIME, f.AccessTokenHash, f.CreatedAt)
 	return err
+}
+
+func (s *Store) GetFileByStoreKey(ctx context.Context, key string) (*FileRecord, error) {
+	f := &FileRecord{}
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, conv_id, upload_by, uploader_ref, filename, store_key, size, mime, access_token_hash, created_at
+FROM files WHERE store_key=? LIMIT 1`, key).Scan(
+		&f.ID, &f.ConvID, &f.UploadBy, &f.UploaderRef, &f.Filename, &f.StoreKey, &f.Size, &f.MIME, &f.AccessTokenHash, &f.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return f, err
 }
 
 // ============ Settings (key-value) ============

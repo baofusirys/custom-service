@@ -64,24 +64,20 @@ export class AgentWS {
     }
   }
 
-  // [064] 主动调 refresh，更新 _token + localStorage
+  // [064] 主动调 refresh；管理后台令牌留在 HttpOnly Cookie
   async _refreshToken() {
-    const oldToken = this._token
-    if (!oldToken) return false
     try {
       const baseURL = import.meta.env.VITE_API_BASE || '/api'
       const r = await fetch(baseURL + '/agent/login/refresh', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + oldToken,
         },
+        credentials: 'include',
       })
       if (!r.ok) return false
       const d = await r.json()
       if (d && d.code === 0 && d.token) {
-        this._token = d.token
-        localStorage.setItem('cs_admin_token', d.token)
         return true
       }
     } catch {}
@@ -104,8 +100,11 @@ export class AgentWS {
         }
       }
 
-      const full = `${this.url}?token=${encodeURIComponent(this._token)}`
-      this.sock = new WebSocket(full)
+      // 浏览器 WebSocket 不能自定义 Authorization；JWT 放在 Sec-WebSocket-Protocol，
+      // 绝不进入 URL、历史记录、代理访问日志或 Referer。
+      this.sock = this._token
+        ? new WebSocket(this.url, ['cs-auth', this._token])
+        : new WebSocket(this.url, ['cs-auth'])
       this.sock.onopen = () => {
         this.alive = true
         this.retry = 0

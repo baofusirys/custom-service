@@ -94,9 +94,9 @@ class AgentWS {
         }
       }
 
-      final url = '$wsBaseUrl/ws/agent?token=${Uri.encodeQueryComponent(_token)}';
+      final url = '$wsBaseUrl/ws/agent';
       try {
-        _ch = WebSocketChannel.connect(Uri.parse(url));
+        _ch = WebSocketChannel.connect(Uri.parse(url), protocols: ['cs-auth', _token]);
       } catch (_) {
         _isConnecting = false;
         if (_shouldRun) _scheduleReconnect();

@@ -19,9 +19,9 @@ const router = createRouter({
 })
 
 router.beforeEach((to) => {
-  const tok = localStorage.getItem('cs_admin_token')
-  if (to.path !== '/login' && !tok) return '/login'
-  if (to.path === '/login' && tok) return '/console'
+  const agent = localStorage.getItem('cs_admin_agent')
+  if (to.path !== '/login' && !agent) return '/login'
+  if (to.path === '/login' && agent) return '/console'
 })
 
 export default router

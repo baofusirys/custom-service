@@ -6,8 +6,6 @@
     # 这样可以解决「docker compose 重启后容器换 IP，nginx upstream 静态解析旧 IP 把请求
     # 转到错误容器」的问题。
 
-    # [062] 移除 limit_conn（按 IP 并发连接数限制）
-
     # 管理后台静态文件：把 /admin/ 反代到 admin 容器
     # 变量 proxy_pass 时 nginx 不做 URI 重写，所以用 rewrite ... break; 去掉 /admin 前缀
     location /admin/ {
@@ -44,12 +42,11 @@
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
         add_header X-Content-Type-Options "nosniff" always;
         add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-        # widget loader.js / chat.html 要被任意域 fetch + iframe，CORS 允许全部
-        add_header Access-Control-Allow-Origin "*" always;
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' wss:; object-src 'none'; frame-ancestors *" always;
         # 故意不加 X-Frame-Options（这就是这次的关键修复）
     }
 
-    # [062] 登录接口移除按 IP 限速，仅靠 bcrypt cost=12 (~250ms/次) 自然防爆破
+    # 登录限流与失败锁定由 backend 统一执行，按真实 IP 和账号维度计数。
     location = /api/agent/login {
         set $backend_host backend;
         proxy_pass http://$backend_host:8080$request_uri;
@@ -62,7 +59,7 @@
         proxy_set_header X-Trace-ID $request_id;
     }
 
-    # [062] 一般 API 移除按 IP 限速
+    # API 业务限流由 backend 按动作和身份维度执行。
     location /api/ {
         set $backend_host backend;
         proxy_pass http://$backend_host:8080$request_uri;

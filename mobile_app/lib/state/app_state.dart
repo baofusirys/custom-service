@@ -121,6 +121,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> logout() async {
+    await Api.logout();
     stopWs();
     convs.clear();
     activeConv = null;

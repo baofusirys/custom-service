@@ -2,32 +2,28 @@ package security
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
+	"fmt"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
-// 限流 / 安全计数（爷爷铁律 + [062] 调整后剩余防御层）：
+// 限流 / 安全计数：
 //
-// [062] 大改：移除按 IP 的所有限流机制（集成方 NAT 后多设备同 IP 误封代价过高）。
-// 当前保留的「非 IP 维度」防御：
-//   1. 按访客 session 的消息/分钟 — 超出临时静音（不影响其他访客）
-//   2. SQL 注入启发式检测（service.go 调 RecordViolation，仅写安全日志）
-//   3. 各类登录失败 / MIME 黑名单 / 异常输入（LogSecurityWarn 写日志）
+// 关键动作同时按 IP、账号和令牌维度计数，访客消息仍按 visitor session 限流。
 //
-// 移除的功能（CHANGELOG [062] 详记）：
-//   - HTTPMiddleware（按 IP 的 HTTP RPM 限流）→ 删
-//   - AllowWSHandshake（按 IP 的 WSS 握手 PM 限流）→ 删
-//   - 自动拉黑（24h 内 viol 累计达阈值 bl:<ip>=1）→ 删
-//   - 按 IP 的 violation 计数 → 改为按业务实体（visitor: 前缀）只为审计
-//
-// 剩余仍然有效的纵深防御（不在本文件）：
-//   - Nginx：[062] 移除 limit_req / limit_conn 后仅靠 set_real_ip_from + WAF/SSL
-//   - JWT visitor / agent token（有 TTL，过期失效）
+// 纵深防御：
+//   - Nginx/应用按动作限流 + 失败锁定 + 本地 SVG 验证码
+//   - JWT visitor / agent token（短 TTL，agent token_version 可立即吊销）
 //   - bcrypt cost=12（agent 密码 hash ≈ 250ms/次，自然防爆破）
 //   - CORS（widget 跨域请求 origin 校验）
 //   - AES-GCM 敏感字段加密 + HMAC-SHA256 IP hash 索引
@@ -38,15 +34,144 @@ type RateLimiter struct {
 	secLog *zap.Logger
 }
 
-// NewRateLimiter [062] 删除 blacklistThreshold 参数（不再自动拉黑）。
+// AllowAction 为登录、上传、批量及邮件入口提供多维度限流。每个维度独立计数，
+// 既能挡单 IP，也能挡换 IP 撞同一账号/令牌；Redis 失败时拒绝高风险动作。
+func (r *RateLimiter) AllowAction(ctx context.Context, action string, limit int, window time.Duration, dimensions ...string) (bool, error) {
+	if r == nil || r.rdb == nil || limit <= 0 {
+		return true, nil
+	}
+	for _, dimension := range dimensions {
+		if strings.TrimSpace(dimension) == "" {
+			continue
+		}
+		key := "rl:" + action + ":" + hashDimension(dimension)
+		ok, err := r.allow(ctx, key, limit, window)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func hashDimension(v string) string {
+	s := sha256.Sum256([]byte(v))
+	return hex.EncodeToString(s[:])
+}
+
+// LoginLocked / RecordLoginFailure / ClearLoginFailures 实现账户 + IP 双维度失败锁定。
+func (r *RateLimiter) LoginLocked(ctx context.Context, username, ip string) (bool, error) {
+	if r == nil || r.rdb == nil {
+		return false, nil
+	}
+	for _, key := range []string{"auth:lock:user:" + hashDimension(username), "auth:lock:ip:" + hashDimension(ip)} {
+		n, err := r.rdb.Exists(ctx, key).Result()
+		if err != nil {
+			return true, err
+		}
+		if n > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (r *RateLimiter) RecordLoginFailure(ctx context.Context, username, ip string) (locked bool, captchaRequired bool, err error) {
+	if r == nil || r.rdb == nil {
+		return false, false, nil
+	}
+	pipe := r.rdb.TxPipeline()
+	keys := []string{"auth:fail:user:" + hashDimension(username), "auth:fail:ip:" + hashDimension(ip)}
+	counts := make([]*redis.IntCmd, 0, len(keys))
+	for _, key := range keys {
+		counts = append(counts, pipe.Incr(ctx, key))
+		pipe.Expire(ctx, key, 15*time.Minute)
+	}
+	if _, err = pipe.Exec(ctx); err != nil {
+		return false, false, err
+	}
+	max := int64(0)
+	for _, c := range counts {
+		if c.Val() > max {
+			max = c.Val()
+		}
+	}
+	if max >= 5 {
+		lockPipe := r.rdb.TxPipeline()
+		for _, key := range []string{"auth:lock:user:" + hashDimension(username), "auth:lock:ip:" + hashDimension(ip)} {
+			lockPipe.Set(ctx, key, "1", 15*time.Minute)
+		}
+		_, err = lockPipe.Exec(ctx)
+		return err == nil, true, err
+	}
+	return false, max >= 3, nil
+}
+
+func (r *RateLimiter) ClearLoginFailures(ctx context.Context, username, ip string) {
+	if r == nil || r.rdb == nil {
+		return
+	}
+	_ = r.rdb.Del(ctx,
+		"auth:fail:user:"+hashDimension(username), "auth:fail:ip:"+hashDimension(ip),
+		"auth:lock:user:"+hashDimension(username), "auth:lock:ip:"+hashDimension(ip)).Err()
+}
+
+func (r *RateLimiter) LoginCaptchaRequired(ctx context.Context, username, ip string) bool {
+	if r == nil || r.rdb == nil {
+		return false
+	}
+	for _, key := range []string{"auth:fail:user:" + hashDimension(username), "auth:fail:ip:" + hashDimension(ip)} {
+		n, err := r.rdb.Get(ctx, key).Int64()
+		if err == nil && n >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+// IssueCaptcha 生成本服务内 SVG 图形验证码，不依赖外部服务。
+func (r *RateLimiter) IssueCaptcha(ctx context.Context, subject string) (id, svg string, err error) {
+	if r == nil || r.rdb == nil {
+		return "", "", nil
+	}
+	b := make([]byte, 4)
+	if _, err = rand.Read(b); err != nil {
+		return "", "", err
+	}
+	answer := fmt.Sprintf("%d%d%d%d", b[0]%10, b[1]%10, b[2]%10, b[3]%10)
+	id = uuid.NewString()
+	sum := sha256.Sum256([]byte(answer))
+	if err = r.rdb.Set(ctx, "captcha:"+hashDimension(subject)+":"+id, hex.EncodeToString(sum[:]), 5*time.Minute).Err(); err != nil {
+		return "", "", err
+	}
+	// 数字来自密码学随机字节，SVG 固定模板，不拼接用户输入。
+	svg = `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="48" role="img" aria-label="验证码"><rect width="150" height="48" fill="#f3f4f6"/><text x="75" y="32" text-anchor="middle" font-size="24" font-family="monospace" letter-spacing="5">` + answer + `</text></svg>`
+	return id, svg, nil
+}
+
+func (r *RateLimiter) VerifyCaptcha(ctx context.Context, subject, id, answer string) bool {
+	if r == nil || r.rdb == nil || id == "" || len(answer) != 4 {
+		return false
+	}
+	sum := sha256.Sum256([]byte(answer))
+	want, err := r.rdb.Get(ctx, "captcha:"+hashDimension(subject)+":"+id).Result()
+	if err != nil || subtle.ConstantTimeCompare([]byte(want), []byte(hex.EncodeToString(sum[:]))) != 1 {
+		return false
+	}
+	_ = r.rdb.Del(ctx, "captcha:"+hashDimension(subject)+":"+id).Err()
+	return true
+}
+
+// NewRateLimiter 创建统一 Redis 限流器；高风险入口由调用方组合 IP、账号和令牌维度。
 func NewRateLimiter(rdb *redis.Client, secLog *zap.Logger) *RateLimiter {
 	return &RateLimiter{rdb: rdb, secLog: secLog}
 }
 
 // ClientIP 取真实 IP。Nginx 已经设置 X-Forwarded-For / X-Real-IP，
 // 我们信第一个非内网的地址，避免代理链伪造。
-// [062] 注意：IP 不再用于限流/拉黑，但仍用于审计日志、ip_cipher / ip_hash 落库、
-// 「关联访客」面板查同 IP 历史 vid，所以 ClientIP 函数保留并继续被广泛调用。
+// IP 用于限流、失败锁定、审计日志及 ip_cipher / ip_hash 关联访客查询。
 func ClientIP(c *gin.Context) string {
 	// 1) X-Real-IP
 	if ip := strings.TrimSpace(c.GetHeader("X-Real-IP")); ip != "" {
@@ -91,9 +216,7 @@ func (r *RateLimiter) allow(ctx context.Context, key string, limit int, window t
 }
 
 // RecordViolation 上报真实攻击行为（SQL 注入嫌疑、访客刷消息等）。
-// [062] 重大变更：不再触发自动拉黑（24h bl:<ip>=1），改为只写安全日志 + 累计计数。
-// 24h 计数 viol:<key> 仍然保留，方便事后审计追溯，但**不再有任何阻断行为**。
-// 调用方传入的 key 通常是 "visitor:<vid>" 等业务实体，不再按 IP 拉黑。
+// 违规计数用于审计追溯；具体阻断由 AllowAction 与登录失败锁定按动作执行。
 func (r *RateLimiter) RecordViolation(ctx context.Context, key, kind, detail string) {
 	violKey := "viol:" + key
 	pipe := r.rdb.TxPipeline()

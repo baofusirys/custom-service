@@ -1,12 +1,16 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -60,6 +64,17 @@ func main() {
 	defer conn.Close()
 
 	migCtx, migCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if pending, pendingErr := db.PendingMigrations(migCtx, conn, "/app/migrations"); pendingErr != nil {
+		migCancel()
+		log.Fatalf("[FATAL] 检查迁移状态失败: %v", pendingErr)
+	} else if len(pending) > 0 {
+		bizLog.Info("migration_pre_backup_start", zap.String("version", pending[0]))
+		if err := backupBeforeMigration(migCtx, cfg, pending[0], "/app/pre-migrate"); err != nil {
+			migCancel()
+			log.Fatalf("[FATAL] 迁移前备份失败，已中止迁移: %v", err)
+		}
+		bizLog.Info("migration_pre_backup_complete", zap.String("version", pending[0]))
+	}
 	applied, err := db.Migrate(migCtx, conn, "/app/migrations")
 	migCancel()
 	if err != nil {
@@ -81,8 +96,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("[FATAL] 加密器初始化失败: %v", err)
 	}
-	// [062] NewRateLimiter 去掉拉黑阈值参数（不再自动拉黑），仅给 service 提供
-	// AllowVisitorMessage / RecordViolation / LogSecurityWarn 三个日志/per-visitor 维度方法
+	// 统一限流器：访客消息按会话，登录/上传/握手按 IP、账号、令牌组合计数。
 	limiter := security.NewRateLimiter(rdb, secLog)
 
 	// === [060] GeoIP 解析器（ip2region xdb v2，~11MB 全内存索引）===
@@ -135,13 +149,13 @@ func main() {
 	r.Use(middleware.Recovery(bizLog))
 	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.AccessLog(bizLog))
-	// CORS：widget 跨域请求需要放开；Nginx 同源时不会触发；后端兜底
+	// CORS：只允许 .env 明确配置的来源，拒绝 * 和任意 Origin 反射。
 	r.Use(cors.New(cors.Config{
-		AllowAllOrigins:  true,
+		AllowOrigins:     cfg.CORSAllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type"},
 		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: false,
+		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
 
@@ -151,9 +165,7 @@ func main() {
 		api.GET("/health", h.Health)
 		api.GET("/version", h.Version) // [053] 集成方对比 deployed vs upstream 最新版用
 
-		// 访客侧（无需登录，靠 visitor JWT token + CORS + SSL；
-		// [062] 移除按 IP 限流中间件——爷爷决策：所有 IP 维度限流去掉，避免集成方
-		// NAT 后多设备同 IP 误封；剩余防御层：per-visitor 消息限流 / JWT / SQL 注入启发式检测 / agent auth）
+		// 访客侧（无需登录，靠 visitor JWT token、Origin/CORS、SSL 和 IP/会话限流）。
 		visitor := api.Group("/visitor")
 		{
 			visitor.POST("/session", h.VisitorSession)
@@ -162,15 +174,16 @@ func main() {
 			visitor.GET("/turn-credential", h.TurnCredential)
 		}
 
-		// 客服登录（[062] 不再走 IP HTTP 限流，靠 bcrypt cost=12 ~ 250ms/次自然防爆破）
+		// 客服登录：IP/账号限流、失败锁定/验证码和 bcrypt 共同防爆破。
 		api.POST("/agent/login", h.AgentLogin)
 		// [064] token 续期：解决 [068] iOS App 12h 后 401 死循环问题
 		// 不挂 AgentAuth middleware 因为 token 可能已过期（ParseAgentTokenAllowExpired 自己处理）
 		api.POST("/agent/login/refresh", h.RefreshAgentToken)
 
 		// 客服已登录
-		ag := api.Group("/agent", middleware.AgentAuth(cfg.JWTSecret))
+		ag := api.Group("/agent", middleware.AgentAuthWithStore(cfg.JWTSecret, st))
 		{
+			ag.POST("/logout", h.AgentLogout)
 			ag.GET("/conversations", h.ListConversations)
 			ag.GET("/conversations/:id/messages", h.ListMessages)
 			ag.POST("/conversations/:id/assign", h.AssignSelf)
@@ -185,7 +198,7 @@ func main() {
 		}
 
 		// 管理（仅 admin）
-		adm := api.Group("/admin", middleware.AgentAuth(cfg.JWTSecret), middleware.AdminOnly())
+		adm := api.Group("/admin", middleware.AgentAuthWithStore(cfg.JWTSecret, st), middleware.AdminOnly())
 		{
 			adm.GET("/agents", h.ListAgents)
 			adm.POST("/agents", h.CreateAgent)
@@ -230,6 +243,46 @@ func main() {
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
 	hubCancel()
+}
+
+func backupBeforeMigration(ctx context.Context, cfg *config.Config, version, dir string) error {
+	if version == "001_init" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	name := fmt.Sprintf("pre-migrate-%s-%s.sql.gz", time.Now().In(cfg.Timezone).Format("20060102-150405-0700"), version)
+	path := filepath.Join(dir, name)
+	out, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	zw := gzip.NewWriter(out)
+	cmd := exec.CommandContext(ctx, "mysqldump", "--single-transaction", "--routines", "--events", "--hex-blob",
+		"-h", cfg.MySQL.Host, "-P", cfg.MySQL.Port, "-u", cfg.MySQL.User, cfg.MySQL.Database)
+	cmd.Env = append(os.Environ(), "MYSQL_PWD="+cfg.MySQL.Password)
+	cmd.Stdout = zw
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		_ = zw.Close()
+		return fmt.Errorf("mysqldump failed: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		return err
+	}
+	info, err := out.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() <= 0 {
+		return fmt.Errorf("backup file is empty: %s", name)
+	}
+	return nil
 }
 
 // ensureDatabaseExists 用 root 连接建库（CREATE DATABASE IF NOT EXISTS）。

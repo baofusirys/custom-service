@@ -8,6 +8,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
+
+	"github.com/custom-service/backend/internal/security"
 )
 
 const (
@@ -147,7 +149,7 @@ func (c *Client) readPump() {
 		c.rawLog.Info("WebSocket frame received",
 			zap.String("event", "ws_frame_rx"), zap.String("trace_id", traceID), zap.String("request_id", traceID),
 			zap.String("conn", c.ConnID), zap.Int("kind", int(c.Kind)), zap.String("actor_id", c.ID),
-			zap.ByteString("payload", raw))
+			zap.ByteString("payload", security.RedactJSONPayload(raw)))
 		if decodeErr != nil {
 			c.log.Warn("ws malformed json",
 				zap.String("conn", c.ConnID), zap.Error(decodeErr))
@@ -173,7 +175,7 @@ func (c *Client) writePump() {
 		c.rawLog.Info("WebSocket frame sent",
 			zap.String("event", "ws_frame_tx"), zap.String("trace_id", frame.traceID), zap.String("request_id", frame.traceID),
 			zap.String("conn", c.ConnID), zap.Int("kind", int(c.Kind)), zap.String("actor_id", c.ID),
-			zap.ByteString("payload", frame.data))
+			zap.ByteString("payload", security.RedactJSONPayload(frame.data)))
 		return true
 	}
 

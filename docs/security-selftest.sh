@@ -40,16 +40,12 @@ echo "  10 次请求 HTTP 状态：${HTTPS_CODES[*]}"
 echo "${HTTPS_CODES[*]}" | grep -q "429" && ok "出现 429（限速生效）" || bad "未限速（注意 Nginx burst=5 nodelay）"
 
 # ============================================================
-case_title "4) WSS 握手频率限制（单 IP / 分钟）"
-WS_429=0
-for i in $(seq 1 30); do
-  CODE=$(curl -sko /dev/null -w "%{http_code}" \
-    -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
-    -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGVzdA==' \
-    "$BASE/ws/visitor?token=invalid-but-rate-check-first")
-  [ "$CODE" = "429" ] && WS_429=$((WS_429+1))
-done
-[ $WS_429 -gt 0 ] && ok "WSS 握手限速触发 ($WS_429 次 429)" || bad "WSS 握手未限速（检查 backend SECURITY_IP_WS_HANDSHAKE_PM）"
+case_title "4) WSS query token 必须拒绝"
+CODE=$(curl -sko /dev/null -w "%{http_code}" \
+  -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGVzdA==' \
+  "$BASE/ws/visitor?token=must-not-be-accepted")
+[ "$CODE" = "400" ] && ok "query token 被拒绝" || bad "query token 未按预期拒绝：$CODE"
 
 # ============================================================
 case_title "5) 巨大文件应被拒绝（Nginx client_max_body_size 25m）"

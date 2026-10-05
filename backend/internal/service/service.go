@@ -90,6 +90,8 @@ func (s *Service) PreprocessVisitorMessage(ctx context.Context, e *ws.Envelope, 
 		}
 		e.Content = security.SanitizeText(e.Content)
 	}
+	e.MediaURL = security.SafeMediaURL(e.MediaURL)
+	e.MediaName = security.SanitizeText(e.MediaName)
 	return true
 }
 
@@ -119,6 +121,8 @@ func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c 
 	if e.Content != "" {
 		e.Content = security.SanitizeText(e.Content)
 	}
+	e.MediaURL = security.SafeMediaURL(e.MediaURL)
+	e.MediaName = security.SanitizeText(e.MediaName)
 	return true
 }
 
@@ -153,7 +157,11 @@ func (s *Service) OnPageNavigation(visitorID, convID, url, title string) {
 		return
 	}
 	// 清洗 + 限长（防 XSS / 防超长内容）
-	url = security.SanitizeText(url)
+	if safeURL, err := security.ValidatePublicURL(url); err == nil {
+		url = safeURL
+	} else {
+		url = ""
+	}
 	title = security.SanitizeText(title)
 	if len(url) > 1024 {
 		url = url[:1024]
@@ -689,9 +697,9 @@ func buildMsg(e *ws.Envelope, sender, senderRef string) *store.Message {
 		DeliveredWS: false,
 	}
 	if e.MediaURL != "" {
-		m.MediaURL = sql.NullString{String: e.MediaURL, Valid: true}
+		m.MediaURL = sql.NullString{String: security.SafeMediaURL(e.MediaURL), Valid: true}
 		m.MediaKind = sql.NullString{String: e.MediaKind, Valid: true}
-		m.MediaName = sql.NullString{String: e.MediaName, Valid: true}
+		m.MediaName = sql.NullString{String: security.SanitizeText(e.MediaName), Valid: true}
 		if e.MediaSize > 0 {
 			m.MediaSize = sql.NullInt64{Int64: e.MediaSize, Valid: true}
 		}

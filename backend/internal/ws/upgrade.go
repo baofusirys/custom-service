@@ -8,11 +8,12 @@ import (
 )
 
 // 跨站点嵌入：Widget 可以从任意域名加载，因此 CheckOrigin 必须放开。
-// 实际安全靠：JWT(VisitorToken) + Nginx 限流 + IP 限流 + WSS 握手频率限制。
+// 实际安全靠：JWT(VisitorToken/AgentToken) + Origin 白名单 + 多维限流 + WSS 握手校验。
 var upgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 4096,
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	ReadBufferSize:    4096,
+	WriteBufferSize:   4096,
+	CheckOrigin:       func(r *http.Request) bool { return true },
+	Subprotocols:      []string{"cs-auth"},
 	EnableCompression: true,
 }
 
@@ -37,4 +38,3 @@ func UpgradeAgent(h *Hub, w http.ResponseWriter, r *http.Request, agentID, convI
 	h.Register(c)
 	return c, nil
 }
-

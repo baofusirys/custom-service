@@ -304,6 +304,17 @@ func (h *Hub) AttachAgentToConv(agentID, convID string) {
 	}
 }
 
+// CloseAgent 关闭某账号的全部实时连接。账号禁用、改密或主动退出时调用，
+// 让 token_version 吊销立即覆盖已建立的 WebSocket 会话。
+func (h *Hub) CloseAgent(agentID string) {
+	if v, ok := h.agents.Load(agentID); ok {
+		v.(*sync.Map).Range(func(_, cv any) bool {
+			cv.(*Client).close()
+			return true
+		})
+	}
+}
+
 func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 	e := in.Env
 	c := in.Client

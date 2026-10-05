@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/custom-service/backend/internal/security"
+	"github.com/custom-service/backend/internal/store"
 )
 
 // AccessLog 记录每条 HTTP 请求到 business 日志（爷爷铁律：细致、原始）。
@@ -85,8 +86,23 @@ func SecurityHeaders() gin.HandlerFunc {
 //	code=40102 登录已过期（token expired）       → 客户端可调 /agent/login/refresh 续 token
 //	code=40103 token 无效（签名错 / 篡改）       → 客户端走登录页
 func AgentAuth(secret []byte) gin.HandlerFunc {
+	return agentAuth(secret, nil)
+}
+
+// AgentAuthWithStore 在每个请求重新读取账号状态和 token_version，确保禁用账号、改密或
+// 主动吊销后旧 JWT 立即失效；JWT 签名本身不足以表达服务端会话失效。
+func AgentAuthWithStore(secret []byte, st *store.Store) gin.HandlerFunc {
+	return agentAuth(secret, st)
+}
+
+func agentAuth(secret []byte, st *store.Store) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if tok == "" {
+			if cookie, err := c.Cookie("cs_session"); err == nil {
+				tok = cookie
+			}
+		}
 		if tok == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40101, "msg": "未登录"})
 			return
@@ -99,6 +115,13 @@ func AgentAuth(secret []byte) gin.HandlerFunc {
 			}
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40103, "msg": "token 无效"})
 			return
+		}
+		if st != nil {
+			agent, dbErr := st.GetAgentByID(c.Request.Context(), claims.AgentID)
+			if dbErr != nil || agent == nil || !agent.Active || agent.TokenVersion != claims.Version {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40108, "msg": "会话已失效，请重新登录"})
+				return
+			}
 		}
 		c.Set("agent_id", claims.AgentID)
 		c.Set("agent_username", claims.Username)

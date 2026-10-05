@@ -1,12 +1,14 @@
 # 安全机制清单
 
+> v0.7.4 安全补丁的影响范围、迁移、回滚、隔离测试和令牌泄露处置见 [`security-release-0.7.4.md`](./security-release-0.7.4.md)。本次未连接或测试正在运行其他项目的服务器。
+
 > 爷爷铁律：「所有安全机制不要形同虚设，你要帮我验证！要对安全机制进行『绕过』类型的测试」。
 > 下面每一项都附带「如何验证 / 如何尝试绕过」。
 
 ## 1. 防 SQL 注入
 
 - **机制**：100% 使用 `database/sql` 的 `?` 占位符；DSN 关闭 `interpolateParams`（驱动不在客户端拼 SQL，全部走服务端 prepared statement）。
-- **额外侦测**：`security.DetectSQLInjection` 对访客输入做模式匹配，发现可疑 payload 时记录 + 计数（达到阈值触发 IP 拉黑），但不依赖它来拦截。
+- **额外侦测**：`security.DetectSQLInjection` 对访客输入做模式匹配，发现可疑 payload 时记录 + 计数；登录、上传和批量入口再按 IP/账号/令牌多维限流，登录失败按账号和 IP 锁定。
 - **绕过测试**：
   ```bash
   curl -X POST https://<域名>/api/agent/login \
@@ -36,7 +38,7 @@
       https://<域名>/api/agent/login &
   done
   # 期望：Nginx 层先被 429；后端只见到 ~120 次（2 r/s * 60s burst）
-  # 实际行为：随后 IP 在 Redis 累计被记 violation；达到阈值即 24h 拉黑。
+  # 实际行为：随后在 Redis 累计 violation 供审计；阻断由具体入口的多维限流和失败锁定执行。
   ```
 
 ## 4. 防访客刷消息

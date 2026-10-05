@@ -2,10 +2,10 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +31,51 @@ type HTTP struct {
 	svc     *service.Service
 	hub     *ws.Hub
 	uploads string
+}
+
+func publicURLOrEmpty(raw string) string {
+	v, err := security.ValidatePublicURL(raw)
+	if err != nil {
+		return ""
+	}
+	return v
+}
+
+func (h *HTTP) allowedWSOrigin(c *gin.Context) bool {
+	origin := strings.TrimRight(strings.TrimSpace(c.GetHeader("Origin")), "/")
+	if origin == "" || len(h.cfg.CORSAllowedOrigins) == 0 {
+		return origin == "" || origin == "https://"+h.cfg.PublicDomain || origin == "http://"+h.cfg.PublicDomain
+	}
+	for _, allowed := range h.cfg.CORSAllowedOrigins {
+		if origin == strings.TrimRight(allowed, "/") {
+			return true
+		}
+	}
+	return false
+}
+
+func websocketToken(c *gin.Context) string {
+	auth := strings.TrimSpace(c.GetHeader("Authorization"))
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	}
+	// 浏览器 WebSocket API 不能自定义 Authorization，客户端以第二个 subprotocol 传递 JWT。
+	for _, p := range strings.Split(c.GetHeader("Sec-WebSocket-Protocol"), ",") {
+		p = strings.TrimSpace(p)
+		if p == "cs-auth" || strings.HasPrefix(p, "cs-auth.") {
+			if strings.HasPrefix(p, "cs-auth.") {
+				return strings.TrimPrefix(p, "cs-auth.")
+			}
+			continue
+		}
+		if strings.Count(p, ".") == 2 {
+			return p
+		}
+	}
+	if cookie, err := c.Cookie("cs_session"); err == nil {
+		return cookie
+	}
+	return ""
 }
 
 func NewHTTP(cfg *config.Config, svc *service.Service, hub *ws.Hub, uploadsDir string) *HTTP {
@@ -86,6 +131,11 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 	if r.SiteID == "" {
 		r.SiteID = "default"
 	}
+	if ok, err := h.svc.Limiter().AllowAction(c.Request.Context(), "visitor_session", 60, time.Minute, "ip:"+security.ClientIP(c)); err != nil || !ok {
+		h.svc.Limiter().LogSecurityWarn(security.ClientIP(c), "visitor_session_rate_limited", "")
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": 42904, "msg": "请求过于频繁，请稍后重试"})
+		return
+	}
 	r.Identifier = security.SanitizeText(r.Identifier)
 	if len(r.UA) > 480 {
 		r.UA = r.UA[:480]
@@ -109,8 +159,8 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		UA:         r.UA,
 		Country:    geo.Country,
 		City:       geo.City,
-		Referer:    r.Referer,
-		LastPage:   r.LastPage,
+		Referer:    publicURLOrEmpty(r.Referer),
+		LastPage:   publicURLOrEmpty(r.LastPage),
 		Identifier: r.Identifier,
 		LastSeen:   now,
 	}
@@ -140,7 +190,7 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50002, "msg": "创建会话失败"})
 		return
 	}
-	tok, err := security.IssueVisitorToken(h.cfg.JWTSecret, v.ID, v.SiteID, 12*time.Hour)
+	tok, err := security.IssueVisitorToken(h.cfg.JWTSecret, v.ID, v.SiteID, 2*time.Hour)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50003, "msg": "签发 token 失败"})
 		return
@@ -161,11 +211,23 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// VisitorWS 访客的 WSS 入口。query: token=<visitor_token>
-// [062] 移除按 IP 的 WSS 握手限流（爷爷决策）；防御层缩窄为：visitor JWT token 校验 + WSS 自身 origin / SSL
+// VisitorWS 访客的 WSS 入口。JWT 只能放 Authorization 或 Sec-WebSocket-Protocol，禁止 query。
 func (h *HTTP) VisitorWS(c *gin.Context) {
 	ctx := c.Request.Context()
-	tok := c.Query("token")
+	if ok, err := h.svc.Limiter().AllowAction(ctx, "visitor_ws", 30, time.Minute, "ip:"+security.ClientIP(c)); err != nil || !ok {
+		h.svc.Limiter().LogSecurityWarn(security.ClientIP(c), "visitor_ws_rate_limited", "")
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"code": 42905, "msg": "连接过于频繁，请稍后重试"})
+		return
+	}
+	if c.Query("token") != "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 40041, "msg": "WebSocket 禁止在 URL 中携带 token"})
+		return
+	}
+	if !h.allowedWSOrigin(c) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 40304, "msg": "来源不允许"})
+		return
+	}
+	tok := websocketToken(c)
 	if tok == "" {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40103, "msg": "缺少 token"})
 		return
@@ -186,8 +248,10 @@ func (h *HTTP) VisitorWS(c *gin.Context) {
 // =========== 客服侧 ===========
 
 type AgentLoginReq struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username    string `json:"username" binding:"required"`
+	Password    string `json:"password" binding:"required"`
+	CaptchaID   string `json:"captcha_id"`
+	CaptchaCode string `json:"captcha_code"`
 }
 
 func (h *HTTP) AgentLogin(c *gin.Context) {
@@ -199,11 +263,45 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 	r.Username = strings.TrimSpace(r.Username)
 	ctx := c.Request.Context()
 	ip := security.ClientIP(c)
+	rateUsername := strings.ToLower(r.Username)
+	captchaSubject := ip + "|" + rateUsername
+	if ok, err := h.svc.Limiter().AllowAction(ctx, "login", 10, time.Minute, "ip:"+ip, "user:"+rateUsername); err != nil || !ok {
+		h.svc.Limiter().LogSecurityWarn(ip, "agent_login_rate_limited", r.Username)
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": 42901, "msg": "请求过于频繁，请稍后再试"})
+		return
+	}
+	locked, lockErr := h.svc.Limiter().LoginLocked(ctx, rateUsername, ip)
+	if lockErr != nil {
+		h.svc.SecurityLog().Error("agent_login_lock_check_failed", zap.String("ip", ip), zap.Error(lockErr))
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": 50301, "msg": "登录服务暂不可用"})
+		return
+	}
+	if locked {
+		h.svc.Limiter().LogSecurityWarn(ip, "agent_login_locked", r.Username)
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": 42902, "msg": "账号或来源已临时锁定"})
+		return
+	}
+	if h.svc.Limiter().LoginCaptchaRequired(ctx, r.Username, ip) &&
+		!h.svc.Limiter().VerifyCaptcha(ctx, captchaSubject, r.CaptchaID, r.CaptchaCode) {
+		captchaID, captchaSVG, _ := h.svc.Limiter().IssueCaptcha(ctx, captchaSubject)
+		h.svc.Limiter().LogSecurityWarn(ip, "agent_login_captcha_required", r.Username)
+		c.JSON(http.StatusUnauthorized, gin.H{"code": 40106, "msg": "请完成图形验证码", "captcha_id": captchaID, "captcha_svg": captchaSVG})
+		return
+	}
 
 	a, err := h.svc.Store().GetAgentByUsername(ctx, r.Username)
 	if err != nil || a == nil {
 		// 用户输错账号是常见情况，不计 violation（防爆破靠 Nginx login_rps 2 r/s + bcrypt 慢）
+		_, captcha, failureErr := h.svc.Limiter().RecordLoginFailure(ctx, rateUsername, ip)
+		if failureErr != nil {
+			h.svc.SecurityLog().Error("agent_login_failure_record_failed", zap.String("ip", ip), zap.Error(failureErr))
+			c.JSON(http.StatusServiceUnavailable, gin.H{"code": 50301, "msg": "登录服务暂不可用"})
+			return
+		}
 		h.svc.Limiter().LogSecurityWarn(ip, "agent_login_fail_nouser", r.Username)
+		if captcha {
+			c.Header("X-Captcha-Required", "1")
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40105, "msg": "账号或密码错误"})
 		return
 	}
@@ -212,11 +310,21 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 		return
 	}
 	if !security.CheckPassword(a.PassHash, r.Password) {
+		_, captcha, failureErr := h.svc.Limiter().RecordLoginFailure(ctx, rateUsername, ip)
+		if failureErr != nil {
+			h.svc.SecurityLog().Error("agent_login_failure_record_failed", zap.String("ip", ip), zap.Error(failureErr))
+			c.JSON(http.StatusServiceUnavailable, gin.H{"code": 50301, "msg": "登录服务暂不可用"})
+			return
+		}
 		h.svc.Limiter().LogSecurityWarn(ip, "agent_login_fail_password", r.Username)
+		if captcha {
+			c.Header("X-Captcha-Required", "1")
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40105, "msg": "账号或密码错误"})
 		return
 	}
-	tok, err := security.IssueAgentToken(h.cfg.JWTSecret, a.ID, a.Username, a.Role, 12*time.Hour)
+	h.svc.Limiter().ClearLoginFailures(ctx, rateUsername, ip)
+	tok, err := security.IssueAgentTokenWithVersion(h.cfg.JWTSecret, a.ID, a.Username, a.Role, a.TokenVersion, 30*time.Minute)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50005, "msg": "签发 token 失败"})
 		return
@@ -225,6 +333,10 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 	h.svc.AuditLog().Info("agent_login",
 		zap.String("username", a.Username), zap.String("ip", ip))
 	h.svc.Store().AuditLog(ctx, a.Username, "login", "", "", ip)
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name: "cs_session", Value: tok, Path: "/", MaxAge: 30 * 60,
+		HttpOnly: true, Secure: h.cfg.EnableHTTPS, SameSite: http.SameSiteStrictMode,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"code":  0,
 		"token": tok,
@@ -234,14 +346,28 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 	})
 }
 
+// AgentLogout 主动吊销该账号当前及历史会话。
+func (h *HTTP) AgentLogout(c *gin.Context) {
+	aid, _ := c.Get("agent_id")
+	id, ok := aid.(int64)
+	if !ok || h.svc.Store().BumpAgentTokenVersion(c.Request.Context(), id) != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50020, "msg": "退出失败"})
+		return
+	}
+	h.svc.Store().AuditLog(c.Request.Context(), fmt.Sprintf("%v", c.MustGet("agent_username")), "logout", fmt.Sprintf("agent:%d", id), "session_revoked", security.ClientIP(c))
+	h.hub.CloseAgent(fmt.Sprintf("%d", id))
+	http.SetCookie(c.Writer, &http.Cookie{Name: "cs_session", Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: h.cfg.EnableHTTPS, SameSite: http.SameSiteStrictMode})
+	c.JSON(http.StatusOK, gin.H{"code": 0})
+}
+
 // RefreshAgentToken [064] 客户端用即将过期 / 已过期不久的 token 换新 token。
 //
 // 设计要点（解决 [068] iOS App 12h 后 401 死循环问题）：
-//  1. 必须 Authorization: Bearer <oldToken> 带旧 token
+//  1. 可用 Authorization: Bearer <oldToken> 或 HttpOnly cs_session Cookie 带旧 token
 //  2. 旧 token 用 ParseAgentTokenAllowExpired 解析（允许 exp 已过），但签名/sub 必须 valid
 //  3. grace period 24h：过期超过 24h 的拒绝（防止失效太久的 token 被无限续命）
 //  4. 重新查 DB agent 仍 active（防止已禁用的 agent 续 token）
-//  5. 签发同样 12h TTL 的新 token + 写 audit log
+//  5. 签发同样 30m TTL 的新 token + 写 audit log
 //
 // 错误码：
 //
@@ -252,11 +378,16 @@ func (h *HTTP) AgentLogin(c *gin.Context) {
 //	50019 后端签发失败
 func (h *HTTP) RefreshAgentToken(c *gin.Context) {
 	auth := c.GetHeader("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
+	oldToken := ""
+	if strings.HasPrefix(auth, "Bearer ") {
+		oldToken = strings.TrimPrefix(auth, "Bearer ")
+	} else if cookie, cookieErr := c.Cookie("cs_session"); cookieErr == nil {
+		oldToken = cookie
+	}
+	if oldToken == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40101, "msg": "缺少 token"})
 		return
 	}
-	oldToken := strings.TrimPrefix(auth, "Bearer ")
 	claims, err := security.ParseAgentTokenAllowExpired(h.cfg.JWTSecret, oldToken)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40103, "msg": "token 无效"})
@@ -275,15 +406,15 @@ func (h *HTTP) RefreshAgentToken(c *gin.Context) {
 	}
 	// 重新查 DB：agent 必须仍存在且 active（防止已禁用的 agent 还能续 token）
 	agent, err := h.svc.Store().GetAgentByID(c.Request.Context(), claims.AgentID)
-	if err != nil || agent == nil || !agent.Active {
+	if err != nil || agent == nil || !agent.Active || agent.TokenVersion != claims.Version {
 		h.svc.Limiter().LogSecurityWarn(security.ClientIP(c), "refresh_token_agent_inactive",
 			fmt.Sprintf("aid=%d", claims.AgentID))
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40105, "msg": "账号已禁用"})
 		return
 	}
-	// 签发新 token（同样 12h TTL）
-	const newTTL = 12 * time.Hour
-	newTok, err := security.IssueAgentToken(h.cfg.JWTSecret, agent.ID, agent.Username, agent.Role, newTTL)
+	// 签发新 token（同样 30m TTL）
+	const newTTL = 30 * time.Minute
+	newTok, err := security.IssueAgentTokenWithVersion(h.cfg.JWTSecret, agent.ID, agent.Username, agent.Role, agent.TokenVersion, newTTL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50019, "msg": "签发 token 失败"})
 		return
@@ -295,6 +426,10 @@ func (h *HTTP) RefreshAgentToken(c *gin.Context) {
 		zap.String("ip", security.ClientIP(c)))
 	h.svc.Store().AuditLog(c.Request.Context(), agent.Username, "token_refresh",
 		fmt.Sprintf("agent:%d", agent.ID), "", security.ClientIP(c))
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name: "cs_session", Value: newTok, Path: "/", MaxAge: int(newTTL.Seconds()),
+		HttpOnly: true, Secure: h.cfg.EnableHTTPS, SameSite: http.SameSiteStrictMode,
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"code":       0,
 		"token":      newTok,
@@ -302,8 +437,8 @@ func (h *HTTP) RefreshAgentToken(c *gin.Context) {
 	})
 }
 
-// AgentWS 客服的 WSS 入口。query: token=<agent_token>
-// [062] 移除按 IP 的 WSS 握手限流；防御层：agent JWT token 校验 + WSS origin / SSL
+// AgentWS 客服的 WSS 入口。JWT 只能放 Authorization 或 Sec-WebSocket-Protocol，禁止 query。
+// 防御层：agent JWT token 校验 + WSS origin 白名单 + 会话版本吊销 / SSL
 // [064] 区分错误码让 App 客户端能：
 //
 //	code=40106 缺 token            → 跳登录页
@@ -314,7 +449,20 @@ func (h *HTTP) RefreshAgentToken(c *gin.Context) {
 // 读不到 body 里的 code。所以 mobile_app 必须**主动在连接前检查 exp**（_shouldRefreshToken），
 // 不能完全依赖服务端 close code。
 func (h *HTTP) AgentWS(c *gin.Context) {
-	tok := c.Query("token")
+	if ok, err := h.svc.Limiter().AllowAction(c.Request.Context(), "agent_ws", 30, time.Minute, "ip:"+security.ClientIP(c)); err != nil || !ok {
+		h.svc.Limiter().LogSecurityWarn(security.ClientIP(c), "agent_ws_rate_limited", "")
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"code": 42905, "msg": "连接过于频繁，请稍后重试"})
+		return
+	}
+	if c.Query("token") != "" {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"code": 40041, "msg": "WebSocket 禁止在 URL 中携带 token"})
+		return
+	}
+	if !h.allowedWSOrigin(c) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"code": 40304, "msg": "来源不允许"})
+		return
+	}
+	tok := websocketToken(c)
 	if tok == "" {
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40106, "msg": "缺少 token"})
 		return
@@ -326,6 +474,11 @@ func (h *HTTP) AgentWS(c *gin.Context) {
 			return
 		}
 		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40107, "msg": "token 无效"})
+		return
+	}
+	agent, dbErr := h.svc.Store().GetAgentByID(c.Request.Context(), claims.AgentID)
+	if dbErr != nil || agent == nil || !agent.Active || agent.TokenVersion != claims.Version {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40108, "msg": "会话已失效，请重新登录"})
 		return
 	}
 	_, _ = ws.UpgradeAgent(h.hub, c.Writer, c.Request, fmt.Sprintf("%d", claims.AgentID), "")
@@ -390,6 +543,10 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 // ListMessages 拉历史消息
 func (h *HTTP) ListMessages(c *gin.Context) {
 	convID := c.Param("id")
+	if !h.agentCanAccessConversation(c, convID) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或无权访问"})
+		return
+	}
 	before := c.Query("before")
 	after := c.Query("after") // [070] 增量同步：只拉比 afterID 更新的消息（进会话先显本地缓存，再后台补这段）
 	limit := 50
@@ -410,6 +567,10 @@ func (h *HTTP) ListMessages(c *gin.Context) {
 //	配合 [088] 列表按客户聚合：点开客户看其所有历史会话(含已结束)的真实对话，而非只看最新一段。
 func (h *HTTP) ListMessagesByVisitor(c *gin.Context) {
 	vid := c.Param("vid")
+	if !h.agentCanAccessVisitor(c, vid) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "访客不存在或无权访问"})
+		return
+	}
 	before := c.Query("before")
 	after := c.Query("after")
 	limit := 50
@@ -429,12 +590,34 @@ func (h *HTTP) AssignSelf(c *gin.Context) {
 	convID := c.Param("id")
 	aid, _ := c.Get("agent_id")
 	agentID := aid.(int64)
+	if !h.agentCanAccessConversation(c, convID) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或已由其他客服接管"})
+		return
+	}
 	if err := h.svc.Store().AssignAgent(c.Request.Context(), convID, agentID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50008, "msg": "分配失败"})
 		return
 	}
 	h.hub.AttachAgentToConv(fmt.Sprintf("%d", agentID), convID)
 	c.JSON(http.StatusOK, gin.H{"code": 0})
+}
+
+func (h *HTTP) agentCanAccessConversation(c *gin.Context, convID string) bool {
+	aid, ok := c.Get("agent_id")
+	if !ok {
+		return false
+	}
+	okay, err := h.svc.Store().AgentOwnsConversation(c.Request.Context(), convID, fmt.Sprintf("%v", aid))
+	return err == nil && okay
+}
+
+func (h *HTTP) agentCanAccessVisitor(c *gin.Context, visitorID string) bool {
+	aid, ok := c.Get("agent_id")
+	if !ok || visitorID == "" {
+		return false
+	}
+	okay, err := h.svc.Store().AgentCanAccessVisitor(c.Request.Context(), visitorID, fmt.Sprintf("%v", aid))
+	return err == nil && okay
 }
 
 // MarkRead 标记已读（HTTP 兜底；正常实时走 WSS type=read）。
@@ -447,6 +630,10 @@ func (h *HTTP) RelatedVisitors(c *gin.Context) {
 	vid := c.Param("vid")
 	if vid == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 40001, "msg": "vid 必填"})
+		return
+	}
+	if !h.agentCanAccessVisitor(c, vid) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "访客不存在或无权访问"})
 		return
 	}
 	// 先拿当前访客的 ip_hash（再查同 hash 的其他人）
@@ -527,6 +714,10 @@ func (h *HTTP) MarkRead(c *gin.Context) {
 // CloseConv 关闭会话
 func (h *HTTP) CloseConv(c *gin.Context) {
 	convID := c.Param("id")
+	if !h.agentCanAccessConversation(c, convID) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或无权操作"})
+		return
+	}
 	if err := h.svc.Store().CloseConversation(c.Request.Context(), convID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50010, "msg": "失败"})
 		return
@@ -536,21 +727,13 @@ func (h *HTTP) CloseConv(c *gin.Context) {
 
 // =========== 文件上传（访客或客服都用） ===========
 
-var allowedMIME = map[string]bool{
-	"image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true,
-	"application/pdf": true, "application/zip": true, "application/x-zip-compressed": true,
-	"text/plain":         true,
-	"application/msword": true,
-	"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
-	"application/vnd.ms-excel": true,
-	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
-}
-
 // Upload 表单字段：file (二进制) + conv_id (可选) + uploader (visitor|agent) + ref (id)
 // 必须带有效 token：访客拿 visitor_token、客服拿 agent_token，从 Authorization Bearer 取。
 func (h *HTTP) Upload(c *gin.Context) {
 	ctx := c.Request.Context()
 	ip := security.ClientIP(c)
+	maxBytes := int64(h.cfg.MaxUploadMB)*1024*1024 + 1024
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
 
 	uploadBy := c.PostForm("uploader")
 	if uploadBy != "visitor" && uploadBy != "agent" {
@@ -560,6 +743,12 @@ func (h *HTTP) Upload(c *gin.Context) {
 	ref, convID, err := h.authorizeUpload(c, uploadBy)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40108, "msg": err.Error()})
+		return
+	}
+	authToken := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+	if ok, err := h.svc.Limiter().AllowAction(ctx, "upload", 30, time.Minute, "ip:"+ip, "actor:"+ref, "token:"+authToken); err != nil || !ok {
+		h.svc.Limiter().LogSecurityWarn(ip, "upload_rate_limited", ref)
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": 42903, "msg": "上传过于频繁，请稍后再试"})
 		return
 	}
 
@@ -572,7 +761,7 @@ func (h *HTTP) Upload(c *gin.Context) {
 		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"code": 41301, "msg": "文件过大"})
 		return
 	}
-	// 嗅探 mime（不信任客户端 Content-Type）
+	// 同时校验扩展名、服务端嗅探 MIME 与 magic bytes，不信任 multipart Content-Type。
 	f, err := mh.Open()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50011, "msg": "打开文件失败"})
@@ -582,15 +771,11 @@ func (h *HTTP) Upload(c *gin.Context) {
 	sniff := make([]byte, 512)
 	n, _ := f.Read(sniff)
 	mimeType := http.DetectContentType(sniff[:n])
-	if !allowedMIME[mimeType] {
-		// 退一步看后缀
-		ext := strings.ToLower(filepath.Ext(mh.Filename))
-		if guessed := mime.TypeByExtension(ext); !allowedMIME[guessed] {
-			// 用户误传不支持的文件类型是常见情况，记日志即可，不计 violation
-			h.svc.Limiter().LogSecurityWarn(ip, "upload_mime_blocked", mimeType+"|"+ext)
-			c.JSON(http.StatusUnsupportedMediaType, gin.H{"code": 41501, "msg": "文件类型不允许"})
-			return
-		}
+	valid, validateErr := security.ValidateUpload(mh.Filename, mimeType, sniff[:n])
+	if validateErr != nil {
+		h.svc.Limiter().LogSecurityWarn(ip, "upload_type_blocked", filepath.Ext(mh.Filename)+"|"+mimeType)
+		c.JSON(http.StatusUnsupportedMediaType, gin.H{"code": 41501, "msg": "文件扩展名、类型或文件头不匹配"})
+		return
 	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50012, "msg": "seek 失败"})
@@ -604,25 +789,37 @@ func (h *HTTP) Upload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50013, "msg": "建目录失败"})
 		return
 	}
-	storeKey := filepath.Join(tz.Format("2006/01/02"), id+filepath.Ext(mh.Filename))
-	full := filepath.Join(subDir, id+filepath.Ext(mh.Filename))
+	storeKey := strings.ReplaceAll(filepath.Join(tz.Format("2006/01/02"), id+valid.Extension), "\\", "/")
+	full := filepath.Join(subDir, id+valid.Extension)
 	out, err := os.OpenFile(full, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50014, "msg": "写文件失败"})
 		return
 	}
-	if _, err := io.Copy(out, f); err != nil {
+	written, err := io.Copy(out, f)
+	if err != nil || written > int64(h.cfg.MaxUploadMB)*1024*1024 {
 		out.Close()
 		os.Remove(full)
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 50015, "msg": "写入失败"})
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 50015, "msg": "写入失败"})
+		} else {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"code": 41301, "msg": "文件过大"})
+		}
 		return
 	}
 	out.Close()
 
+	accessToken, accessHash, err := security.NewOpaqueAccessToken()
+	if err != nil {
+		_ = os.Remove(full)
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 50016, "msg": "生成文件凭证失败"})
+		return
+	}
 	rec := &store.FileRecord{
 		ID: id, ConvID: convID, UploadBy: uploadBy, UploaderRef: ref,
-		Filename: mh.Filename, StoreKey: storeKey, Size: mh.Size, MIME: mimeType,
-		CreatedAt: time.Now(),
+		Filename: filepath.Base(mh.Filename), StoreKey: storeKey, Size: written, MIME: valid.MIME,
+		AccessTokenHash: accessHash,
+		CreatedAt:       time.Now(),
 	}
 	if err := h.svc.Store().InsertFile(ctx, rec); err != nil {
 		os.Remove(full)
@@ -630,13 +827,10 @@ func (h *HTTP) Upload(c *gin.Context) {
 		return
 	}
 	url := "/files/" + storeKey
-	kind := "file"
-	if strings.HasPrefix(mimeType, "image/") {
-		kind = "image"
-	}
+	kind := valid.Kind
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
-		"id":   id, "url": url, "kind": kind, "size": mh.Size, "name": mh.Filename, "mime": mimeType,
+		"id":   id, "url": url + "?access=" + accessToken, "kind": kind, "size": written, "name": filepath.Base(mh.Filename), "mime": valid.MIME,
 	})
 }
 
@@ -658,7 +852,15 @@ func (h *HTTP) authorizeUpload(c *gin.Context, uploadBy string) (ref, convID str
 		if e != nil {
 			return "", "", errors.New("agent token 无效")
 		}
-		return fmt.Sprintf("%d", ac.AgentID), c.PostForm("conv_id"), nil
+		convID = c.PostForm("conv_id")
+		if convID == "" {
+			return "", "", errors.New("缺少 conv_id")
+		}
+		owned, e := h.svc.Store().AgentOwnsConversation(c.Request.Context(), convID, fmt.Sprintf("%d", ac.AgentID))
+		if e != nil || !owned {
+			return "", "", errors.New("无权访问该会话")
+		}
+		return fmt.Sprintf("%d", ac.AgentID), convID, nil
 	}
 	return "", "", errors.New("未知 uploader")
 }
@@ -666,15 +868,59 @@ func (h *HTTP) authorizeUpload(c *gin.Context, uploadBy string) (ref, convID str
 // ServeFile 静态文件下载（受 token 保护：只能访问自己会话内的文件）
 func (h *HTTP) ServeFile(c *gin.Context) {
 	key := c.Param("key")
-	if strings.Contains(key, "..") {
+	if key == "" || strings.Contains(key, "..") || filepath.IsAbs(key) || strings.ContainsAny(key, "\\\x00") {
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
-	full := filepath.Join(h.uploads, key)
+	cleanKey := filepath.ToSlash(filepath.Clean(filepath.FromSlash(key)))
+	if cleanKey == "." || strings.HasPrefix(cleanKey, "../") {
+		c.AbortWithStatus(http.StatusBadRequest)
+		return
+	}
+	rec, err := h.svc.Store().GetFileByStoreKey(c.Request.Context(), cleanKey)
+	if err != nil || rec == nil {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+	access := c.Query("access")
+	authorized := access != "" && security.HashOpaqueAccessToken(access) == rec.AccessTokenHash
+	if !authorized {
+		tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if tok == "" {
+			if cookie, e := c.Cookie("cs_session"); e == nil {
+				tok = cookie
+			}
+		}
+		if tok != "" {
+			if ac, e := security.ParseAgentToken(h.cfg.JWTSecret, tok); e == nil {
+				agent, dbErr := h.svc.Store().GetAgentByID(c.Request.Context(), ac.AgentID)
+				authorized = dbErr == nil && agent != nil && agent.Active && agent.TokenVersion == ac.Version &&
+					(agent.Role == "admin" || func() bool {
+						ok, _ := h.svc.Store().AgentOwnsConversation(c.Request.Context(), rec.ConvID, fmt.Sprintf("%d", ac.AgentID))
+						return ok
+					}())
+			} else if vc, e := security.ParseVisitorToken(h.cfg.JWTSecret, tok); e == nil {
+				authorized, _ = h.svc.Store().ConversationBelongsToVisitor(c.Request.Context(), rec.ConvID, vc.SiteID, vc.VisitorID)
+			}
+		}
+	}
+	if !authorized {
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40109, "msg": "文件访问未授权"})
+		return
+	}
+	full := filepath.Join(h.uploads, filepath.FromSlash(cleanKey))
 	if _, err := os.Stat(full); err != nil {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	c.Header("X-Content-Type-Options", "nosniff")
+	filename := strings.NewReplacer(`"`, "'", "\\", "_").Replace(filepath.Base(rec.Filename))
+	if strings.HasPrefix(rec.MIME, "image/") && rec.MIME != "image/svg+xml" {
+		c.Header("Content-Disposition", `inline; filename="`+filename+`"`)
+	} else {
+		c.Header("Content-Disposition", `attachment; filename="`+filename+`"`)
+	}
+	c.Header("Content-Type", rec.MIME)
 	c.File(full)
 }
 
@@ -691,7 +937,7 @@ type CreateAgentReq struct {
 const (
 	maxUsernameLen = 64 // 跟 agents.username VARCHAR(64) 对齐
 	maxNicknameLen = 64 // 跟 agents.nickname VARCHAR(64) 对齐
-	minPasswordLen = 8  // bcrypt 安全下限
+	minPasswordLen = 12 // 管理后台强制复杂密码
 )
 
 // [052] 用户名格式：3-64 位字母/数字/下划线/中划线/点
@@ -724,7 +970,11 @@ func (h *HTTP) CreateAgent(c *gin.Context) {
 		return
 	}
 	if len(r.Password) < minPasswordLen {
-		c.JSON(http.StatusBadRequest, gin.H{"code": 40006, "msg": "密码至少 8 位"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40006, "msg": "密码至少 12 位"})
+		return
+	}
+	if !security.StrongPassword(r.Password, r.Username) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40014, "msg": "密码必须同时包含大小写字母、数字和符号，且不能与用户名相同"})
 		return
 	}
 	if r.Role != "" && !allowedAgentRoles[r.Role] {
@@ -859,8 +1109,9 @@ func (h *HTTP) UpdateSettings(c *gin.Context) {
 		return
 	}
 	actor, _ := c.Get("agent_username")
+	detail, _ := json.Marshal(filtered)
 	h.svc.Store().AuditLog(c.Request.Context(), fmt.Sprintf("%v", actor),
-		"update_settings", "", fmt.Sprintf("%v", filtered), security.ClientIP(c))
+		"update_settings", "", string(security.RedactJSONPayload(detail)), security.ClientIP(c))
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }
 
@@ -935,6 +1186,9 @@ func (h *HTTP) DisableAgent(c *gin.Context) {
 	if err := h.svc.Store().SetAgentActive(c.Request.Context(), body.ID, body.Active); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50019, "msg": "失败"})
 		return
+	}
+	if !body.Active {
+		h.hub.CloseAgent(fmt.Sprintf("%d", body.ID))
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }

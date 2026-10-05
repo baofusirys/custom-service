@@ -13,6 +13,7 @@ import (
 //   - ErrTokenExpired：签名有效但已过期（客户端可调 /agent/login/refresh 续）
 //   - ErrTokenInvalid：签名错 / 篡改 / sub 字段不对（客户端必须重新登录）
 //   - ErrTokenMalformed：完全不是合法 JWT（同上）
+//
 // handler 用 errors.Is 区分后给前端不同 code，让 App 走 refresh 而不是登录页。
 var (
 	ErrTokenExpired   = errors.New("token expired")
@@ -23,7 +24,8 @@ var (
 type AgentClaims struct {
 	AgentID  int64  `json:"aid"`
 	Username string `json:"u"`
-	Role     string `json:"r"` // admin | agent
+	Role     string `json:"r"`  // admin | agent
+	Version  int64  `json:"sv"` // agents.token_version；递增后所有旧 token 立即失效
 	jwt.RegisteredClaims
 }
 
@@ -34,11 +36,19 @@ type VisitorClaims struct {
 }
 
 func IssueAgentToken(secret []byte, agentID int64, username, role string, ttl time.Duration) (string, error) {
+	return IssueAgentTokenWithVersion(secret, agentID, username, role, 0, ttl)
+}
+
+func IssueAgentTokenWithVersion(secret []byte, agentID int64, username, role string, version int64, ttl time.Duration) (string, error) {
+	if ttl <= 0 || ttl > 2*time.Hour {
+		return "", errors.New("agent token ttl must be between 1s and 2h")
+	}
 	now := time.Now()
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, AgentClaims{
 		AgentID:  agentID,
 		Username: username,
 		Role:     role,
+		Version:  version,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),

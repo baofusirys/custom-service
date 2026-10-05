@@ -51,7 +51,7 @@
     <h1>联系我们</h1>
     <p class="sub">有任何问题？右下角点开客服直接聊，或者填写下面表单。</p>
     <div class="card">
-      <form onsubmit="event.preventDefault(); alert('这是演示表单，不会真的提交。请右下角点客服。');">
+      <form id="demoContactForm">
         <div class="row">
           <label>姓名</label>
           <input type="text" placeholder="您的姓名">
@@ -67,13 +67,14 @@
         <button type="submit">发送</button>
       </form>
       <div class="contact-info">
-        <div>📧 邮箱：<b>support@example.com</b></div>
-        <div style="margin-top:8px">📞 电话：<b>400-000-0000</b></div>
-        <div style="margin-top:8px">🏢 地址：北京市朝阳区某某大厦</div>
+        <div>邮箱：<b>support@example.com</b></div>
+        <div style="margin-top:8px">电话：<b>400-000-0000</b></div>
+        <div style="margin-top:8px">地址：北京市朝阳区某某大厦</div>
       </div>
       <div class="tip">这是演示页 —— 右下角的客服气泡是真的，可以用！客服后台能看到您从「首页 → 产品 → 价格 → 联系我们」的完整浏览路径。</div>
     </div>
   </main>
+  <script src="/widget/demo-contact.js" defer></script>
   <script src="/widget/loader.js" data-cs-site="default" defer></script>
 </body>
 </html>

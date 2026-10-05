@@ -40,7 +40,7 @@ RUN set -eux; \
 # ===== 运行阶段 =====
 FROM alpine:3.23.3
 ENV TZ=Asia/Shanghai
-RUN apk add --no-cache ca-certificates tzdata wget && \
+RUN apk add --no-cache ca-certificates tzdata wget mariadb-client && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone && \
     addgroup -S app && adduser -S -G app app

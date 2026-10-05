@@ -46,7 +46,7 @@
 1. 访客打开嵌入 widget 的页面
 2. widget loader.js 注入 iframe -> chat.html
 3. chat.html POST /api/visitor/session 拿到 visitor_id / conv_id / visitor_token
-4. chat.html 建立 wss:// /ws/visitor?token=<visitor_token>
+4. chat.html 建立 wss:// /ws/visitor，并通过 `Sec-WebSocket-Protocol: cs-auth, <visitor_token>` 传递令牌（禁止 query token）。
 5. 服务端 Hub 把该连接注册到 byConv[conv_id]
 6. 访客发送 chat 消息
 7. Hub 收到 -> service.OnVisitorMessage(限流 + 清洗 + 入库)
@@ -58,7 +58,7 @@
 
 ```
 1. 客服浏览器登录 /admin/login 拿到 agent_token
-2. /admin/console 打开后建立 wss:// /ws/agent?token=<agent_token>
+2. /admin/console 打开后建立 wss:// /ws/agent，并通过 `Sec-WebSocket-Protocol: cs-auth, <agent_token>` 传递令牌（禁止 query token）。
 3. 客服点击某个会话 -> POST /api/agent/conversations/:id/assign
    服务端 Hub.AttachAgentToConv(agentID, convID) 把客服加入 byConv 索引
 4. 客服发送 chat 消息

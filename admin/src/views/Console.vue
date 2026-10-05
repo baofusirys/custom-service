@@ -293,7 +293,11 @@ function isPageGroup(g) {
 }
 
 function pageURL(m) {
-  return m.page_url || (m.sender_ref && m.sender_ref.indexOf('page:') === 0 ? m.sender_ref.slice(5) : '')
+  const raw = m.page_url || (m.sender_ref && m.sender_ref.indexOf('page:') === 0 ? m.sender_ref.slice(5) : '')
+  try {
+    const u = new URL(raw, window.location.origin)
+    return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : ''
+  } catch { return '' }
 }
 function pageTitle(m) {
   if (m.page_title) return m.page_title
@@ -611,9 +615,12 @@ function isMine(m) {
 }
 
 function mediaURL(m) {
-  if (m.media_url?.Valid) return m.media_url.String
-  if (typeof m.media_url === 'string') return m.media_url
-  return ''
+  const raw = m.media_url?.Valid ? m.media_url.String : (typeof m.media_url === 'string' ? m.media_url : '')
+  try {
+    const u = new URL(raw, window.location.origin)
+    if (u.origin !== window.location.origin || !u.pathname.startsWith('/files/')) return ''
+    return u.pathname + u.search
+  } catch { return '' }
 }
 
 function mediaKind(m) {
@@ -1207,7 +1214,7 @@ function voiceCleanup() {
               </div>
               <!-- [059] 第 3 行：访客地理位置 + IP（任一非空才显示，省垂直空间）-->
               <div v-if="convGeoIp(c)" class="conv-row3">
-                <span class="conv-geoip">📍 {{ convGeoIp(c) }}</span>
+                <span class="conv-geoip">{{ convGeoIp(c) }}</span>
               </div>
             </div>
           </div>
@@ -1286,7 +1293,7 @@ function voiceCleanup() {
               <div v-for="m in g.items" :key="m.id" class="page-banner">
                 <span class="page-banner-arrow">→</span>
                 <span class="page-banner-label">访客访问了</span>
-                <a :href="pageURL(m)" target="_blank" class="page-banner-link"
+                <a v-if="pageURL(m)" :href="pageURL(m)" target="_blank" rel="noopener noreferrer" class="page-banner-link"
                    :title="pageURL(m)">
                   {{ pageTitle(m) || pageURL(m) }}
                 </a>
@@ -1320,7 +1327,7 @@ function voiceCleanup() {
                         fit="cover"
                         class="bubble-img"
                       />
-                      <a v-else :href="mediaURL(m)" target="_blank" class="bubble-file">
+                      <a v-else :href="mediaURL(m)" target="_blank" rel="noopener noreferrer" download class="bubble-file">
                         <el-icon><svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm-1 7V3.5L18.5 9H13z"/></svg></el-icon>
                         <span>{{ mediaName(m) }}</span>
                       </a>

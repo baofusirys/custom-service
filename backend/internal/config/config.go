@@ -3,17 +3,22 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/custom-service/backend/internal/security"
 )
 
 // Config 是全局运行时配置。所有值都从环境变量读取，
 // 这样 docker-compose 和 .env 是唯一来源，避免代码硬编码。
 type Config struct {
-	PublicDomain string
-	EnableHTTPS  bool
-	Timezone     *time.Location
+	PublicDomain       string
+	CORSAllowedOrigins []string
+	EnableHTTPS        bool
+	Timezone           *time.Location
 
 	HTTPPort string
 	LogLevel string
@@ -26,8 +31,7 @@ type Config struct {
 	MaxUploadMB int
 
 	// 安全
-	// [062] 移除 IPHTTPRPM / IPWSHandshakePM / IPBlacklistThreshold（按 IP 限流全部撤掉）
-	// 保留 VisitorMsgPM（按访客 session 限流，跟 IP 无关）
+	// 访客消息按会话限流；登录、上传和批量入口另按 IP/账号/令牌多维限流。
 	VisitorMsgPM int
 
 	// Bootstrap 超管
@@ -63,19 +67,19 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		PublicDomain:         os.Getenv("PUBLIC_DOMAIN"),
-		EnableHTTPS:          os.Getenv("ENABLE_HTTPS") == "true",
-		Timezone:             tz,
-		HTTPPort:             defaultStr(os.Getenv("BACKEND_HTTP_PORT"), "8080"),
-		LogLevel:             defaultStr(os.Getenv("BACKEND_LOG_LEVEL"), "info"),
-		MaxUploadMB: defaultInt(os.Getenv("BACKEND_MAX_UPLOAD_MB"), 20),
-		// [062] 仅保留按访客 session 的消息限流（per-visitor，跟 IP 无关），不会因为 NAT 后多设备同 IP 误封；
-		// 0 = 不限制
+		PublicDomain:       os.Getenv("PUBLIC_DOMAIN"),
+		CORSAllowedOrigins: splitCSV(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		EnableHTTPS:        os.Getenv("ENABLE_HTTPS") == "true",
+		Timezone:           tz,
+		HTTPPort:           defaultStr(os.Getenv("BACKEND_HTTP_PORT"), "8080"),
+		LogLevel:           defaultStr(os.Getenv("BACKEND_LOG_LEVEL"), "info"),
+		MaxUploadMB:        defaultInt(os.Getenv("BACKEND_MAX_UPLOAD_MB"), 20),
+		// 0 = 不限制访客消息
 		VisitorMsgPM:      defaultInt(os.Getenv("SECURITY_VISITOR_MSG_PM"), 20),
 		BootstrapUsername: defaultStr(os.Getenv("ADMIN_BOOTSTRAP_USERNAME"), "admin"),
-		BootstrapPassword:    os.Getenv("ADMIN_BOOTSTRAP_PASSWORD"),
-		TurnRealm:            os.Getenv("TURN_REALM"),
-		TurnSecret:           os.Getenv("TURN_STATIC_AUTH_SECRET"),
+		BootstrapPassword: os.Getenv("ADMIN_BOOTSTRAP_PASSWORD"),
+		TurnRealm:         os.Getenv("TURN_REALM"),
+		TurnSecret:        os.Getenv("TURN_STATIC_AUTH_SECRET"),
 		MySQL: MySQLConfig{
 			Host:     defaultStr(os.Getenv("MYSQL_HOST"), "mysql"),
 			Port:     defaultStr(os.Getenv("MYSQL_PORT"), "3306"),
@@ -91,7 +95,7 @@ func Load() (*Config, error) {
 	}
 
 	jwtSecret := os.Getenv("JWT_SECRET")
-	if len(jwtSecret) < 32 {
+	if len(jwtSecret) < 32 || isPlaceholder(jwtSecret) {
 		return nil, errors.New("JWT_SECRET 必须至少 32 个字符，请改 .env")
 	}
 	cfg.JWTSecret = []byte(jwtSecret)
@@ -106,17 +110,51 @@ func Load() (*Config, error) {
 	}
 	cfg.DataAESKey = key
 
-	if cfg.MySQL.Database == "" || cfg.MySQL.User == "" || cfg.MySQL.Password == "" {
-		return nil, errors.New("MYSQL_DATABASE / MYSQL_USER / MYSQL_PASSWORD 必须设置")
+	rootPassword := os.Getenv("MYSQL_ROOT_PASSWORD")
+	if cfg.MySQL.Database == "" || cfg.MySQL.User == "" || len(cfg.MySQL.Password) < 32 || len(rootPassword) < 32 || isPlaceholder(cfg.MySQL.Password) || isPlaceholder(rootPassword) {
+		return nil, errors.New("MYSQL_ROOT_PASSWORD / MYSQL_PASSWORD 必须至少 32 个字符，数据库账号字段也必须设置")
 	}
-	if cfg.Redis.Password == "" {
-		return nil, errors.New("REDIS_PASSWORD 必须设置")
+	if len(cfg.Redis.Password) < 32 || isPlaceholder(cfg.Redis.Password) {
+		return nil, errors.New("REDIS_PASSWORD 必须至少 32 个字符")
 	}
-	if cfg.BootstrapPassword == "" || len(cfg.BootstrapPassword) < 8 {
-		return nil, errors.New("ADMIN_BOOTSTRAP_PASSWORD 必须至少 8 字符")
+	if cfg.TurnSecret != "" && (len(cfg.TurnSecret) < 32 || isPlaceholder(cfg.TurnSecret)) {
+		return nil, errors.New("TURN_STATIC_AUTH_SECRET 必须使用随机强密钥")
+	}
+	if cfg.BootstrapPassword == "" || !security.StrongPassword(cfg.BootstrapPassword, cfg.BootstrapUsername) || isPlaceholder(cfg.BootstrapPassword) {
+		return nil, errors.New("ADMIN_BOOTSTRAP_PASSWORD 必须至少 12 字符、包含大小写数字符号且不能使用占位密码")
+	}
+	for _, origin := range cfg.CORSAllowedOrigins {
+		u, parseErr := url.Parse(origin)
+		if origin == "*" || parseErr != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" ||
+			(u.Scheme != "https" && u.Scheme != "http") {
+			return nil, errors.New("CORS_ALLOWED_ORIGINS 必须是明确的 http(s) 来源，禁止 *")
+		}
+	}
+	if len(cfg.CORSAllowedOrigins) == 0 {
+		return nil, errors.New("CORS_ALLOWED_ORIGINS 必须至少配置一个明确来源")
 	}
 
 	return cfg, nil
+}
+
+func splitCSV(v string) []string {
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, strings.TrimRight(item, "/"))
+		}
+	}
+	return out
+}
+
+func isPlaceholder(v string) bool {
+	l := strings.ToLower(strings.TrimSpace(v))
+	for _, bad := range []string{"secret", "changeme", "your-secret-key", "123456", "password", "admin", "test", "demo"} {
+		if l == bad || strings.Contains(l, bad) {
+			return true
+		}
+	}
+	return false
 }
 
 // MySQLDSN 构造连接串，强制 utf8mb4 + 时区。

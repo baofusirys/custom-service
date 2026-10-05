@@ -163,6 +163,13 @@ class Api {
     return Map<String, dynamic>.from(r.data);
   }
 
+  static Future<void> logout() async {
+    try {
+      final dio = await _ensure();
+      await dio.post('/agent/logout');
+    } catch (_) {}
+  }
+
   static Future<Map<String, dynamic>> health() async {
     final dio = await _ensure();
     final r = await dio.get('/health');

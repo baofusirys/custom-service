@@ -1,4 +1,4 @@
-FROM redis:7.2-alpine
+FROM redis:7.2.5-alpine
 ENV TZ=Asia/Shanghai
 RUN apk add --no-cache tzdata && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \

@@ -2,13 +2,15 @@
 import { useRouter, RouterView, useRoute } from 'vue-router'
 import { useSession } from '../store/session'
 import { computed } from 'vue'
+import http from '../api/http'
 
 const router = useRouter()
 const route = useRoute()
 const session = useSession()
 const active = computed(() => route.path)
 
-function logout() {
+async function logout() {
+  try { await http.post('/agent/logout') } catch (_) {}
   session.clear()
   router.push('/login')
 }

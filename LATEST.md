@@ -1,4 +1,4 @@
-### 当前版本：v0.7.3 · 2026-09-08（北京时间）
+### 当前版本：v0.7.4 · 2026-10-05（北京时间）
 
 > 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
 
@@ -9,7 +9,7 @@
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [8]）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（custom_service 当前已下线）**：`38.76.193.68`（MCP [10]）。2026-08-23 21:17 已恢复同机 `weixian-douxiaoyin`，其 7 个常驻服务全部 healthy；`custom_service` 容器数为 0，但 `cs_mysql_data`、`cs_redis_data`、证书卷和 `/srv/cs-data/` 均完整保留，可随时重新切回。公网 `https://maihaocs.icu/healthz` 返回 200。
 - **App(SwiftUI) 源码**：当前家中 Mac `/Users/chengmeiran/code/custom_service_swift`（独立 git 仓库，旧 `mobile_app` Flutter 版已归档）。[105] 已重签安装至 iPhone 16 Pro Max，序号 2732；有效期至 `2026-09-15T06:50:21+08:00`，启动受 iOS 安全检查阻止，待用户核对开发者信任。原定时入口为 `auto_reinstall.sh` / launchd，本次未调整。
-- **发布到生产/下游**：当前已发布稳定版仍是 `v0.7.2`（GHCR + 阿里云 ACR）；`v0.7.3` 尚未创建/推送 tag，也没有托管镜像。生产服 `49.233.156.149` 当前仍未更新。
+- **发布到生产/下游**：v0.7.4 仅完成本地代码与隔离测试，尚未创建/推送 tag、构建托管镜像或部署；生产服 `49.233.156.149` 未更新。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -43,7 +43,7 @@
 ## 关键开关位置
 | 用途 | 文件 | 位置 |
 | --- | --- | --- |
-| 服务总配置（端口/JWT/DB/Redis） | `.env`（部署时基于 `.env.example` 生成） | 根目录 |
+| 服务总配置（端口/JWT/DB/Redis/CORS） | `.env`（部署时基于 `.env.example` 生成） | 根目录 |
 | 全局时区 | `backend/internal/config/config.go` | `LoadTimezone()` |
 | WSS 心跳/读写超时 | `backend/internal/ws/hub.go` | 文件顶部常量 |
 | 消息 ACK/回执/离线补发 | `backend/internal/service/message_pipeline.go` | 整个模块 |
@@ -52,6 +52,7 @@
 | 限流参数（按 IP / 按访客） | `backend/internal/security/ratelimit.go` | 文件顶部常量 |
 | 文件上传大小上限 | `backend/internal/config/config.go` | `MaxUploadSize` |
 | 数据库自动迁移开关 | `backend/internal/db/migrate.go` | 启动时强制执行，无开关 |
+| 安全补丁与验收报告 | `docs/security-release-0.7.4.md` | XSS/JWT/上传/SSRF/越权验收 |
 | Widget 默认主题色 | `widget/src/config.ts` | `defaultTheme` |
 | Nginx 限流 / 防 DDoS | `nginx/conf.d/default.conf` | `limit_req_zone` / `limit_conn_zone` 段 |
 | WebRTC TURN/STUN（CoTURN）| `turn/turnserver.conf.tmpl` / `.env` 的 `TURN_*` | 端口 3478/5349 + relay 49152-49200 |
@@ -80,6 +81,7 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[106] 2026-10-05（北京时间）v0.7.4 安全补丁**：消息与附件纯文本、上传三重类型校验、文件访问鉴权、WSS 子协议令牌、HttpOnly 后台会话 Cookie、JWT 会话版本吊销、对象权限、CORS 白名单、限流锁定/验证码、SSRF 和敏感静态文件防护；锁定基础镜像补丁版本；仅本地隔离验证，未连接其他项目服务器。
 - **[105] 2026-09-08（北京时间）iPhone 重签装机**：当前家中 Mac 构建、验签及安装成功（序号 2732）；自动启动受 iOS 安全检查阻止，待核对开发者信任，服务器未变更。
 - **[104] 2026-08-23 测试服项目切换**：安全下线 custom_service（不带 `-v`），恢复 weixian-douxiaoyin；7 个常驻服务 healthy、公网健康和后台入口 200、日志错误扫描为 0，两边持久化数据均保留。
 - **[103] 2026-08-23 v0.7.3 测试服验收**：7 服务运行且健康/后台/Widget 均 200；三连接公网 WSS 验证首次 ACK 11.62ms、重连重复 ACK 7.71ms、`client_id` 全链保留、数据库仅 1 行，非法别名被拒且落库 0 行。

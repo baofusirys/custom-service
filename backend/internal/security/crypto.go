@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"strings"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -82,6 +84,26 @@ func CheckPassword(hashed, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hashed), []byte(plain)) == nil
 }
 
+func StrongPassword(password, username string) bool {
+	if len([]rune(password)) < 12 || strings.EqualFold(password, username) {
+		return false
+	}
+	var upper, lower, digit, symbol bool
+	for _, r := range password {
+		switch {
+		case unicode.IsUpper(r):
+			upper = true
+		case unicode.IsLower(r):
+			lower = true
+		case unicode.IsDigit(r):
+			digit = true
+		case unicode.IsPunct(r) || unicode.IsSymbol(r):
+			symbol = true
+		}
+	}
+	return upper && lower && digit && symbol
+}
+
 // [055] IPHash 用 HMAC-SHA256 算 IP 的确定性哈希（同 IP 同结果，可索引可查）。
 // key 复用 DATA_AES_KEY，确保不可逆 + 不能被外部碰撞猜回 IP。
 // 用途：visitors.ip_hash 字段（建索引），客服端「关联访客」面板查同 IP 历史 vid。
@@ -94,4 +116,21 @@ func IPHash(key []byte, ip string) string {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte(ip))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// NewOpaqueAccessToken 生成不含业务信息的文件访问能力令牌；只存 SHA-256 摘要，
+// 即使数据库泄露也不能直接复用明文令牌。
+func NewOpaqueAccessToken() (string, string, error) {
+	b := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", "", err
+	}
+	plain := base64.RawURLEncoding.EncodeToString(b)
+	sum := sha256.Sum256([]byte(plain))
+	return plain, hex.EncodeToString(sum[:]), nil
+}
+
+func HashOpaqueAccessToken(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
 }

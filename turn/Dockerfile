@@ -11,7 +11,7 @@
 #   - 后端 /api/turn-credential 用同一个 secret 生成 24h 时限 username/password
 #   - 防止匿名滥用（任何人拿到密码就能用我们的服务器中转流量）
 # ============================================================
-FROM coturn/coturn:4.6
+FROM coturn/coturn:4.6.2
 
 # 装 envsubst（gettext-base 提供）用来渲染配置模板
 USER root
