@@ -4,6 +4,15 @@
 
 ---
 
+## [108] 2026-10-14 02:42 — 客服 App 切换新开发者账号重签装机，重写自动重装脚本
+
+**起因 / 需求**：App 在 iPhone 上到期打不开，用户告知开发者账号已更换，要求重新安装。
+**根因（日志证据）**：Xcode 只剩新免费 Personal Team `4JZ8K387NU`，项目仍指向旧 Team `4ARYS2Z738`（构建报 `No Account for Team`）；旧版 `auto_reinstall.sh` 构建失败后仍安装过期旧产物，10-12/10-13 连续报 `ApplicationVerificationFailed`；其设备检查 grep "available" 会误匹配 "unavailable"。
+**做了什么（Mac 仓库 `custom_service_swift` 提交 2e9cd62）**：`project.yml`/`ExportOptions.plist` 切换新 Team，包名不变；重写 `auto_reinstall.sh`：单实例锁、按 CoreDevice 实时隧道状态判定连通、构建失败不装旧产物、验签与描述文件团队/设备/有效期（>24h）校验、瞬时连接错误重试 3 次、团队切换时一次性卸载旧团队同包名 App 后重装、北京时间分级日志；钥匙串口令改读仓库外 600 权限文件 `~/.config/custom_service_swift/keychain_password`；运行日志移出版本管理（文件保留）。launchd 9/14/21 点计划不变。
+**验证**：`BUILD SUCCEEDED`、codesign 严格校验 rc=0、描述文件 Team/设备均匹配；分支测试覆盖活锁、僵尸锁、构建失败不装机；正式运行触发团队迁移后 `install_ok`，装机序号 3824，设备回读到“客服Swift 1.0 (1)”；描述文件有效期至 `2026-10-21T02:25:04+08:00`。
+**注意 / 遗留**：新开发者证书需在 iPhone「设置-通用-VPN与设备管理」信任一次后才能打开；旧 App 本地缓存与登录态已随卸载清除，需重新登录；旧脚本曾明文含钥匙串口令（Mac 本地 git 历史 fa976a9，未推送），仍待轮换 Mac 登录密码并同步更新上述口令文件。
+**证据**：`_internal/verification/ios-reinstall-new-team-20261014-023929.txt`（本地，不入库）；Mac 端 `build/install-evidence/20261014/`、`build/auto-reinstall/`。
+
 ## [107] 2026-10-05 14:14 — v0.7.4 发布到 GitHub、GHCR 与阿里云 ACR
 
 **起因 / 需求**：完成 v0.7.4 安全补丁发布，让下游可以从镜像仓库更新。
