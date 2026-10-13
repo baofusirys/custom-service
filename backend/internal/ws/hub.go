@@ -72,7 +72,9 @@ type Hub struct {
 	register   chan *Client
 	unregister chan *Client
 	incoming   chan incoming
-	broadcast  chan *Envelope
+	// lastTS 仅在 Run 主循环内读写：服务端盖的消息时间戳，同一 Hub 内严格递增（[110]）。
+	lastTS    int64
+	broadcast chan *Envelope
 
 	rdb  *redis.Client
 	pub  string // 本节点 → 其他节点广播频道
@@ -320,7 +322,9 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 	c := in.Client
 
 	// 服务器盖时间戳（防客户端伪造）+ 强制北京时 + 盖发起方 ConnID（多端去重用）
-	e.TS = NowMS()
+	// [110] 同一 Hub 内严格递增：消息以此作为落库时间，到达顺序即展示顺序（异步并发落库也不会乱序）。
+	h.lastTS = monotonicTS(h.lastTS, NowMS())
+	e.TS = h.lastTS
 	// delivery 必须精确引用被送达的消息；read 允许旧客户端不带目标 ID，
 	// 由服务端以接收时间作为兼容游标。不能在这里为两类回执伪造目标消息 ID。
 	if e.ID == "" && e.Type != "delivery" && e.Type != "read" {

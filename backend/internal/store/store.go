@@ -847,22 +847,24 @@ func (s *Store) ListMessages(ctx context.Context, convID string, beforeID string
 	switch {
 	case afterID != "":
 		// [070] 增量同步：拉比 afterID 更新的消息，用于进会话后台静默刷新（前端先显本地缓存，再补这段增量）。
-		// 注意 messages.created_at 是 DATETIME 秒级精度，同一秒可能有多条 → 用 >= 而非 >，
+		// 注意 messages.created_at 自 012 起为 DATETIME(3) 毫秒精度；存量数据仍可能同一时刻多条 → 用 >= 而非 >，
 		// 避免漏掉与 afterID 同一秒的后续消息；带回的 afterID 自身那几条由前端按 message.id 去重丢弃。
 		// ASC 从旧到新，便于前端往列表尾部顺序追加。走 idx_conv_time(conv_id, created_at) 索引，O(log N)。
 		rows, err = s.db.QueryContext(ctx, `
 SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
 FROM messages WHERE conv_id=? AND created_at >= (SELECT created_at FROM messages WHERE id=?)
-ORDER BY created_at ASC LIMIT ?`, convID, afterID, limit)
+ORDER BY created_at ASC, id ASC LIMIT ?`, convID, afterID, limit)
 	case beforeID != "":
+		// [110] 向前翻页用 (created_at, id) 键集，与排序键完全一致：同一时刻的多条消息既不跳过也不重复
+		// （存量秒级数据大量同秒时，单比 created_at < 会把边界同秒的更早消息全部漏掉）。
 		rows, err = s.db.QueryContext(ctx, `
 SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
-FROM messages WHERE conv_id=? AND created_at < (SELECT created_at FROM messages WHERE id=?)
-ORDER BY created_at DESC LIMIT ?`, convID, beforeID, limit)
+FROM messages WHERE conv_id=? AND (created_at, id) < (SELECT created_at, id FROM messages WHERE id=?)
+ORDER BY created_at DESC, id DESC LIMIT ?`, convID, beforeID, limit)
 	default:
 		rows, err = s.db.QueryContext(ctx, `
 SELECT id, conv_id, sender, sender_ref, content, media_url, media_kind, media_name, media_size, delivered_ws, created_at
-FROM messages WHERE conv_id=? ORDER BY created_at DESC LIMIT ?`, convID, limit)
+FROM messages WHERE conv_id=? ORDER BY created_at DESC, id DESC LIMIT ?`, convID, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -943,14 +945,15 @@ WHERE c.visitor_id = ?`
 	case afterID != "":
 		rows, err = s.db.QueryContext(ctx, base+`
   AND m.created_at >= (SELECT created_at FROM messages WHERE id=?)
-ORDER BY m.created_at ASC LIMIT ?`, visitorID, afterID, limit)
+ORDER BY m.created_at ASC, m.id ASC LIMIT ?`, visitorID, afterID, limit)
 	case beforeID != "":
+		// [110] 与 ListMessages 相同的 (created_at, id) 键集翻页
 		rows, err = s.db.QueryContext(ctx, base+`
-  AND m.created_at < (SELECT created_at FROM messages WHERE id=?)
-ORDER BY m.created_at DESC LIMIT ?`, visitorID, beforeID, limit)
+  AND (m.created_at, m.id) < (SELECT created_at, id FROM messages WHERE id=?)
+ORDER BY m.created_at DESC, m.id DESC LIMIT ?`, visitorID, beforeID, limit)
 	default:
 		rows, err = s.db.QueryContext(ctx, base+`
-ORDER BY m.created_at DESC LIMIT ?`, visitorID, limit)
+ORDER BY m.created_at DESC, m.id DESC LIMIT ?`, visitorID, limit)
 	}
 	if err != nil {
 		return nil, err

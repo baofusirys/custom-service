@@ -9,11 +9,13 @@
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [3]，2026-10-14 核对）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（custom_service 当前已下线）**：`38.76.193.68`（MCP [5]，2026-10-14 核对）。2026-08-23 21:17 已恢复同机 `weixian-douxiaoyin`，其 7 个常驻服务全部 healthy；`custom_service` 容器数为 0，但 `cs_mysql_data`、`cs_redis_data`、证书卷和 `/srv/cs-data/` 均完整保留，可随时重新切回。公网 `https://maihaocs.icu/healthz` 返回 200。
 - **App(SwiftUI) 源码**：家中 Mac `/Users/chengmeiran/code/custom_service_swift`（独立 git 仓库，无远端；旧 `mobile_app` Flutter 版已归档）。构建机为 MCP 配置「Mac开发机-iOS构建」（192.168.3.6）。
-  - 当前版本 1.1 (2)，后端写死 `AppConfig.backendURL` = `https://k7m2x9p3.xn--5kroo.com`（k7m2x9p3.卖号.com，与卖号.com 商城客服 Widget 同址）；会话与自动登录凭据存钥匙串（`SessionVault`），重装同一开发者账号的 App 免输密码。
-  - 签名：免费 Personal Team `4JZ8K387NU`（[108] 起，唯一来源 `project.yml` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前装机序号 3840，有效期至 `2026-10-21T02:25:04+08:00`。
+  - 当前版本 1.2 (3)（[110]，唯一来源 `project.yml` 的 `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`），后端写死 `AppConfig.productionBackendURL` = `https://k7m2x9p3.xn--5kroo.com`（k7m2x9p3.卖号.com）；会话与自动登录凭据存钥匙串（`SessionVault`），重装同一开发者账号的 App 免输密码。
+  - 测试：Mac 本机隔离测试环境 `~/cs-testenv`（只监听 127.0.0.1，凭证见其 `secrets/test.env`），脚本与说明在 App 仓库 `scripts/qa/`；模拟器构建可用 `CS_BACKEND_URL` 指向测试后端，真机构建编译期剔除。
+  - 签名：免费 Personal Team `4JZ8K387NU`（[108] 起，唯一来源 `project.yml` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前装机序号 3848，有效期至 `2026-10-21T02:25:04+08:00`。
   - 自动续签：`auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点），日志 `auto_reinstall.log`；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
   - 待办：iPhone 需信任新开发者证书并首次登录一次（之后免密）；轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
 - **发布到生产/下游**：v0.7.4 已推送 GitHub 并打标签，7 个镜像已双推 GHCR 与阿里云 ACR；生产服 `49.233.156.149` 实际已运行 `cs-*:0.7.4`（2026-10-14 `docker ps` 核对），客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。
+- **待发布 v0.7.5（[110]）**：后端修复 `/files` 全部 400（生产当前图片/文件无法查看）、迁移 012 毫秒时间、消息顺序与历史翻页；代码已在本地 `main` 提交并通过隔离环境验证，**未推送 GitHub、未部署生产**，需爷爷同意后发布。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -23,7 +25,6 @@
 - 远端数据目录：`/srv/cs-data/{logs,uploads,ssl}`（铁律：必须在代码仓库外，详见 [CLAUDE.md 数据安全铁律]）
 - **远端 .env 路径**：`/srv/cs-data/.env`（[061] 起永久搬到仓库目录外，避免被 rsync/sftp 部署误删）
 - **最近一次本地备份留存**：未记录；超过 7 天视为未完成，需补做并登记。
-- **已知待办**：`backend/internal/config/version.go` 的 `Version` 仍为 0.7.3，与仓库根 `VERSION`（0.7.4）不一致，`/api/version` 对外显示旧版本，待下次后端发布修正。
 - **启动命令**：`cd /custom-service && docker compose --env-file /srv/cs-data/.env up -d --build`
 - **国内镜像源（pull 加速，可选）**：`REGISTRY_BASE=crpi-saarj7fitzff243d.cn-zhangjiakou.personal.cr.aliyuncs.com/baofusir`（阿里云张家口个人版，镜像公开免登录；配 `docker-compose.production.yml` + `docker compose pull` 用。CI 已配 4 个 ALIYUN_* Secret 自动双推 GHCR+阿里云。详见 CHANGELOG [074][075]）
 - 入口：
@@ -86,9 +87,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[110] 2026-10-14（北京时间）模拟器全面测试修复**：App v1.2(3) 交互与功能缺陷一次性修复并装机（序号 3848）；后端 v0.7.5 修复文件下载 400、消息顺序与翻页（待发布生产）；模拟器 28 项测试全过。
 - **[109] 2026-10-14（北京时间）App v1.1**：后端地址写死、钥匙串自动登录（重装免密）、新登录页、WSS 改 Authorization 头修复 v0.7.4 下实时通道；18 个单元测试通过，装机序号 3840；服务器未变更。
 - **[108] 2026-10-14（北京时间）App 新开发者账号重签装机**：切换 Team `4JZ8K387NU`，自动重装脚本重写（构建失败不装旧产物、真实连通判定、团队迁移一次性重装）；装机序号 3824，有效期至 10-21；服务器未变更。
-- **[107] 2026-10-05（北京时间）v0.7.4 已发布**：GitHub `main` 与 `v0.7.4` 标签已推送；Actions 7 个镜像已成功双推 GHCR 与阿里云 ACR；生产服尚未更新。
 
 ## 维护交接阅读顺序
 1. 本文件（`_internal/LATEST.md`）

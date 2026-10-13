@@ -686,6 +686,15 @@ func (s *Service) EnsureBootstrapAdmin(ctx context.Context, username, password s
 
 // ============ helpers ============
 
+// messageTime [110] 消息落库时间取 Hub 串行盖的接收时间（严格递增），而不是异步落库时刻，
+// 避免有界并发持久化导致同一会话内连续消息的时间先后与到达顺序不一致。
+func messageTime(ts int64) time.Time {
+	if ts <= 0 {
+		return time.Now()
+	}
+	return time.UnixMilli(ts)
+}
+
 func buildMsg(e *ws.Envelope, sender, senderRef string) *store.Message {
 	m := &store.Message{
 		ID:          e.ID,
@@ -693,7 +702,7 @@ func buildMsg(e *ws.Envelope, sender, senderRef string) *store.Message {
 		Sender:      sender,
 		SenderRef:   senderRef,
 		Content:     e.Content,
-		CreatedAt:   time.Now(),
+		CreatedAt:   messageTime(e.TS),
 		DeliveredWS: false,
 	}
 	if e.MediaURL != "" {

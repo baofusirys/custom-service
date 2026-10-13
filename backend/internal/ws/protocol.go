@@ -44,6 +44,14 @@ func NowMS() int64 {
 	return time.Now().In(tz).UnixMilli()
 }
 
+// monotonicTS 返回严格大于 last 的毫秒时间戳：同一毫秒或时钟回拨时顺延 1ms，保证消息时间唯一且递增。
+func monotonicTS(last, now int64) int64 {
+	if now <= last {
+		return last + 1
+	}
+	return now
+}
+
 // ValidMessageID 限制客户端幂等键，兼容 UUID、m2-* 与旧 local-*，防超长键耗尽索引/日志。
 func ValidMessageID(id string) bool {
 	if len(id) == 0 || len(id) > 36 {

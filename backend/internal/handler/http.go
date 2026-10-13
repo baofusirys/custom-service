@@ -865,15 +865,26 @@ func (h *HTTP) authorizeUpload(c *gin.Context, uploadBy string) (ref, convID str
 	return "", "", errors.New("未知 uploader")
 }
 
-// ServeFile 静态文件下载（受 token 保护：只能访问自己会话内的文件）
-func (h *HTTP) ServeFile(c *gin.Context) {
-	key := c.Param("key")
-	if key == "" || strings.Contains(key, "..") || filepath.IsAbs(key) || strings.ContainsAny(key, "\\\x00") {
-		c.AbortWithStatus(http.StatusBadRequest)
-		return
+// normalizeFileKey 把路由 /files/*key 的通配参数规范为存储键。
+// gin 的 *key 参数自带前导 "/"（如 "/2026/10/14/x.jpg"），必须先去掉这一个前导斜杠再做路径安全校验；
+// 否则所有合法请求都会被当作绝对路径拒绝（v0.7.4 回归：图片/文件一律 400）。
+// 仍拒绝：空键、路径穿越（..）、去掉前导斜杠后仍为绝对路径（如 "//etc/passwd"）、反斜杠与 NUL。
+func normalizeFileKey(raw string) (string, bool) {
+	key := strings.TrimPrefix(raw, "/")
+	if key == "" || strings.Contains(key, "..") || strings.HasPrefix(key, "/") || filepath.IsAbs(key) || strings.ContainsAny(key, "\\\x00") {
+		return "", false
 	}
 	cleanKey := filepath.ToSlash(filepath.Clean(filepath.FromSlash(key)))
-	if cleanKey == "." || strings.HasPrefix(cleanKey, "../") {
+	if cleanKey == "." || cleanKey == "" || strings.HasPrefix(cleanKey, "../") || strings.HasPrefix(cleanKey, "/") {
+		return "", false
+	}
+	return cleanKey, true
+}
+
+// ServeFile 静态文件下载（受 token 保护：只能访问自己会话内的文件）
+func (h *HTTP) ServeFile(c *gin.Context) {
+	cleanKey, ok := normalizeFileKey(c.Param("key"))
+	if !ok {
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
