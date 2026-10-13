@@ -9,10 +9,11 @@
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [3]，2026-10-14 核对）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（custom_service 当前已下线）**：`38.76.193.68`（MCP [5]，2026-10-14 核对）。2026-08-23 21:17 已恢复同机 `weixian-douxiaoyin`，其 7 个常驻服务全部 healthy；`custom_service` 容器数为 0，但 `cs_mysql_data`、`cs_redis_data`、证书卷和 `/srv/cs-data/` 均完整保留，可随时重新切回。公网 `https://maihaocs.icu/healthz` 返回 200。
 - **App(SwiftUI) 源码**：家中 Mac `/Users/chengmeiran/code/custom_service_swift`（独立 git 仓库，无远端；旧 `mobile_app` Flutter 版已归档）。构建机为 MCP 配置「Mac开发机-iOS构建」（192.168.3.6）。
-  - 签名：免费 Personal Team `4JZ8K387NU`（[108] 起，唯一来源 `project.yml` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前装机序号 3824，有效期至 `2026-10-21T02:25:04+08:00`。
+  - 当前版本 1.1 (2)，后端写死 `AppConfig.backendURL` = `https://k7m2x9p3.xn--5kroo.com`（k7m2x9p3.卖号.com，与卖号.com 商城客服 Widget 同址）；会话与自动登录凭据存钥匙串（`SessionVault`），重装同一开发者账号的 App 免输密码。
+  - 签名：免费 Personal Team `4JZ8K387NU`（[108] 起，唯一来源 `project.yml` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前装机序号 3840，有效期至 `2026-10-21T02:25:04+08:00`。
   - 自动续签：`auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点），日志 `auto_reinstall.log`；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
-  - 待办：iPhone 需信任新开发者证书；轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
-- **发布到生产/下游**：v0.7.4 已推送到 GitHub，`v0.7.4` 标签已创建；GitHub Actions 已成功构建并推送 7 个镜像到 GHCR 与阿里云 ACR。生产服 `49.233.156.149` 尚未拉取或更新。
+  - 待办：iPhone 需信任新开发者证书并首次登录一次（之后免密）；轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
+- **发布到生产/下游**：v0.7.4 已推送 GitHub 并打标签，7 个镜像已双推 GHCR 与阿里云 ACR；生产服 `49.233.156.149` 实际已运行 `cs-*:0.7.4`（2026-10-14 `docker ps` 核对），客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -85,9 +86,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[109] 2026-10-14（北京时间）App v1.1**：后端地址写死、钥匙串自动登录（重装免密）、新登录页、WSS 改 Authorization 头修复 v0.7.4 下实时通道；18 个单元测试通过，装机序号 3840；服务器未变更。
 - **[108] 2026-10-14（北京时间）App 新开发者账号重签装机**：切换 Team `4JZ8K387NU`，自动重装脚本重写（构建失败不装旧产物、真实连通判定、团队迁移一次性重装）；装机序号 3824，有效期至 10-21；服务器未变更。
 - **[107] 2026-10-05（北京时间）v0.7.4 已发布**：GitHub `main` 与 `v0.7.4` 标签已推送；Actions 7 个镜像已成功双推 GHCR 与阿里云 ACR；生产服尚未更新。
-- **[106] 2026-10-05（北京时间）v0.7.4 安全补丁**：消息与附件纯文本、上传三重类型校验、文件访问鉴权、WSS 子协议令牌、HttpOnly 后台会话 Cookie、JWT 会话版本吊销、对象权限、CORS 白名单、限流锁定/验证码、SSRF 和敏感静态文件防护；锁定基础镜像补丁版本；仅本地隔离验证，未连接其他项目服务器。
 
 ## 维护交接阅读顺序
 1. 本文件（`_internal/LATEST.md`）
