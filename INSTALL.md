@@ -456,12 +456,12 @@ docker compose up -d --build                  # 全启
 
 ## 9. 出问题去哪问
 
-- 看 [CHANGELOG.md](CHANGELOG.md)：项目演进历史，每条都带"起因 / 改了什么 / 验证方式"
+- 看 [CHANGELOG.md](_internal/CHANGELOG.md)：项目演进历史，每条都带"起因 / 改了什么 / 验证方式"
 - 看每个模块的 README：
   - [backend/README.md](backend/README.md)
   - [admin/README.md](admin/README.md)
   - [widget/README.md](widget/README.md)
   - [mobile_app/README.md](mobile_app/README.md)
   - [turn/README.md](turn/README.md)
-- 看 [LATEST.md](LATEST.md)：最新版本 + 关键开关位置速查
+- 看 [LATEST.md](_internal/LATEST.md)：最新版本 + 关键开关位置速查
 - 提 issue：到 GitHub 仓库 Issues 区

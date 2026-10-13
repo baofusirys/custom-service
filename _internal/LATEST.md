@@ -1,6 +1,6 @@
 ### 当前版本：v0.7.4 · 2026-10-05（北京时间）
 
-> 本文件是 AI 接手项目时的「第一站」。看完这一份再去看 CHANGELOG，别凭印象答。
+> 本文件是维护交接的「第一站」。看完这一份再去看 `_internal/CHANGELOG.md`，别凭印象答。
 
 ---
 
@@ -87,8 +87,8 @@
 - **[104] 2026-08-23 测试服项目切换**：安全下线 custom_service（不带 `-v`），恢复 weixian-douxiaoyin；7 个常驻服务 healthy、公网健康和后台入口 200、日志错误扫描为 0，两边持久化数据均保留。
 - **[103] 2026-08-23 v0.7.3 测试服验收**：7 服务运行且健康/后台/Widget 均 200；三连接公网 WSS 验证首次 ACK 11.62ms、重连重复 ACK 7.71ms、`client_id` 全链保留、数据库仅 1 行，非法别名被拒且落库 0 行。
 
-## AI 接手必读顺序
-1. 本文件（LATEST.md）
-2. `CHANGELOG.md` 最近 5~10 条
+## 维护交接阅读顺序
+1. 本文件（`_internal/LATEST.md`）
+2. `_internal/CHANGELOG.md` 最近 5~10 条（更早条目见 `_internal/CHANGELOG-archive/`）
 3. 用户问到的模块的 `README.md`（每个子模块都有）
 4. 真正动到的代码

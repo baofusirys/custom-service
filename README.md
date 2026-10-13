@@ -74,8 +74,8 @@ cd /opt/custom-service && docker compose pull && docker compose up -d
 
 ## 文档索引
 - **`INSTALL.md`** — 小白也能看懂的完整安装指南（**新手从这开始**）
-- `LATEST.md` — 当前版本最新坐标 / 入口 / 关键开关（AI 接手必读）
-- `CHANGELOG.md` — 全部变更日志
+- `_internal/LATEST.md` — 当前版本最新坐标 / 入口 / 关键开关（维护交接必读）
+- `_internal/CHANGELOG.md` — 全部变更日志（旧条目归档在 `_internal/CHANGELOG-archive/`）
 - `docs/INTEGRATION.md` — 集成方怎么把 widget 装到自己网站
 - `docs/DEPLOY.md` — 部署 / 备份 / 升级（精简版，给熟悉 Docker 的人）
 - `docs/ARCHITECTURE.md` — 架构总览 / 消息流转 / 长连接管理

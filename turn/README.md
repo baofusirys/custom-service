@@ -65,4 +65,4 @@ backend 实现见 `backend/internal/service/turn.go`。
 ## 上次重大改动
 
 - **2026-05-24** 引入 ([035])。原因：iPhone 端 VPN 导致 WebRTC P2P 失败。
-- 详见 CHANGELOG.md [035]。
+- 详见 _internal/CHANGELOG.md [035]。
