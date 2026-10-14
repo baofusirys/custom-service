@@ -1,5 +1,5 @@
 # ===== 构建阶段 =====
-FROM golang:1.26.7-alpine3.23 AS builder
+FROM golang:1.26.9-alpine3.23 AS builder
 ENV CGO_ENABLED=0 GOOS=linux GOFLAGS=-trimpath GOPROXY=https://goproxy.cn,direct
 WORKDIR /src
 # 把源码先全部 COPY 进来，go mod tidy 需要分析 import 来补全间接依赖
