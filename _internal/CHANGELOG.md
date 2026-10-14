@@ -4,6 +4,14 @@
 
 ---
 
+## [112] 2026-10-14 19:30 — v0.7.5 发布：部署前漏洞体检与依赖安全升级，推送 GitHub 构建镜像
+
+**起因 / 需求**：用户同意发布后端 0.7.5（[110][111] 的文件下载、消息顺序、会话列表修复）。
+**做了什么**：部署前 govulncheck 检出可达漏洞 10 个——5 个标准库（需 Go 1.26.9）已单独提交升级构建镜像 golang:1.26.9-alpine3.23；golang.org/x/net 0.55.0→0.60.0（HTTP/2 服务端崩溃/内存耗尽等 5 个），随之 x/crypto、x/sys、x/text 升级，go 指令升至 1.26.0。管理后台 npm audit 3 个 high（vue SSR XSS，后台无 SSR 不可达；source-map-js 仅构建期）仍按补丁版升级：vue 3.5.44、source-map-js 1.2.2。随后推送 main 与 v0.7.5 标签，由 GitHub Actions 构建 7 个镜像双推 GHCR 与阿里云 ACR。
+**验证**：GOTOOLCHAIN=go1.26.9 复扫 0 个可达漏洞（导入但未调用 1 个，记录在案）；go vet/test 全过；admin npm audit 0、测试 10/10、vite build 通过。
+**注意 / 遗留**：生产 cs 服务编排在 fakami 项目的 /fakami/docker-compose.yml 内，由其 .env 的 IMAGE_TAG 控制版本，更新生产需改动 fakami 项目，待用户确认方式。
+**证据**：`_internal/verification/vuln-scan-v0.7.5-*.txt`、`vuln-rescan-v0.7.5-*.txt`（本地）。
+
 ## [111] 2026-10-14 19:20 — 客服 App 完全重构重写 v2.0(4)；后端列表优先取进行中会话（并入待发布 0.7.5）
 
 **起因 / 需求**：用户要求完全重构、完全重写客服 App，功能与现有版本一致。
