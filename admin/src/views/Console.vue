@@ -297,10 +297,12 @@ async function pickConv(c) {
   activeConv.value = c
   c.unread = 0
   // 拉消息 + 接管会话并行（两个 RPC 互相独立，时间 = max 而非 sum）
-  await Promise.all([
+  // [117] 接管被拒（该客户由在线的其他客服接待）时不弹错误：会话转为只能查看、隐藏输入区，并显示接待人
+  const [, assigned] = await Promise.all([
     loadMessages(c.visitor_id),   // [090] 按客户拉完整历史（跨该访客所有会话段）
-    http.post(`/agent/conversations/${c.id}/assign`),
+    assignConversation(c),
   ])
+  if (!assigned) return
   // 刷新/崩溃恢复出的本地 outbox 在会话重新接管后立即用原 ID 幂等重发。
   resendPending()
   // assign 后 agent 已加入 byConv[c.id]，立即发 WSS read：
@@ -316,6 +318,34 @@ async function pickConv(c) {
   if (c.marked_unread === true) {
     c.marked_unread = false
     markConversationRead(c.id).catch(() => {})
+  }
+}
+
+// [117] 接管会话：成功返回 true；被拒（他人在线接待 / 已删除）时把会话标为只读并记录原因，返回 false。
+async function assignConversation(c) {
+  try {
+    await http.post(`/agent/conversations/${c.id}/assign`, null, { silent: true })
+    c._sendBlocked = ''
+    return true
+  } catch (e) {
+    const body = e?.response?.data || e || {}
+    if (e?.response?.status === 403 || e?.response?.status === 409 || body.code === 40303) {
+      c._sendBlocked = body.msg || '该客户正由其他客服接待，你只能查看聊天记录'
+    } else {
+      ElMessage.error(body.msg || '接管会话失败，请重试')
+    }
+    // 只读状态下仍可标记已读（服务端按「能查看即可已读」校验）
+    markConversationRead(c.id).catch(() => {})
+    return false
+  }
+}
+
+async function retryAssign() {
+  const c = activeConv.value
+  if (!c || c._readonly) return
+  if (await assignConversation(c)) {
+    resendPending()
+    ElMessage.success('已接管该客户，可以回复了')
   }
 }
 
@@ -1727,6 +1757,7 @@ function voiceCleanup() {
               <!-- [113] 客户资料：备注 / 标签 / 拉黑 -->
               <el-button link type="primary" size="small" @click="openProfile(activeConv)">客户资料</el-button>
               <el-tag v-if="activeConv._readonly" size="small" type="info">只读（历史记录）</el-tag>
+              <el-tag v-else-if="activeConv._sendBlocked" size="small" type="warning">只能查看</el-tag>
             </div>
           </div>
         </div>
@@ -1855,7 +1886,12 @@ function voiceCleanup() {
         </template>
       </el-main>
 
-      <el-footer v-if="activeConv && !activeConv._readonly" class="chat-footer">
+      <el-alert v-if="activeConv && !activeConv._readonly && activeConv._sendBlocked" type="warning" show-icon :closable="false" :title="activeConv._sendBlocked">
+        <template #default>
+          <el-button size="small" type="primary" link @click="retryAssign">重新检查（对方离线后可接管）</el-button>
+        </template>
+      </el-alert>
+      <el-footer v-if="activeConv && !activeConv._readonly && !activeConv._sendBlocked" class="chat-footer">
         <!-- [040] pending 多文件预览队列：粘贴 / 选附件追加到这里，点发送才依次上传 -->
         <!-- [068] currentPendingFiles：仅显示当前活跃会话的 pending，切会话自动切换显示 -->
         <div v-if="currentPendingFiles.length" class="pending-list">

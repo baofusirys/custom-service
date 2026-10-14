@@ -123,10 +123,13 @@ type MessageSink interface {
 	// PersistDeliveryAsync 校验访客身份与消息归属后，幂等持久化送达状态并广播。
 	PersistDeliveryAsync(e *Envelope, c *Client)
 
-	// AgentOwnsConv [096] 校验 agent 是否拥有（或该会话尚未分配）该会话。
-	//   仅供 hub 在 WSS 重连后「自愈 attach」时判断能否信任客户端声明的 conv；
+	// AgentOwnsConv [096][117] 校验 agent 是否拥有（或该会话尚未分配）该会话。
+	//   hub 在客户端声明的 conv 与连接绑定不一致（含重连后绑定为空）时用它决定能否切换绑定；
 	//   底层复用 store.AgentOwnsConversation（伪造/越权 conv 会被 SQL 挡下），出错按 false 处理。
 	AgentOwnsConv(ctx context.Context, convID, agentID string) bool
+
+	// AgentCanReadConv [117] 与 HTTP 已读同口径：能查看该会话聊天记录即可标记已读（含管理员）。出错按 false 处理。
+	AgentCanReadConv(ctx context.Context, convID, agentID string) bool
 
 	// PersistReadAsync 异步落库「读到时刻」：把指定 role 的 last_read_*_at 推到现在。
 	// role: "agent" 或 "visitor"。失败仅记日志，不阻塞 WSS 广播。
@@ -364,24 +367,17 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 				return // 被限流或拒绝，不广播也不入库
 			}
 		} else {
-			boundConv := c.ConversationID()
 			e.From = "agent:" + c.ID
-			// [096] 重连自愈：WSS 断线重连会产生「全新连接」，其 c.ConvID 为空
-			//   （openConv 时的 HTTP /assign→AttachAgentToConv 只 attach 了当时已存在的旧连接）。
-			//   客户端从通知/回前台唤醒后强制重连（[095]），若此时聊天界面还开着并发消息，
-			//   新连接空 ConvID 会命中下方 PreprocessAgentMessage 的 c.ConvID=="" 分支被拒
-			//   （agent_msg_no_conv，只回 error 不回 ack）→ App 端干等 12s ackTimeout 才标红「未送达」。
-			//   这里做兜底：客户端 chat 带了 conv 且该会话确属本 agent（或未分配）时，把新连接补 attach，
-			//   让本条及后续消息正常收发。安全性：AgentOwnsConv 校验归属，伪造/越权 conv 会被挡，
-			//   不放开 [077]/[068] 的「服务器权威 conv 防串台」铁律（仅在 c.ConvID 为空这一窗口生效）。
-			if boundConv == "" && e.ConvID != "" && h.sink.AgentOwnsConv(ctx, e.ConvID, c.ID) {
-				boundConv = e.ConvID
-				c.SetConversationID(boundConv)
-				h.attachConv(c)
-				h.bizLog.Info("agent_conv_self_heal",
-					zap.String("agent", c.ID), zap.String("conv", boundConv), zap.String("conn", c.ConnID))
+			// [117] 客服消息投递到「客户端声明的会话」，且必须通过归属校验；绝不改投到连接上残留的其他会话。
+			//   根因（生产 2026-10-15 04:38 取证）：同一账号所有连接共用一个「当前会话」绑定，打开 A 会话（接管成功）
+			//   再打开 B 会话（他人接待、接管被拒）后，连接仍绑定 A；旧逻辑用绑定值覆盖客户端 conv，
+			//   在 B 页面发出的消息被落库并推送给了 A 客户（串台）。现在声明与绑定不一致时：校验通过才切换本连接，
+			//   否则拒绝并回带消息 ID 的 error。旧客户端不带 conv 时沿用绑定（空绑定由 PreprocessAgentMessage 拒绝）。
+			if !h.bindAgentConv(ctx, c, e.ConvID, "chat") {
+				c.Send(&Envelope{Type: "error", ID: e.ID, Content: AgentConvForbiddenText, TS: NowMS()})
+				return
 			}
-			e.ConvID = boundConv // [077] 对齐 visitor(上方)：agent 也用服务器权威会话，不信任前端传的 conv 字段
+			e.ConvID = c.ConversationID()
 			sender = "agent"
 			if !h.sink.PreprocessAgentMessage(ctx, e, c) {
 				return
@@ -416,6 +412,16 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 			role = "agent"
 		}
 		boundConv := c.ConversationID()
+		// [117] 客服声明的会话与绑定不一致：按「能查看即可已读」口径校验后使用声明值（不切换绑定）；
+		//   校验不过直接丢弃，绝不把已读记到绑定的其他会话上。
+		if c.Kind == KindAgent && e.ConvID != "" && e.ConvID != boundConv {
+			if !validConvID(e.ConvID) || !h.sink.AgentCanReadConv(ctx, e.ConvID, c.ID) {
+				h.secLog.Warn("read_receipt_conv_rejected",
+					zap.String("conn", c.ConnID), zap.String("actor", c.ID), zap.String("conv", safeConvForLog(e.ConvID)))
+				return
+			}
+			boundConv = e.ConvID
+		}
 		if boundConv == "" {
 			h.secLog.Warn("read_receipt_no_conv", zap.String("conn", c.ConnID), zap.String("actor", c.ID))
 			return
@@ -439,8 +445,12 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 		}
 		h.sink.OnPageNavigation(c.ID, boundConv, url, title)
 	case "typing":
-		// [113] 仅转发、不落库。会话与发送方一律取服务器绑定值（不信任客户端 conv/from），
+		// [113] 仅转发、不落库。会话与发送方一律取服务器绑定值（不信任客户端 from），
 		// 丢弃一切内容字段防被当作隐蔽消息通道；每连接 1 秒最多转发 1 次；已拉黑访客不转发。
+		// [117] 客服声明的会话与绑定不一致时按归属校验切换（与 chat 同规则），校验不过则丢弃，不再发给绑定的其他客户。
+		if c.Kind == KindAgent && !h.bindAgentConv(ctx, c, e.ConvID, "typing") {
+			return
+		}
 		if typing := buildTypingEnvelope(c, time.Now().UnixMilli()); typing != nil {
 			h.FanoutToConv(ctx, typing)
 		}
@@ -836,6 +846,10 @@ func (h *Hub) fanoutLocal(e *Envelope) FanoutResult {
 	if m, ok := h.byConv.Load(e.ConvID); ok {
 		m.(*sync.Map).Range(func(_, v any) bool {
 			c := v.(*Client)
+			// [117] 输入状态不回送给发出它的连接（省带宽，也避免客户端误把自己的输入当成对方的）
+			if e.Type == "typing" && e.ConnID != "" && c.ConnID == e.ConnID {
+				return true
+			}
 			if c.Kind == KindVisitor {
 				// assign/重连并发时 byConv 可能短暂残留旧索引；再次核对权威绑定，防跨会话误投。
 				if c.ConversationID() != e.ConvID {

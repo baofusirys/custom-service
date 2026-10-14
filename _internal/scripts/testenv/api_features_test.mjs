@@ -356,7 +356,7 @@ sql("UPDATE conversations SET agent_id=" + Number(admin.id) + ", unread_agent=3 
 r = await api('GET', '/api/agent/visitor/' + V5.vid + '/messages', { token: B.token });
 check('前提：普通客服能查看该访客聊天记录', r.status === 200 && r.code === 0, r);
 r = await api('POST', '/api/agent/conversations/' + V5.conv + '/assign', { token: B.token });
-check('写操作不变：普通客服仍不能接管他人会话', r.status === 403 && r.code === 40302, r);
+check('写操作不变：接待客服在线时普通客服仍不能接管（40303 并返回接待人）', r.status === 403 && r.code === 40303 && !!r.owner, r);
 const bMark = B.events.length;
 const bSend = await agentSay(B, V5.conv, '越权发送 ' + run);
 check('写操作不变：普通客服不能向他人会话发消息', !bSend && !!(await waitFor(B.events, (e) => B.events.indexOf(e) >= bMark && e.type === 'error', 3000)), bSend);

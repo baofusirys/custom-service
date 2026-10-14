@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -99,7 +100,11 @@ func (s *Service) PreprocessVisitorMessage(ctx context.Context, e *ws.Envelope, 
 
 // PreprocessAgentMessage 同步阶段：[077] conv 强制校验（杜绝 agent 孤儿消息）+ 内容清洗。
 func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c *ws.Client) bool {
-	convID := c.ConversationID()
+	// [117] 以 hub 已解析好的目标会话为准（与归属校验、落库使用同一个值，杜绝并发改绑造成的不一致）
+	convID := e.ConvID
+	if convID == "" {
+		convID = c.ConversationID()
+	}
 	// [077] 根因：客服 WSS 刚建连时 c.ConvID 为空，必须点开会话(AssignSelf→AttachAgentToConv)才填上。
 	//   在「建连→接管」窗口内发消息，空 c.ConvID 会被原样入库 → 孤儿消息（按会话 conv_id 查不到、界面"消失"）。
 	//   visitor 路径有兜底(PersistMessageAsync OpenOrGetConversation)，但 agent 不能自动补会话（会错关联到别的会话），
@@ -120,6 +125,38 @@ func (s *Service) PreprocessAgentMessage(ctx context.Context, e *ws.Envelope, c 
 		s.bizLog.Warn("agent_conv_forbidden", zap.String("agent", c.ID), zap.String("conv", convID))
 		return false
 	}
+	// 客户端自带的扩展字段不透传（只保留服务端写入的字段）
+	e.Extra = nil
+	// [117] 旧会话已结束而同一客户已开启新会话（超时关旧开新）：投递到新会话，否则访客收不到。
+	//   新会话未分配 → 顺带分配给本客服；已由本人接待 → 直接投递；由其他客服接待 → 拒绝（不越权代发）。
+	next, owner, err := s.store.FollowUpConversation(ctx, convID)
+	if err != nil {
+		s.bizLog.Warn("agent_follow_up_lookup_failed", zap.Error(err), zap.String("conv", convID))
+	} else if next != "" {
+		agentID, _ := strconv.ParseInt(c.ID, 10, 64)
+		switch {
+		case owner == 0:
+			if err := s.store.AssignAgent(ctx, next, agentID); err != nil {
+				s.bizLog.Error("agent_follow_up_assign_failed", zap.Error(err), zap.String("conv", next))
+				c.Send(&ws.Envelope{Type: "error", ID: e.ID, Content: "会话校验失败，请重试", TS: ws.NowMS()})
+				return false
+			}
+		case owner == agentID:
+		default:
+			c.Send(&ws.Envelope{Type: "error", ID: e.ID, Content: ws.AgentConvForbiddenText, TS: ws.NowMS()})
+			s.secLog.Warn("agent_follow_up_forbidden", zap.String("agent", c.ID), zap.String("from", convID), zap.String("to", next))
+			return false
+		}
+		if s.hub != nil {
+			s.hub.RebindClient(c, next)
+		} else {
+			c.SetConversationID(next)
+		}
+		s.bizLog.Info("agent_msg_follow_up_conversation", zap.String("agent", c.ID), zap.String("from", convID), zap.String("to", next))
+		e.Extra = map[string]any{"requested_conv": convID}
+		convID = next
+	}
+	e.ConvID = convID
 	if e.Content != "" {
 		e.Content = security.SanitizeText(e.Content)
 	}
@@ -139,6 +176,28 @@ func (s *Service) AgentOwnsConv(ctx context.Context, convID, agentID string) boo
 	if err != nil {
 		s.bizLog.Warn("agent_owns_conv_check_err",
 			zap.Error(err), zap.String("conv", convID), zap.String("agent", agentID))
+		return false
+	}
+	return ok
+}
+
+// AgentCanReadConv [117] 实现 ws.MessageSink：WS 已读回执的会话与连接绑定不一致时，按 HTTP 已读同口径校验
+// （管理员；或会话分配给本人/未分配；或该访客存在分配给本人/未分配的会话）。账号不存在、已停用或出错一律 false。
+func (s *Service) AgentCanReadConv(ctx context.Context, convID, agentID string) bool {
+	id, err := strconv.ParseInt(agentID, 10, 64)
+	if err != nil || id <= 0 || convID == "" {
+		return false
+	}
+	agent, err := s.store.GetAgentByID(ctx, id)
+	if err != nil || agent == nil || !agent.Active {
+		if err != nil {
+			s.bizLog.Warn("agent_can_read_conv_lookup_err", zap.Error(err), zap.String("agent", agentID))
+		}
+		return false
+	}
+	ok, err := s.store.AgentCanReadConversation(ctx, convID, id, agent.Role == "admin")
+	if err != nil {
+		s.bizLog.Warn("agent_can_read_conv_check_err", zap.Error(err), zap.String("conv", convID), zap.String("agent", agentID))
 		return false
 	}
 	return ok

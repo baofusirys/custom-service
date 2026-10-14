@@ -42,14 +42,17 @@ if (await qr.count()) {
   await page.waitForTimeout(1200);
   await shot('w02-quick-reply');
   const pop = await page.locator('body').innerText();
-  check('快捷回复列表含团队/我的话术', pop.includes('付款方式') || pop.includes('暂无'), pop.slice(-300));
+  check('快捷回复面板显示话术类型（我的/团队）或空提示', /我的|团队|暂无/.test(pop), pop.slice(-300));
   const row = page.locator('.el-popper .el-table__row').first();
   check('快捷回复面板有可选话术', await row.count() > 0);
   if (await row.count()) {
+    // 以第一行的内容为准（测试数据会随其他巡检变化），点选后输入框应包含该内容
+    const cells = row.locator('td');
+    const content = ((await cells.nth((await cells.count()) - 1).innerText().catch(() => '')) || '').replace(/[…\s]+$/, '').slice(0, 8);
     await row.click();
     await page.waitForTimeout(500);
     const val = await page.locator('textarea').last().inputValue().catch(() => '');
-    check('点击话术填入输入框', val.includes('支持支付宝和微信'), val);
+    check('点击话术填入输入框', content.length > 0 && val.includes(content), { content, val });
   }
   await page.keyboard.press('Escape');
 }

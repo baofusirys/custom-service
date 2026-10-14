@@ -14,6 +14,9 @@ type messageSinkSpy struct {
 	delivered int
 	read      int
 	last      Envelope
+	// owned / readable 为 nil 时视为全部允许；非 nil 时只允许列出的会话（[117] 归属校验用例）。
+	owned    map[string]bool
+	readable map[string]bool
 }
 
 func (s *messageSinkSpy) OnVisitorConnect(context.Context, *Client) error    { return nil }
@@ -34,7 +37,12 @@ func (s *messageSinkSpy) PersistDeliveryAsync(e *Envelope, _ *Client) {
 	s.delivered++
 	s.last = *e
 }
-func (s *messageSinkSpy) AgentOwnsConv(context.Context, string, string) bool { return true }
+func (s *messageSinkSpy) AgentOwnsConv(_ context.Context, conv, _ string) bool {
+	return s.owned == nil || s.owned[conv]
+}
+func (s *messageSinkSpy) AgentCanReadConv(_ context.Context, conv, _ string) bool {
+	return s.readable == nil || s.readable[conv]
+}
 func (s *messageSinkSpy) PersistReadAsync(e *Envelope, _ *Client, _ string) {
 	s.read++
 	s.last = *e
@@ -57,7 +65,7 @@ func testHubAndClient(kind Kind, id, conv string) (*Hub, *Client, *messageSinkSp
 func TestChatQueuesPersistenceWithoutPrematureAck(t *testing.T) {
 	hub, client, spy := testHubAndClient(KindAgent, "7", "conv-a")
 	hub.handleIncoming(context.Background(), incoming{Client: client, Env: &Envelope{
-		Type: "chat", ID: "m2-0123456789abcdef0123456789abcdef", ClientID: "local-1724312345678", ConvID: "spoof", Content: "hello",
+		Type: "chat", ID: "m2-0123456789abcdef0123456789abcdef", ClientID: "local-1724312345678", ConvID: "conv-a", Content: "hello",
 	}})
 	if spy.persisted != 1 {
 		t.Fatalf("消息应进入持久化流水线，实际=%d", spy.persisted)

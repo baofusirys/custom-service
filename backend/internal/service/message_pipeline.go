@@ -44,7 +44,11 @@ func (s *Service) runBounded(slots chan struct{}, event string, c *ws.Client, me
 // PersistMessageAsync 使用有界并发完成事务持久化；成功后才 ACK 和广播。
 func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender string) {
 	snap := *e
-	convID, siteID, clientID := c.ConversationID(), c.SiteID, c.ID
+	// [117] 以已解析的目标会话为准（hub/预处理已校验），不再二次读取连接绑定，避免并发改绑造成投递到其他会话
+	convID, siteID, clientID := snap.ConvID, c.SiteID, c.ID
+	if convID == "" {
+		convID = c.ConversationID()
+	}
 	s.runBounded(s.messageSlots, "message_persist", c, snap.ID, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), messagePersistTimeout)
 		defer cancel()
@@ -98,8 +102,16 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 
 		// ACK 的唯一语义是数据库事务已经成功提交；重复重试也返回同一成功 ACK。
 		// agent ACK 按账号同步到所有连接，client_id 让旧 local-* outbox 与服务端稳定 ID 可归并。
-		ack := &ws.Envelope{Type: "ack", ID: snap.ID, ClientID: snap.ClientID, ConvID: convID, TS: ws.NowMS(),
-			Extra: map[string]any{"status": "persisted", "client_id": snap.ClientID, "duplicate": !inserted}}
+		ackExtra := map[string]any{"status": "persisted", "client_id": snap.ClientID, "duplicate": !inserted}
+		if sender == "agent" {
+			// [117] 投递到客户的新会话时告知客户端原请求会话，便于其把聊天页切换到新会话
+			if m, ok := snap.Extra.(map[string]any); ok {
+				if rc, ok := m["requested_conv"].(string); ok && rc != "" && rc != convID {
+					ackExtra["requested_conv"] = rc
+				}
+			}
+		}
+		ack := &ws.Envelope{Type: "ack", ID: snap.ID, ClientID: snap.ClientID, ConvID: convID, TS: ws.NowMS(), Extra: ackExtra}
 		ackTargets := 0
 		if sender == "agent" && s.hub != nil {
 			ackTargets = s.hub.FanoutToAgent(ctx, clientID, ack)

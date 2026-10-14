@@ -638,20 +638,72 @@ func (h *HTTP) ListMessagesByVisitor(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": msgs})
 }
 
-// AssignSelf 客服接管会话
+// AssignSelf 客服接管会话。
+// [117] 会话由其他客服接待时的接管规则：管理员可直接接管；原接待客服已停用或当前不在线时，任何客服可接管；
+// 原接待客服在线时普通客服不可接管，返回 40303 与接待人名称（客户端据此显示「只能查看」并禁用发送）。
+// 接管用条件更新保证原子性（并发接管只有一个成功），并写审计；原客服绑定在该会话上的连接随即解除。
 func (h *HTTP) AssignSelf(c *gin.Context) {
 	convID := c.Param("id")
-	aid, _ := c.Get("agent_id")
-	agentID := aid.(int64)
-	if !h.agentCanAccessConversation(c, convID) {
-		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或已由其他客服接管"})
+	a := currentAgent(c)
+	ctx := c.Request.Context()
+	if !ValidConversationID(convID) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或已删除"})
 		return
 	}
-	if err := h.svc.Store().AssignAgent(c.Request.Context(), convID, agentID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 50008, "msg": "分配失败"})
+	owns, err := h.svc.Store().AgentOwnsConversation(ctx, convID, a.IDStr)
+	if err != nil {
+		h.serverError(c, "assign_owner_check_failed", err)
 		return
 	}
-	h.hub.AttachAgentToConv(fmt.Sprintf("%d", agentID), convID)
+	if !owns {
+		owner, err := h.svc.Store().ConversationOwner(ctx, convID)
+		if err != nil {
+			h.serverError(c, "assign_owner_lookup_failed", err)
+			return
+		}
+		if !owner.Exists || owner.OwnerID == 0 {
+			c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或已删除"})
+			return
+		}
+		ownerOnline := h.hub.AgentOnline(fmt.Sprintf("%d", owner.OwnerID))
+		reason := ""
+		switch {
+		case a.Admin:
+			reason = "admin"
+		case !owner.OwnerActive:
+			reason = "owner_disabled"
+		case !ownerOnline:
+			reason = "owner_offline"
+		}
+		if reason == "" {
+			reqID, _ := c.Get("request_id")
+			h.svc.BizLog().Info("conversation_takeover_denied",
+				zap.Int64("aid", a.ID), zap.String("conv", convID), zap.Int64("owner", owner.OwnerID),
+				zap.String("request_id", fmt.Sprintf("%v", reqID)))
+			c.JSON(http.StatusForbidden, gin.H{"code": 40303, "msg": "该客户正由「" + owner.OwnerName + "」接待，对方在线，你只能查看聊天记录",
+				"owner": owner.OwnerName, "owner_online": true})
+			return
+		}
+		ok, err := h.svc.Store().TakeOverConversation(ctx, convID, owner.OwnerID, a.ID)
+		if err != nil {
+			h.serverError(c, "conversation_takeover_failed", err)
+			return
+		}
+		if !ok {
+			c.JSON(http.StatusConflict, gin.H{"code": 40903, "msg": "会话状态已变化，请返回列表刷新后重试"})
+			return
+		}
+		h.hub.DetachAgentFromConv(fmt.Sprintf("%d", owner.OwnerID), convID)
+		h.auditAction(c, "conversation_takeover", convID, map[string]any{
+			"from_agent": owner.OwnerID, "to_agent": a.ID, "reason": reason, "owner_online": ownerOnline})
+	} else if err := h.svc.Store().AssignAgent(ctx, convID, a.ID); err != nil {
+		h.serverError(c, "assign_failed", err)
+		return
+	}
+	// [117] 客户端带上自己的实时连接 ID 时只绑定该设备；旧客户端未带时绑定该账号全部连接（原行为）
+	if !h.hub.AttachAgentConnToConv(a.IDStr, strings.TrimSpace(c.GetHeader("X-CS-Conn")), convID) {
+		h.hub.AttachAgentToConv(a.IDStr, convID)
+	}
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }
 

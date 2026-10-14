@@ -49,6 +49,8 @@ func mapMySQLError(err error) error {
 
 type Store struct {
 	db *sql.DB
+	// flight [117] 列表与计数的并发合并（零值可用，见 list_flight.go）。
+	flight queryFlight
 }
 
 func New(db *sql.DB) *Store { return &Store{db: db} }
@@ -359,6 +361,83 @@ func (s *Store) AssignAgent(ctx context.Context, convID string, agentID int64) e
 	return err
 }
 
+// ConversationOwnerInfo [117] 会话当前接待客服（接管规则用）。Exists=false 表示会话不存在或已删除；OwnerID=0 表示未分配。
+type ConversationOwnerInfo struct {
+	Exists      bool
+	OwnerID     int64
+	OwnerName   string // 昵称优先，其次用户名
+	OwnerActive bool
+}
+
+// ConversationOwner [117] 只读、参数化查询会话的接待客服。
+func (s *Store) ConversationOwner(ctx context.Context, convID string) (ConversationOwnerInfo, error) {
+	var (
+		info     ConversationOwnerInfo
+		ownerID  sql.NullInt64
+		username sql.NullString
+		nickname sql.NullString
+		active   sql.NullBool
+	)
+	err := s.db.QueryRowContext(ctx, `
+SELECT c.agent_id, a.username, a.nickname, a.active
+FROM conversations c LEFT JOIN agents a ON a.id = c.agent_id
+WHERE c.id = ? AND c.deleted_at IS NULL LIMIT 1`, convID).Scan(&ownerID, &username, &nickname, &active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return info, nil
+	}
+	if err != nil {
+		return info, err
+	}
+	info.Exists = true
+	if ownerID.Valid {
+		info.OwnerID = ownerID.Int64
+		info.OwnerName = nickname.String
+		if info.OwnerName == "" {
+			info.OwnerName = username.String
+		}
+		info.OwnerActive = active.Valid && active.Bool
+	}
+	return info, nil
+}
+
+// TakeOverConversation [117] 原子接管：仅当会话仍由 fromAgent 接待且未删除时改为 toAgent。
+// 返回 false 表示状态已变化（并发接管、已删除），调用方应提示重试。不刷新 updated_at（接管不是新消息活动）。
+func (s *Store) TakeOverConversation(ctx context.Context, convID string, fromAgent, toAgent int64) (bool, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE conversations SET agent_id=? WHERE id=? AND agent_id=? AND deleted_at IS NULL`,
+		toAgent, convID, fromAgent)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// FollowUpConversation [117] 会话已结束、且同一客户之后又有进行中的会话时，返回最新的进行中会话及其接待客服（0=未分配）；
+// 否则返回空串。用于客服在旧会话页面回复时投递到客户当前所在的会话（访客端只订阅当前会话，旧会话的消息收不到）。
+func (s *Store) FollowUpConversation(ctx context.Context, convID string) (string, int64, error) {
+	var (
+		next  string
+		owner sql.NullInt64
+	)
+	err := s.db.QueryRowContext(ctx, `
+SELECT n.id, n.agent_id
+FROM conversations o
+JOIN conversations n ON n.visitor_id = o.visitor_id AND n.site_id = o.site_id
+WHERE o.id = ? AND o.status = 'closed' AND n.status = 'open' AND n.deleted_at IS NULL AND n.id <> o.id
+ORDER BY n.updated_at DESC LIMIT 1`, convID).Scan(&next, &owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, nil
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	if owner.Valid {
+		return next, owner.Int64, nil
+	}
+	return next, 0, nil
+}
+
 func (s *Store) CloseConversation(ctx context.Context, convID string) error {
 	now := time.Now()
 	_, err := s.db.ExecContext(ctx,
@@ -371,7 +450,7 @@ func (s *Store) CloseConversation(ctx context.Context, convID string) error {
 
 // ListAllVisitorConversations [088]「全部」：所有来过的访客(一人一条最新会话，跨 open/closed)。
 func (s *Store) ListAllVisitorConversations(ctx context.Context, tag string, limit, offset int) ([]map[string]any, error) {
-	return s.listVisitorAggregated(ctx, false, tag, limit, offset)
+	return s.sharedList(ctx, false, tag, limit, offset) // [117] 并发同键合并
 }
 
 // MarkAgentReplied [085] 标记会话已被客服回复过（客服发消息时调用）。
@@ -391,19 +470,19 @@ func (s *Store) MarkAgentReplied(ctx context.Context, convID string) error {
 //	口径 = 访客名下任一会话 visitor_engaged=1（按客户聚合、跨 open/closed），不管客服是否回复过。
 //	爷爷定的「已联系」真义：访客手动操作过才算；纯浏览(page_navigation)/系统问候/访客进入一律不算。
 func (s *Store) ListContactedConversations(ctx context.Context, tag string, limit, offset int) ([]map[string]any, error) {
-	return s.listVisitorAggregated(ctx, true, tag, limit, offset)
+	return s.sharedList(ctx, true, tag, limit, offset) // [117] 并发同键合并
 }
 
 // [088]「待回复」(ListPending/CountPending) 已移除：爷爷决定列表只保留「全部 / 已联系」两个口径。
 
 // CountContactedVisitors [088]「已联系」客户总数（主动操作过的去重访客数）。
 func (s *Store) CountContactedVisitors(ctx context.Context, tag string) (int, error) {
-	return s.countVisibleVisitors(ctx, true, tag)
+	return s.sharedCount(ctx, true, tag) // [117] 并发同键合并
 }
 
 // CountAllVisitors [088]「全部」客户总数（所有来过的去重访客，跨 open/closed）。
 func (s *Store) CountAllVisitors(ctx context.Context, tag string) (int, error) {
-	return s.countVisibleVisitors(ctx, false, tag)
+	return s.sharedCount(ctx, false, tag) // [117] 并发同键合并
 }
 
 // ============ Message ============
