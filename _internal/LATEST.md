@@ -1,4 +1,4 @@
-### 当前版本：v0.8.2（已部署生产）· App 3.0.1 (7) Flutter 版 · 2026-10-15（北京时间）
+### 当前版本：v0.8.2（已部署生产）· App 3.1.0 (8) Flutter 版 · 2026-10-15（北京时间）
 
 > 本文件是维护交接的「第一站」。看完这一份再去看 `_internal/CHANGELOG.md`，别凭印象答。
 
@@ -9,9 +9,9 @@
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [3]，2026-10-14 核对）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:<IMAGE_TAG>`，版本由 `/fakami/.env` 与 `/srv/cs-data/.env` 的 `IMAGE_TAG` 控制，编排在 `/fakami/docker-compose.yml`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（custom_service 当前已下线）**：`38.76.193.68`（MCP [5]，2026-10-14 核对）。2026-08-23 21:17 已恢复同机 `weixian-douxiaoyin`，其 7 个常驻服务全部 healthy；`custom_service` 容器数为 0，但 `cs_mysql_data`、`cs_redis_data`、证书卷和 `/srv/cs-data/` 均完整保留，可随时重新切回。公网 `https://maihaocs.icu/healthz` 返回 200。
 - **App（Flutter，[115] 起）源码**：家中 Mac `/Users/chengmeiran/code/custom_service_flutter`（独立 git 仓库，无远端，初始快照 9180242）。构建机为 MCP 配置「Mac开发机-iOS构建」（192.168.3.6）。旧 SwiftUI 版目录已按爷爷要求删除，完整归档（含 git 历史，已校验可恢复）在 Mac `~/code/_archive/custom_service_swift-20261015-001756.tar.gz`。
-  - 当前版本 3.0.1 (7)（唯一来源 `pubspec.yaml` 的 `version`），功能与 Swift v2.1 一致、界面全新设计；分层 lib/core、domain、features、ui，组合根 `lib/app/app_model.dart`；后端写死 `lib/core/config.dart` 的 `productionBackendURL` = `https://k7m2x9p3.xn--5kroo.com`。包名 `com.chengmeiran.customservice` 与钥匙串条目不变（原生通道 `ios/Runner/AppDelegate.swift` 的 cs/keychain），从旧版升级免重新登录。
+  - 当前版本 3.1.0 (8)（唯一来源 `pubspec.yaml` 的 `version`），功能与 Swift v2.1 一致；[118] 起界面按爷爷提供的设计稿改版（设计系统在 `lib/ui/kit/`）；分层 lib/core、domain、features、ui，组合根 `lib/app/app_model.dart`；后端写死 `lib/core/config.dart` 的 `productionBackendURL` = `https://k7m2x9p3.xn--5kroo.com`。包名 `com.chengmeiran.customservice` 与钥匙串条目不变（原生通道 `ios/Runner/AppDelegate.swift` 的 cs/keychain），从旧版升级免重新登录。
   - 测试：Mac 本机隔离测试环境 `~/cs-testenv`（只监听 127.0.0.1，凭证见其 `secrets/test.env`）；App 单测 `flutter test test`，模拟器端到端 `scripts/run_e2e.sh <标签>`（测试后端地址仅模拟器生效）。测试后端二进制用本仓库 `_internal/scripts/build-testenv-backend.ps1` 构建；接口/数据复位/造数/列表耗时/浏览器联调脚本在 `_internal/scripts/testenv/`。CocoaPods 的 WebRTC 二进制需经 Mac 本机代理下载（见 App 仓库 README）。
-  - 签名：免费 Personal Team `4JZ8K387NU`（唯一来源 `ios/Runner.xcodeproj` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前手机上是 3.0.1 (7)（装机序号 3932，2026-10-15 05:45 安装，已回读确认），有效期至 `2026-10-21T02:25:04+08:00`。
+  - 签名：免费 Personal Team `4JZ8K387NU`（唯一来源 `ios/Runner.xcodeproj` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前手机上是 3.1.0 (8)（装机序号 3940，2026-10-15 06:31 安装，已回读确认），有效期至 `2026-10-21T02:25:04+08:00`。
   - 自动续签：App 仓库 `scripts/auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点，已改指向 Flutter 脚本），日志 Mac `~/Library/Logs/custom_service_app/auto_reinstall.log`（旧版历史在同目录 `auto_reinstall-swift-history.log`）；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
   - 待办：轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
 - **发布到生产/下游**：v0.8.2 已推送 GitHub（标签 v0.8.2）并于 2026-10-15 05:41 部署生产（只改 IMAGE_TAG、只更新 7 个 cs 容器，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.8.2-20261015-053717.sql.gz`）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。**爷爷本地 fakami 项目的 .env 需把 IMAGE_TAG 同步为 0.8.2，否则下次部署 fakami 会把客服退回旧版。**
@@ -94,9 +94,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[118] 2026-10-15（北京时间）App 3.1.0(8) 按新设计稿改版全部界面**：只改界面、功能不变，设计稿里本 App 没有的功能不加；新图标；真机已安装。
 - **[117] 2026-10-15（北京时间）修复客服消息串台**：服务端按客户端声明的会话投递并逐条校验、绝不改投；他人在线接待只读、离线可接管；App 3.0.1、网页后台同步；后端 0.8.2。
 - **[116] 2026-10-15（北京时间）v0.8.1 上线生产**：会话列表查询约 0.2~0.3 秒（原中位 2.3 秒）、已读权限修复；只更新 7 个 cs 容器，迁移 014 自动执行。
-- **[115] 2026-10-15（北京时间）App 用 Flutter 完全重写 v3.0.0(6) + 后端 0.8.1**：功能不变、界面全新；启动先显示本地快照、列表请求合并；后端列表提速约 5 倍、已读权限修复；旧 Swift 目录已归档后删除。
 
 ## 维护交接阅读顺序
 1. 本文件（`_internal/LATEST.md`）
