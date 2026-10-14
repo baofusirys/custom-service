@@ -57,6 +57,30 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 			convID = conv.ID
 			c.SetConversationID(conv.ID)
 		}
+		// [113] 访客侧：聊天记录被删除后仍在旧会话里发消息 → 切到新会话；同时以数据库为准刷新拉黑状态。
+		blocked := false
+		if sender == "visitor" {
+			if deleted, err := s.store.ConversationDeleted(ctx, convID); err == nil && deleted {
+				conv, err := s.store.OpenOrGetConversation(ctx, siteID, clientID)
+				if err != nil {
+					s.failMessage(c, &snap, "persist_reopen_conversation_failed", err)
+					return
+				}
+				convID = conv.ID
+				if s.hub != nil {
+					s.hub.RebindClient(c, conv.ID)
+				} else {
+					c.SetConversationID(conv.ID)
+				}
+				s.bizLog.Info("visitor_conversation_reopened_after_delete", zap.String("vid", clientID), zap.String("conv", convID))
+			}
+			if b, err := s.store.IsVisitorBlocked(ctx, clientID); err == nil {
+				blocked = b
+				c.Blocked.Store(b)
+			} else {
+				s.bizLog.Warn("visitor_block_check_failed", zap.Error(err), zap.String("vid", clientID))
+			}
+		}
 		snap.ConvID = convID
 		message := buildMsg(&snap, sender, clientID)
 		inserted, err := s.store.InsertMessageIdempotent(ctx, message)
@@ -90,6 +114,11 @@ func (s *Service) PersistMessageAsync(e *ws.Envelope, c *ws.Client, sender strin
 			s.bizLog.Info("message_idempotent_retry",
 				zap.String("message_id", snap.ID), zap.String("client_message_id", snap.ClientID),
 				zap.String("conv", convID), zap.String("actor", sender+":"+clientID), zap.Int("ack_targets", ackTargets))
+			return
+		}
+		// [113] 已拉黑访客：消息已入库并回 ACK（访客无感知），但不推送给客服、不提醒、不发 APNs。
+		if blocked {
+			s.bizLog.Info("visitor_message_silenced_blocked", zap.String("message_id", snap.ID), zap.String("vid", clientID), zap.String("conv", convID))
 			return
 		}
 

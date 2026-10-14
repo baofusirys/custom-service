@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import dayjs from 'dayjs'
+import { formatBeijing } from '../modules/timeFormat.js'
 import http from '../api/http'
 
 const list = ref([])
@@ -76,7 +76,7 @@ onMounted(load)
       </el-table-column>
       <el-table-column label="最近登录" width="180">
         <template #default="{ row }">
-          {{ row.last_login ? dayjs(row.last_login).format('YYYY-MM-DD HH:mm:ss') : '从未' }}
+          {{ row.last_login ? formatBeijing(row.last_login) : '从未' }}
         </template>
       </el-table-column>
       <el-table-column label="操作" width="120">

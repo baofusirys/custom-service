@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
-import dayjs from 'dayjs'
+import { formatBeijing } from '../modules/timeFormat.js'
 import http from '../api/http'
 
 const list = ref([])
@@ -23,10 +23,10 @@ onMounted(load)
       <el-table-column prop="city" label="城市" />
       <el-table-column prop="referer" label="来源" />
       <el-table-column label="开始" width="180">
-        <template #default="{ row }">{{ dayjs(row.started_at).format('YYYY-MM-DD HH:mm:ss') }}</template>
+        <template #default="{ row }">{{ formatBeijing(row.started_at) }}</template>
       </el-table-column>
       <el-table-column label="最近活动" width="180">
-        <template #default="{ row }">{{ dayjs(row.updated_at).format('YYYY-MM-DD HH:mm:ss') }}</template>
+        <template #default="{ row }">{{ formatBeijing(row.updated_at) }}</template>
       </el-table-column>
     </el-table>
   </el-card>

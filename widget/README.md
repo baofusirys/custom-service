@@ -15,10 +15,13 @@
 | iframe 内消息持久缓存（最近 200 条） | `public/chat.html` | `persistMsg()` |
 | delivery/read 回执与重放去重 | `public/chat.html` | `sendDeliveryAck()` / `sendReadAck()` |
 | 重连退避（最高 30s） | `public/chat.html` | `connectWS()` 中的 backoff |
+| 聊天记录清空 / 撤回 / 正在输入 | `public/chat.js` | `onHistoryCleared()` / `applySessionHistoryState()` / `applyRecall()` / `maybeSendTyping()` |
+| 已处理清空时间本地键 | `public/chat.js` | `HISTORY_RESET_KEY`（`cs_visitor_<site>_history_reset_at`） |
 
 ## 已知坑
 - 嵌入第三方网站时，`endpoint` 必须用 `wss://`（生产）或 `ws://`（本地）；HTTP 接口自动从 endpoint 推断。
 - 因为给任意第三方域名嵌入，X-Frame-Options 必须留空（已在 nginx.conf 中处理）。
 
 ## 上次重大改动
+- 2026-10-14 [113] 0.8.0：处理 history_cleared / history_reset_at（清空界面与本地缓存）、recall / recalled_ids（撤回占位）、typing（每 3 秒最多一次，客服输入提示 5 秒隐藏）；新增 vm 假环境行为测试 `tests/historyRecallTyping.test.mjs`。
 - 2026-08-22 [098] 新增密码学稳定消息 ID、客服消息送达/已读回执、重连补发去重且不重复累加未读。

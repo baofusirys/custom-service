@@ -54,6 +54,19 @@
   var unread = 0;
   var seenMessageIDs = Object.create(null);
   var lastAgentMessageID = '';
+  // [113] 0.8.0：清空 / 撤回 / 正在输入
+  var MSG_CACHE_KEY = STORE_KEY + '_msgs';                    // 本地消息缓存（最近 200 条）
+  var HISTORY_RESET_KEY = STORE_KEY + '_history_reset_at';    // 已处理的服务端清空时间（毫秒）
+  var LIVE_RESET_GRACE_MS = 60000;   // 在线清空推送 ts 与服务端记录时间的容差，避免同一次清空被处理两次
+  var RECALLED_IDS_MAX = 200;        // 契约：recalled_ids 最多 200 个
+  var MESSAGE_ID_RE = /^[A-Za-z0-9-]{1,64}$/;
+  var bubbleByID = Object.create(null);   // 消息 ID → 气泡 DOM（撤回时定位替换）
+  var recalledIDs = Object.create(null);  // 已撤回消息 ID（撤回事件先于重放到达时也不显示正文）
+  var TYPING_SEND_INTERVAL_MS = 3000;     // 访客输入时最多每 3 秒发一次 typing
+  var TYPING_HIDE_MS = 5000;              // 5 秒无新 typing 隐藏“客服正在输入…”
+  var lastTypingSentAt = 0;
+  var typingEl = null;
+  var typingHideTimer = null;
   var pingTimer = null;
   // [054] 重连控制：防 connectWS 多实例并发打爆 backend rl:wsh 限流
   var reconnectTimer = null;   // 保存待执行 setTimeout id，防多个 onclose 各自排队
@@ -91,6 +104,7 @@
   inputEl.addEventListener('input', function () {
     inputEl.style.height = 'auto';
     inputEl.style.height = Math.min(100, inputEl.scrollHeight) + 'px';
+    maybeSendTyping();
   });
 
   function setStatus(text, ok) {
@@ -403,31 +417,32 @@
 
   // ====== 时间格式化 ======
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
+  // [113] 一律按北京时间（UTC+8，无夏令时）显示，不随访客设备时区变化
+  var BEIJING_OFFSET_MS = 8 * 3600 * 1000;
+  function bjParts(ts) {
+    var ms = typeof ts === 'number' ? ts : Date.parse(ts);
+    if (!isFinite(ms)) ms = Date.now();
+    var d = new Date(ms + BEIJING_OFFSET_MS);
+    return { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes(), s: d.getUTCSeconds() };
+  }
+  function bjDayKey(p) { return p.y + '-' + p.mo + '-' + p.d; }
   function fmtAbs(ts) {
-    var d = new Date(ts);
-    return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
-      ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    var p = bjParts(ts);
+    return p.y + '-' + pad(p.mo) + '-' + pad(p.d) + ' ' + pad(p.h) + ':' + pad(p.mi) + ':' + pad(p.s);
   }
   function fmtGroupTime(ts) {
-    var d = new Date(ts), now = new Date();
-    var sameDay = d.getFullYear() === now.getFullYear() &&
-                  d.getMonth() === now.getMonth() &&
-                  d.getDate() === now.getDate();
-    if (sameDay) return '今天 ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-    var yest = new Date(now.getFullYear(), now.getMonth(), now.getDate()-1);
-    if (d.getFullYear() === yest.getFullYear() &&
-        d.getMonth() === yest.getMonth() &&
-        d.getDate() === yest.getDate()) {
-      return '昨天 ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-    }
-    return pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    var p = bjParts(ts), now = Date.now();
+    var hm = pad(p.h) + ':' + pad(p.mi);
+    if (bjDayKey(p) === bjDayKey(bjParts(now))) return '今天 ' + hm;
+    if (bjDayKey(p) === bjDayKey(bjParts(now - 86400000))) return '昨天 ' + hm;
+    return pad(p.mo) + '-' + pad(p.d) + ' ' + hm;
   }
   function fmtMsgTime(ts) {   // [081] 今天 HH:mm / 今年 MM-dd HH:mm / 往年 yyyy-MM-dd HH:mm
-    var d = new Date(ts), now = new Date();
-    var hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
-    if (d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()) return hm;
-    var md = pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' + hm;
-    return d.getFullYear() === now.getFullYear() ? md : (d.getFullYear() + '-' + md);
+    var p = bjParts(ts), n = bjParts(Date.now());
+    var hm = pad(p.h) + ':' + pad(p.mi);
+    if (bjDayKey(p) === bjDayKey(n)) return hm;
+    var md = pad(p.mo) + '-' + pad(p.d) + ' ' + hm;
+    return p.y === n.y ? md : (p.y + '-' + md);
   }
   function escape(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -522,6 +537,11 @@
     var b = document.createElement('div');
     b.className = 'bubble';
     b.title = fmtAbs(m.created_at || m.ts || Date.now());
+    // [113] 定位属性：撤回时按消息 ID 精确替换该气泡
+    if (validMessageID(m.id)) {
+      b.setAttribute('data-msg-id', m.id);
+      bubbleByID[m.id] = b;
+    }
 
     var mediaURL = safeMediaPath(m.media_url?.String || m.media_url || m.media || '');
     var mediaKind = m.media_kind?.String || m.media_kind || m.mkind || '';
@@ -654,6 +674,8 @@
   }
 
   function render(m) {
+    // [113] 已撤回消息只显示占位，不渲染任何正文 / 附件
+    if (m && (m.recalled === true || (m.id && recalledIDs[m.id]))) { renderRecallTip(m); return; }
     var isMine = m.sender === 'visitor';
     var ts = new Date(m.created_at || m.ts || Date.now()).getTime();
 
@@ -783,6 +805,7 @@
       convID = data.conversation;
       token = data.visitor_token;
       writeVisitorID(visitorID);
+      applySessionHistoryState(data);   // [113] 先按 history_reset_at / recalled_ids 修正本地缓存，再渲染
       loadHistoryFromCache();
       bootstrapRetry = 0;  // [058] 成功重置
       connectWS();
@@ -804,7 +827,7 @@
 
   function loadHistoryFromCache() {
     try {
-      var cache = JSON.parse(localStorage.getItem(STORE_KEY + '_msgs') || '[]');
+      var cache = readMsgCache();
       cache.slice(-50).forEach(function (message) {
         if (message.id) seenMessageIDs[message.id] = true;
         if (message.sender === 'agent' && message.id) lastAgentMessageID = message.id;
@@ -815,12 +838,15 @@
 
   function persistMsg(m) {
     try {
-      var cache = JSON.parse(localStorage.getItem(STORE_KEY + '_msgs') || '[]');
+      var cache = readMsgCache();
       var replaced = false;
       if (m.id) {
         for (var i = 0; i < cache.length; i++) {
           if (cache[i] && cache[i].id === m.id) {
+            var wasRecalled = cache[i].recalled === true;
             cache[i] = Object.assign({}, cache[i], m);
+            // [113] 撤回是终态：迟到的重放不得把已撤回内容写回缓存
+            if (wasRecalled || recalledIDs[m.id]) scrubRecalled(cache[i]);
             replaced = true;
             break;
           }
@@ -828,8 +854,183 @@
       }
       if (!replaced) cache.push(m);
       if (cache.length > 200) cache = cache.slice(-200);
-      localStorage.setItem(STORE_KEY + '_msgs', JSON.stringify(cache));
+      writeMsgCache(cache);
     } catch {}
+  }
+
+  // ====== [113] 本地缓存统一读写 ======
+  function readMsgCache() {
+    try {
+      var cache = JSON.parse(localStorage.getItem(MSG_CACHE_KEY) || '[]');
+      return Array.isArray(cache) ? cache : [];
+    } catch (e) { return []; }
+  }
+  function writeMsgCache(cache) {
+    try { localStorage.setItem(MSG_CACHE_KEY, JSON.stringify(cache)); } catch (e) {}
+  }
+
+  function validMessageID(id) {
+    return typeof id === 'string' && MESSAGE_ID_RE.test(id);
+  }
+  function toMs(v) {
+    var n = Number(v);
+    return isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  }
+
+  // ====== [113] 消息撤回（客服 2 分钟内撤回自己的消息） ======
+  function scrubRecalled(m) {
+    m.recalled = true;
+    m.content = '';
+    m.media_url = '';
+    m.media_kind = '';
+    m.media_name = '';
+    return m;
+  }
+  // 把本地缓存中指定 ID 的消息改为已撤回；返回是否有改动
+  function markCachedRecalled(ids) {
+    var set = Object.create(null), any = false;
+    for (var i = 0; i < ids.length; i++) {
+      if (validMessageID(ids[i])) { set[ids[i]] = true; any = true; }
+    }
+    if (!any) return false;
+    var cache = readMsgCache(), changed = false;
+    for (var j = 0; j < cache.length; j++) {
+      var item = cache[j];
+      if (item && item.id && set[item.id] && (item.recalled !== true || item.content || item.media_url)) {
+        scrubRecalled(item);
+        changed = true;
+      }
+    }
+    if (changed) writeMsgCache(cache);
+    return changed;
+  }
+  function buildRecallTip(id) {
+    var d = document.createElement('div');
+    d.className = 'recall-tip';
+    d.textContent = '客服撤回了一条消息';
+    if (validMessageID(id)) d.setAttribute('data-msg-id', id);
+    return d;
+  }
+  function renderRecallTip(m) {
+    listEl.appendChild(buildRecallTip(m && m.id));
+    listEl.scrollTop = listEl.scrollHeight;
+    lastGroup = null;
+  }
+  function hasBubbleChild(stack) {
+    var kids = stack && stack.children ? stack.children : [];
+    for (var i = 0; i < kids.length; i++) {
+      if (kids[i].classList && kids[i].classList.contains('bubble')) return true;
+    }
+    return false;
+  }
+  function applyRecall(id) {
+    if (!validMessageID(id)) return;
+    recalledIDs[id] = true;
+    seenMessageIDs[id] = true;   // 之后的重放按已见处理，不再渲染正文
+    markCachedRecalled([id]);
+    var bubble = bubbleByID[id];
+    delete bubbleByID[id];
+    if (!bubble || !bubble.parentNode) return;
+    var stack = bubble.parentNode;
+    var tip = buildRecallTip(id);
+    stack.replaceChild(tip, bubble);
+    // 该组已无正常气泡：把组内所有撤回占位移到列表层居中显示，再移除整行，不留空头像
+    var line = stack.parentNode;
+    if (!hasBubbleChild(stack) && line && line.parentNode === listEl) {
+      var tips = [];
+      for (var i = 0; i < stack.children.length; i++) {
+        var child = stack.children[i];
+        if (child.classList && child.classList.contains('recall-tip')) tips.push(child);
+      }
+      for (var k = 0; k < tips.length; k++) listEl.insertBefore(tips[k], line);
+      listEl.removeChild(line);
+      if (lastGroup && lastGroup.bubbles === stack) lastGroup = null;
+    }
+  }
+
+  // ====== [113] 聊天记录清空（客服删除聊天记录） ======
+  function readHistoryReset() {
+    try {
+      var v = JSON.parse(localStorage.getItem(HISTORY_RESET_KEY) || 'null');
+      if (v && typeof v === 'object') return { at: toMs(v.at), live: v.live === true };
+    } catch (e) {}
+    return { at: 0, live: false };
+  }
+  function writeHistoryReset(at, live) {
+    try { localStorage.setItem(HISTORY_RESET_KEY, JSON.stringify({ at: at, live: !!live })); } catch (e) {}
+  }
+  // 清空聊天区 DOM、本地消息缓存与去重/撤回/未读等状态；不动访客 ID、连接与待发送附件
+  function clearChatState() {
+    while (listEl.firstChild) listEl.removeChild(listEl.firstChild);
+    lastGroup = null;
+    seenMessageIDs = Object.create(null);
+    bubbleByID = Object.create(null);
+    recalledIDs = Object.create(null);
+    lastAgentMessageID = '';
+    hideAgentTyping();
+    try { localStorage.removeItem(MSG_CACHE_KEY); } catch (e) {}
+    unread = 0;
+    try { parent.postMessage({ __cs: 1, type: 'unread', count: 0 }, '*'); } catch (e) {}
+  }
+  function onHistoryCleared(env) {
+    clearChatState();
+    // 记录本次在线清空的时间（优先用服务端 ts），下次打开时同一次清空不再重复处理
+    var at = toMs(env && env.ts) || Date.now();
+    var local = readHistoryReset();
+    writeHistoryReset(Math.max(at, local.at), true);
+    // 服务端在访客下次发消息或重新打开时开启新会话；若推送中带了新会话 ID 则同步
+    var nextConv = env && (env.conv || (env.extra && env.extra.conv));
+    if (validMessageID(nextConv)) convID = nextConv;
+    renderSys('聊天记录已清空');
+  }
+  // /api/visitor/session：history_reset_at 大于已处理值则先清空本地缓存；recalled_ids 改写本地缓存
+  function applySessionHistoryState(data) {
+    var serverAt = toMs(data && data.history_reset_at);
+    var local = readHistoryReset();
+    if (serverAt > local.at) {
+      var sameLiveReset = local.live && (serverAt - local.at) <= LIVE_RESET_GRACE_MS;
+      if (!sameLiveReset) clearChatState();
+      writeHistoryReset(serverAt, false);
+    } else if (local.live && serverAt > 0) {
+      writeHistoryReset(local.at, false);
+    }
+    var ids = data && Array.isArray(data.recalled_ids) ? data.recalled_ids.slice(0, RECALLED_IDS_MAX) : [];
+    if (ids.length) {
+      for (var i = 0; i < ids.length; i++) if (validMessageID(ids[i])) recalledIDs[ids[i]] = true;
+      markCachedRecalled(ids);
+    }
+  }
+
+  // ====== [113] 正在输入 ======
+  function maybeSendTyping() {
+    if (!alive || !ws || ws.readyState !== WebSocket.OPEN) return;   // 未连上不发
+    if (!inputEl.value || !inputEl.value.trim()) return;
+    var now = Date.now();
+    if (lastTypingSentAt && now >= lastTypingSentAt && now - lastTypingSentAt < TYPING_SEND_INTERVAL_MS) return;
+    try {
+      ws.send(JSON.stringify({ type: 'typing', ts: now }));
+      lastTypingSentAt = now;
+    } catch (e) {}
+  }
+  function ensureTypingEl() {
+    if (typingEl) return typingEl;
+    typingEl = document.createElement('div');
+    typingEl.className = 'typing-tip';
+    typingEl.textContent = '客服正在输入…';
+    typingEl.style.display = 'none';
+    // 放在消息列表与输入区之间（聊天区底部），不参与消息列表的清空与分组
+    if (listEl.parentNode) listEl.parentNode.insertBefore(typingEl, listEl.nextSibling);
+    return typingEl;
+  }
+  function showAgentTyping() {
+    var el = ensureTypingEl();
+    el.style.display = '';
+    if (typingHideTimer) clearTimeout(typingHideTimer);
+    typingHideTimer = setTimeout(hideAgentTyping, TYPING_HIDE_MS);
+  }
+  function hideAgentTyping() {
+    if (typingHideTimer) { clearTimeout(typingHideTimer); typingHideTimer = null; }
+    if (typingEl) typingEl.style.display = 'none';
   }
 
   // [054] scheduleReconnect 是唯一的重连入口：防多个 onclose 各自 setTimeout 叠加，
@@ -905,6 +1106,13 @@
         }
         return;
       }
+      // [113] 聊天记录被客服删除 / 消息撤回 / 客服正在输入
+      if (env.type === 'history_cleared') { onHistoryCleared(env); return; }
+      if (env.type === 'recall') { applyRecall(env.id); return; }
+      if (env.type === 'typing') {
+        if (typeof env.from === 'string' && env.from.indexOf('agent:') === 0) showAgentTyping();
+        return;
+      }
       // 语音通话信令分发（仅当存在 voice 模块时，避免 undefined）
       if (env.type && env.type.indexOf('voice_') === 0) {
         if (window.handleVoiceSignal) window.handleVoiceSignal(env);
@@ -923,6 +1131,8 @@
           media_name: env.mname || '',
           created_at: new Date(env.ts || Date.now()).toISOString()
         };
+        if (isAgentMessage) hideAgentTyping();          // [113] 收到客服消息即隐藏“正在输入”
+        if (m.id && recalledIDs[m.id]) scrubRecalled(m); // [113] 已撤回的消息被重放时只保留占位
         var duplicate = !!(m.id && seenMessageIDs[m.id]);
         if (!duplicate) {
           if (m.id) seenMessageIDs[m.id] = true;
@@ -948,6 +1158,7 @@
       alive = false;
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
       setStatus('已断开，重连中', false);
+      hideAgentTyping();
       scheduleReconnect();  // [054] 走统一去重入口，不再裸 setTimeout
     };
     // [054] onerror 不主动 close —— 浏览器握手失败时会同时 fire onerror + onclose，

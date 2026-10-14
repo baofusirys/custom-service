@@ -51,20 +51,38 @@ function gotoLogin() {
   }
 }
 
+// [113] blob 下载请求的错误体也是 Blob：先解析成 JSON，401 续期判断与错误提示才能拿到 code/msg。
+// 错误体只会是很小的 JSON，超过 64KB 视为异常不解析，避免把大文件读进内存。
+async function normalizeBlobErrorBody(res) {
+  if (!res || typeof Blob === 'undefined' || !(res.data instanceof Blob)) return
+  try {
+    if (res.data.size > 64 * 1024) { res.data = {}; return }
+    const parsed = JSON.parse(await res.data.text())
+    res.data = parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    res.data = {}
+  }
+}
+
+// [113] 请求级开关（axios 会把自定义配置原样带到 res.config / err.config）：
+//   rawResponse: true  返回完整响应对象（下载文件需要读取 Content-Disposition）
+//   silent: true       失败时不弹全局错误提示（后台静默刷新类请求自行处理）
 http.interceptors.response.use(
   (res) => {
+    if (res.config?.rawResponse) return res
     const d = res.data
     if (d && typeof d === 'object' && 'code' in d && d.code !== 0) {
-      ElMessage.error(d.msg || '操作失败')
+      if (!res.config?.silent) ElMessage.error(d.msg || '操作失败')
       return Promise.reject(d)
     }
     return d
   },
   async (err) => {
     const res = err.response
+    await normalizeBlobErrorBody(res)
     const status = res?.status
     if (status !== 401) {
-      ElMessage.error(res?.data?.msg || '网络错误')
+      if (!err.config?.silent) ElMessage.error(res?.data?.msg || '网络错误')
       return Promise.reject(err)
     }
     // [064] 区分 40102 (token expired) vs 其他 401（40101 未登录 / 40103 token 无效）

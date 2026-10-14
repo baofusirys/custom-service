@@ -134,8 +134,23 @@ function mediaURLOf(message) {
   return value && typeof value === 'object' ? (value.String || '') : (value || '')
 }
 
+// [113] 撤回是不可逆终态：任一来源已撤回，合并结果必须保持已撤回且不残留正文/附件，
+// 防止迟到的 WSS 重放或旧缓存把已撤回内容“复活”。
+function scrubRecalled(message) {
+  if (message?.recalled !== true) return message
+  message.content = ''
+  message.media_url = null
+  message.media_kind = null
+  message.media_name = null
+  return message
+}
+
 function mergeSameMessage(current, incoming) {
   const merged = { ...current, ...incoming }
+  if (current?.recalled === true || incoming?.recalled === true) {
+    merged.recalled = true
+    scrubRecalled(merged)
+  }
   const currentStatus = canonicalMessageStatus(current)
   const incomingStatus = canonicalMessageStatus(incoming)
   merged.status = STATE_RANK[currentStatus] > STATE_RANK[incomingStatus] ? currentStatus : incomingStatus
@@ -180,7 +195,7 @@ export function mergeMessageLists(current, incoming, replace = false) {
 
   for (const message of fetched) {
     if (!message?.id) continue
-    let normalized = { ...message, status: canonicalMessageStatus(message) }
+    let normalized = scrubRecalled({ ...message, status: canonicalMessageStatus(message) })
     let pendingIndex = pending.findIndex(local => sameMessageIdentity(local, normalized))
 
     // 只给没有显式别名的旧 local-* 做内容/媒体/会话/时间兜底，并严格一对一消费，

@@ -52,6 +52,12 @@ type Client struct {
 	closed atomic.Bool
 	log    *zap.Logger
 	rawLog *zap.Logger
+
+	// [113] Blocked 访客已被拉黑（连接建立时由 HTTP 层查库写入，拉黑/解除时由 Hub 实时更新）。
+	// 拉黑为静默处理：消息照常入库并回 ACK，但不推送给客服、不提醒、不转发来电与输入状态。
+	Blocked atomic.Bool
+	// lastTypingMS 上次转发「正在输入」的毫秒时间，用于每连接 1 秒节流。
+	lastTypingMS atomic.Int64
 }
 
 func newClient(h *Hub, conn *websocket.Conn, kind Kind, id, site, conv, connID string, log, rawLog *zap.Logger) *Client {

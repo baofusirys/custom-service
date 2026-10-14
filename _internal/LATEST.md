@@ -1,4 +1,4 @@
-### 当前版本：v0.7.4 · 2026-10-05（北京时间）
+### 当前版本：v0.8.0（待发布；生产运行 v0.7.5）· 2026-10-14（北京时间）
 
 > 本文件是维护交接的「第一站」。看完这一份再去看 `_internal/CHANGELOG.md`，别凭印象答。
 
@@ -6,16 +6,16 @@
 
 ## 实际部署实例（爷爷自用，2026-07-06 核实）
 > 排查 App/客服问题时看这里，别被下面的模板占位坐标误导。
-- **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [3]，2026-10-14 核对）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:latest`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
+- **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [3]，2026-10-14 核对）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:<IMAGE_TAG>`，版本由 `/fakami/.env` 与 `/srv/cs-data/.env` 的 `IMAGE_TAG` 控制，编排在 `/fakami/docker-compose.yml`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（custom_service 当前已下线）**：`38.76.193.68`（MCP [5]，2026-10-14 核对）。2026-08-23 21:17 已恢复同机 `weixian-douxiaoyin`，其 7 个常驻服务全部 healthy；`custom_service` 容器数为 0，但 `cs_mysql_data`、`cs_redis_data`、证书卷和 `/srv/cs-data/` 均完整保留，可随时重新切回。公网 `https://maihaocs.icu/healthz` 返回 200。
 - **App(SwiftUI) 源码**：家中 Mac `/Users/chengmeiran/code/custom_service_swift`（独立 git 仓库，无远端；旧 `mobile_app` Flutter 版已归档）。构建机为 MCP 配置「Mac开发机-iOS构建」（192.168.3.6）。
-  - 当前版本 2.0 (4)（[111] 完全重写，分层 App/Core/Domain/Features/Shared；组合根 `Sources/App/AppModel.swift`，唯一来源 `project.yml` 的 `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`），后端写死 `Sources/Core/Config/AppConfig.swift` 的 `productionBackendURL` = `https://k7m2x9p3.xn--5kroo.com`（k7m2x9p3.卖号.com）；会话与自动登录凭据存钥匙串（`SessionVault`），重装同一开发者账号的 App 免输密码。
-  - 测试：Mac 本机隔离测试环境 `~/cs-testenv`（只监听 127.0.0.1，凭证见其 `secrets/test.env`），脚本与说明在 App 仓库 `scripts/qa/`；模拟器构建可用 `CS_BACKEND_URL` 指向测试后端，真机构建编译期剔除。
-  - 签名：免费 Personal Team `4JZ8K387NU`（[108] 起，唯一来源 `project.yml` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前装机序号 3888，有效期至 `2026-10-21T02:25:04+08:00`。
+  - 当前版本 2.1 (5)（[113] 新增删除/回收站、快捷回复、备注标签、拉黑、导出、全局搜索、置顶未读、正在输入、撤回；[111] 完全重写，分层 App/Core/Domain/Features/Shared；组合根 `Sources/App/AppModel.swift`，唯一来源 `project.yml` 的 `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`），后端写死 `Sources/Core/Config/AppConfig.swift` 的 `productionBackendURL` = `https://k7m2x9p3.xn--5kroo.com`（k7m2x9p3.卖号.com）；会话与自动登录凭据存钥匙串（`SessionVault`），重装同一开发者账号的 App 免输密码。
+  - 测试：Mac 本机隔离测试环境 `~/cs-testenv`（只监听 127.0.0.1，凭证见其 `secrets/test.env`），脚本与说明在 App 仓库 `scripts/qa/`；模拟器构建可用 `CS_BACKEND_URL` 指向测试后端，真机构建编译期剔除。测试后端二进制用本仓库 `_internal/scripts/build-testenv-backend.ps1` 构建；新功能接口/数据复位/后台与访客端浏览器联调脚本在 `_internal/scripts/testenv/`。
+  - 签名：免费 Personal Team `4JZ8K387NU`（[108] 起，唯一来源 `project.yml` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前手机上是 2.0(4)（装机序号 3888），有效期至 `2026-10-21T02:25:04+08:00`；2.1(5) 已提交待装机（21:25 起手机不可达，Mac 后台每 2 分钟补装、持续 2 小时，之后由 launchd 每天 9/14/21 点自动装）。
   - 自动续签：`auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点），日志 `auto_reinstall.log`；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
   - 待办：iPhone 需信任新开发者证书并首次登录一次（之后免密）；轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
-- **发布到生产/下游**：v0.7.4 已推送 GitHub 并打标签，7 个镜像已双推 GHCR 与阿里云 ACR；生产服 `49.233.156.149` 实际已运行 `cs-*:0.7.4`（2026-10-14 `docker ps` 核对），客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。
-- **待发布 v0.7.5（[110][111]）**：后端修复 `/files` 全部 400（生产当前图片/文件无法查看）、迁移 012 毫秒时间、消息顺序与历史翻页、会话列表优先取进行中会话；代码已在本地 `main` 提交并通过隔离环境验证，**未推送 GitHub、未部署生产**，需爷爷同意后发布。
+- **发布到生产/下游**：v0.7.5 已推送 GitHub（标签 v0.7.5）并于 2026-10-14 19:35 部署生产（只改 IMAGE_TAG、只更新 7 个 cs 容器，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.7.5-20261014-193423.sql.gz`）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。**爷爷本地 fakami 项目的 .env 需把 IMAGE_TAG 同步为生产实际版本，否则下次部署 fakami 会把客服退回旧版。**
+- **待发布 v0.8.0（[113]）**：新功能后端 + 网页后台 + 访客端 + 迁移 013，已在本地 `main` 提交并通过隔离环境全部验证，**未推送 GitHub、未部署生产**，需爷爷同意后发布（App 2.1 的新功能依赖它）。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -63,6 +63,9 @@
 | Nginx 限流 / 防 DDoS | `nginx/conf.d/default.conf` | `limit_req_zone` / `limit_conn_zone` 段 |
 | WebRTC TURN/STUN（CoTURN）| `turn/turnserver.conf.tmpl` / `.env` 的 `TURN_*` | 端口 3478/5349 + relay 49152-49200 |
 | TURN 短期凭证生成 | `backend/internal/service/turn.go` | HMAC-SHA1，24h TTL |
+| 0.8.0 新功能接口契约 | `_internal/reports/api-0.8.0-features.md` | 全文 |
+| 回收站保留期 / 撤回时限 | `backend/internal/store/features_deletion.go` / `features_messages.go` | `RecycleRetention` / `RecallWindow` |
+| 自动清理执行时间与任务锁 | `backend/internal/service/features.go` | `autoCleanHour` / `StartMaintenance` |
 
 ## 部署坐标
 - 部署方式：把整个仓库目录 rsync/sftp 上传到服务器后，进入目录执行 **`docker compose up -d --build`**，一条命令完成。
@@ -87,9 +90,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[113] 2026-10-14（北京时间）v0.7.5 上生产 + 0.8.0 新功能**：删除与回收站、快捷回复、备注标签、拉黑、导出、全局搜索、自动清理、置顶未读、正在输入、撤回，后端/后台/访客端/App 2.1(5) 全部接入并通过隔离环境全量测试；0.8.0 待发布。
+- **[112] 2026-10-14（北京时间）v0.7.5 发布准备**：部署前漏洞体检升级 Go 1.26.9、x/net 0.60.0、vue 补丁版；推送 GitHub 构建镜像。
 - **[111] 2026-10-14（北京时间）App v2.0 完全重写**：分层架构重写全部代码，功能与 v1.2 一致（列表口径修正为「全部」）；46 项测试全过，装机序号 3888；后端列表优先取进行中会话（待发布）。
-- **[110] 2026-10-14（北京时间）模拟器全面测试修复**：App v1.2(3) 交互与功能缺陷一次性修复并装机（序号 3848）；后端 v0.7.5 修复文件下载 400、消息顺序与翻页（待发布生产）；模拟器 28 项测试全过。
-- **[109] 2026-10-14（北京时间）App v1.1**：后端地址写死、钥匙串自动登录（重装免密）、新登录页、WSS 改 Authorization 头修复 v0.7.4 下实时通道；18 个单元测试通过，装机序号 3840；服务器未变更。
 
 ## 维护交接阅读顺序
 1. 本文件（`_internal/LATEST.md`）

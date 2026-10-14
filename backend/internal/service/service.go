@@ -30,6 +30,8 @@ type Service struct {
 	// 有界异步槽位：DB 抖动或恶意高并发时限制 goroutine 数，保护 CPU/内存与连接池。
 	messageSlots chan struct{}
 	receiptSlots chan struct{}
+	// [113] 上传目录：回收站彻底删除时同步删除磁盘文件
+	uploadsDir string
 }
 
 func New(st *store.Store, cipher *security.Cipher, biz, sec, audit *zap.Logger, lim *security.RateLimiter, visMsgPM int) *Service {
@@ -183,6 +185,10 @@ func (s *Service) OnPageNavigation(visitorID, convID, url, title string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
+		// [113] 已拉黑访客的浏览轨迹不写入、不广播
+		if blocked, err := s.store.IsVisitorBlocked(ctx, visitorID); err == nil && blocked {
+			return
+		}
 		display := title
 		if display == "" {
 			display = url
@@ -193,7 +199,7 @@ func (s *Service) OnPageNavigation(visitorID, convID, url, title string) {
 			ID:          uuid.NewString(),
 			ConvID:      convID,
 			Sender:      "sys",
-			SenderRef:   "page:" + url,
+			SenderRef:   truncateUTF8("page:"+url, 64), // [113] sender_ref 为 VARCHAR(64)：超长 URL 截断，修复生产「Data too long」入库失败
 			Content:     content,
 			CreatedAt:   now,
 			DeliveredWS: true,
@@ -566,8 +572,10 @@ func (s *Service) OnVisitorEnter(visitor *store.Visitor, conv *store.Conversatio
 			identifier = "访客 " + visitor.ID[:6]
 		}
 
+		// [113] 已拉黑访客：不通知客服、不推送（问候照常，访客无感知）
+		blocked, _ := s.store.IsVisitorBlocked(ctx, visitor.ID)
 		// 1) 立即通知客服「访客进入」
-		if s.SettingBool(ctx, "notify_visitor_enter", true) {
+		if !blocked && s.SettingBool(ctx, "notify_visitor_enter", true) {
 			hub.BroadcastToAllAgents(&ws.Envelope{
 				Type:    "sys",
 				ID:      uuid.NewString(),

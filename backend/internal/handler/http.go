@@ -174,6 +174,12 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50001, "msg": "保存访客失败"})
 		return
 	}
+	// [113] 来自已拉黑 IP 的访客（含清空本地存储换身份的）自动继承拉黑，静默处理。
+	if inherited, err := h.svc.Store().InheritIPBlock(c.Request.Context(), v.ID, ipHash); err != nil {
+		h.svc.BizLog().Warn("inherit_ip_block_failed", zap.Error(err), zap.String("vid", v.ID))
+	} else if inherited {
+		h.svc.SecurityLog().Info("visitor_ip_block_inherited", zap.String("vid", v.ID), zap.String("ip", ip))
+	}
 	// 30 分钟无活动则关闭旧会话 + 开新会话，让访客重新触发问候 + 提示音 + APNs 推送。
 	// 真新访客 (first_seen=now) 完全不受影响——本来就没旧会话，直接 isNew=true。
 	// 老访客回访：30 分钟阈值更敏感（之前 60 分钟），老客户半小时内反复打开 widget 不会
@@ -201,6 +207,15 @@ func (h *HTTP) VisitorSession(c *gin.Context) {
 		"conversation":  conv.ID,
 		"visitor_token": tok,
 		"server_now":    time.Now().In(h.cfg.Timezone).Format("2006-01-02 15:04:05"),
+		// [113] 访客端据此清空被客服删除的本地聊天缓存、改写离线期间被撤回的消息
+		"history_reset_at": int64(0),
+		"recalled_ids":     []string{},
+	}
+	if t, err := h.svc.Store().HistoryResetAt(c.Request.Context(), v.ID); err == nil && !t.IsZero() {
+		resp["history_reset_at"] = t.UnixMilli()
+	}
+	if ids, err := h.svc.Store().RecentRecalledIDs(c.Request.Context(), v.ID, time.Now().Add(-7*24*time.Hour), 200); err == nil {
+		resp["recalled_ids"] = ids
 	}
 	// 新会话时：异步通知客服 + 落库问候 + 等访客 WSS 上线后通过 WSS 推送问候
 	// 不再在 HTTP 响应里塞 greeting —— 让 greeting 走完整 WSS 通道，
@@ -242,7 +257,11 @@ func (h *HTTP) VisitorWS(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"code": 50004, "msg": "拉会话失败"})
 		return
 	}
-	_, _ = ws.UpgradeVisitor(h.hub, c.Writer, c.Request, claims.VisitorID, claims.SiteID, conv.ID)
+	blocked, err := h.svc.Store().IsVisitorBlocked(ctx, claims.VisitorID)
+	if err != nil {
+		h.svc.BizLog().Warn("visitor_ws_block_check_failed", zap.Error(err), zap.String("vid", claims.VisitorID))
+	}
+	_, _ = ws.UpgradeVisitor(h.hub, c.Writer, c.Request, claims.VisitorID, claims.SiteID, conv.ID, blocked)
 }
 
 // =========== 客服侧 ===========
@@ -507,14 +526,20 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 	if offset < 0 {
 		offset = 0
 	}
+	// [113] 按标签筛选（可选）
+	tag, ok := NormalizeTagFilter(c.Query("tag"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40053, "msg": "标签不合法"})
+		return
+	}
 	var (
 		rows []map[string]any
 		err  error
 	)
 	if mode == "contacted" {
-		rows, err = h.svc.Store().ListContactedConversations(c.Request.Context(), limit, offset)
+		rows, err = h.svc.Store().ListContactedConversations(c.Request.Context(), tag, limit, offset)
 	} else {
-		rows, err = h.svc.Store().ListAllVisitorConversations(c.Request.Context(), limit, offset)
+		rows, err = h.svc.Store().ListAllVisitorConversations(c.Request.Context(), tag, limit, offset)
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50006, "msg": "查询失败"})
@@ -533,9 +558,9 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 	// [085] 附带总数：前端显示「已联系 (N)」/「全部 (N)」；滚动是否到底用「返回条数<limit」判断
 	var total int
 	if mode == "contacted" {
-		total, _ = h.svc.Store().CountContactedVisitors(c.Request.Context())
+		total, _ = h.svc.Store().CountContactedVisitors(c.Request.Context(), tag)
 	} else {
-		total, _ = h.svc.Store().CountAllVisitors(c.Request.Context())
+		total, _ = h.svc.Store().CountAllVisitors(c.Request.Context(), tag)
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": rows, "total": total})
 }
@@ -708,6 +733,12 @@ func (h *HTTP) MarkRead(c *gin.Context) {
 		ConvID: convID,
 		TS:     ws.NowMS(),
 	})
+	// [113] 打开会话即清除「标为未读」
+	if vid, changed, err := h.svc.Store().ClearMarkedUnreadByConversation(c.Request.Context(), convID); err != nil {
+		h.svc.BizLog().Warn("clear_marked_unread_failed", zap.Error(err), zap.String("conv", convID))
+	} else if changed {
+		h.svc.NotifyProfileUpdated(vid)
+	}
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }
 
@@ -1073,6 +1104,8 @@ var allowedSettingKeys = map[string]bool{
 	"voice_call_hint": true,
 	// （可选）覆盖推送点击跳转 URL，默认 maihaocs://open 拉起 App
 	"push_jump_url": true,
+	// [113] 自动清理：最近活动早于 N 天的会话自动移入回收站（"0" 关闭，7-3650）
+	"auto_clean_days": true,
 }
 
 // GetSettings 拉所有可见 setting（仅管理员可读全部）
@@ -1101,6 +1134,14 @@ func (h *HTTP) UpdateSettings(c *gin.Context) {
 	for k, v := range body {
 		if !allowedSettingKeys[k] {
 			continue
+		}
+		if k == "auto_clean_days" {
+			days, err := ParseAutoCleanDays(v)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 40058, "msg": "自动清理天数不合法（0 关闭，或 7-3650）"})
+				return
+			}
+			v = days
 		}
 		// greeting_text 可能含正常标点，只做 XSS 清洗保留文本
 		if k == "greeting_text" || k == "widget_title" {

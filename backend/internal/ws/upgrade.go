@@ -17,13 +17,14 @@ var upgrader = websocket.Upgrader{
 	EnableCompression: true,
 }
 
-func UpgradeVisitor(h *Hub, w http.ResponseWriter, r *http.Request, visitorID, siteID, convID string) (*Client, error) {
+func UpgradeVisitor(h *Hub, w http.ResponseWriter, r *http.Request, visitorID, siteID, convID string, blocked bool) (*Client, error) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return nil, err
 	}
 	c := newClient(h, conn, KindVisitor, visitorID, siteID, convID, uuid.NewString(),
 		h.bizLog, h.rawLog)
+	c.Blocked.Store(blocked) // [113] 注册前写入，readPump 启动后读到的一定是正确状态
 	h.Register(c)
 	return c, nil
 }

@@ -1,9 +1,10 @@
 <script setup>
 import { onMounted, onUnmounted, ref, nextTick, computed, watch } from 'vue'
-import { ElMessage, ElNotification } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import 'dayjs/locale/zh-cn'
+import { formatBeijing, formatBeijingHM, formatMsgTime, formatGroupTime } from '../modules/timeFormat.js'
 import http from '../api/http'
 import { AgentWS } from '../api/ws'
 import { playSound, unlockAudio, playRingLoop, stopRingLoop } from '../api/sound'
@@ -20,6 +21,50 @@ import {
   messageStatusLabel,
 } from '../modules/messageState'
 import { MessageStatusSync } from '../modules/messageStatusSync'
+// [113] 0.8.0 新功能：组件与纯逻辑模块（纯逻辑均有 node 测试，见 tests/）
+import ConversationToolbar from '../components/console/ConversationToolbar.vue'
+import ConversationMeta from '../components/console/ConversationMeta.vue'
+import ConversationActions from '../components/console/ConversationActions.vue'
+import VisitorProfileDrawer from '../components/console/VisitorProfileDrawer.vue'
+import BlockVisitorDialog from '../components/console/BlockVisitorDialog.vue'
+import QuickReplyPicker from '../components/console/QuickReplyPicker.vue'
+import ChatSearchDialog from '../components/console/ChatSearchDialog.vue'
+import {
+  deleteVisitors,
+  exportVisitor,
+  exportVisitors,
+  getVisitorProfile,
+  markConversationRead,
+  setVisitorMarkedUnread,
+  setVisitorPinned,
+} from '../api/visitors'
+import { recallMessage } from '../api/chat'
+import {
+  BATCH_DELETE_MAX,
+  BATCH_EXPORT_MAX,
+  applyProfileToConversation,
+  isValidVisitorId,
+  moveToTop,
+  normalizeVisitorIds,
+  removeVisitorsFromList,
+  summarizeDeleteResult,
+  validateBatchSelection,
+} from '../modules/conversationOps'
+import {
+  applyRecallToList,
+  canRecallMessage,
+  recallFailureMeansAlreadyRecalled,
+  recallPlaceholder,
+  recallSafeSyncCursor,
+} from '../modules/recall'
+import {
+  TYPING_DISPLAY_TIMEOUT_MS,
+  TYPING_SEND_INTERVAL_MS,
+  TypingIndicator,
+  TypingThrottle,
+  parseParticipant,
+} from '../modules/typing'
+import { insertQuickReply } from '../modules/quickReply'
 
 dayjs.extend(relativeTime)
 dayjs.locale('zh-cn')
@@ -36,6 +81,7 @@ const convs = ref([])
 //   「已联系」口径由 has_visitor_msg(访客发过消息) 改为后端 contacted(客服回复过 sender='agent'，按访客历史聚合)，
 //   不再受 200 条窗口限制，会话超时重建也不丢。
 const filterMode = ref('all')
+const tagFilter = ref('')       // [113] 按标签精确筛选（契约第 1 节 tag 参数），空串=不筛选
 const isContacted = (c) => c.contacted === true
 const allTotal = ref(0)         // 「全部」总数（后端返回，与已加载条数解耦）
 const contactedTotal = ref(0)   // 「已联系」总数
@@ -77,7 +123,9 @@ function saveCachedMsgs(convId) {
   } catch {}
 }
 function lastRealId(convId) {
-  return latestServerMessageId(msgCache[convId] || [])
+  // [113] 增量游标回退一个撤回窗口（2 分钟 + 余量）：窗口内消息重新拉取，
+  // 即使撤回事件在断线期间丢失，也能从历史接口拿到 recalled=true，不会继续显示已撤回内容。
+  return recallSafeSyncCursor(msgCache[convId] || [])
 }
 function mergeMessages(visitorID, incoming, replace) {
   const merged = mergeMessageLists(msgCache[visitorID] || [], incoming, replace)
@@ -169,11 +217,12 @@ async function loadConvs(reset = true) {
   try {
     if (reset) { convOffset = 0; convHasMore.value = true }
     const r = await http.get('/agent/conversations', {
-      params: { mode: filterMode.value, offset: convOffset, limit: CONV_PAGE }
+      params: { mode: filterMode.value, offset: convOffset, limit: CONV_PAGE, tag: tagFilter.value || undefined }
     })
     const data = r.data || []
     if (reset) {
       convs.value = data
+      pruneSelection()   // [113] 重载后只保留仍可见客户的勾选
     } else {
       // 去重追加：防 WSS 上浮/并发导致同一会话重复
       const seen = new Set(convs.value.map(x => x.id))
@@ -194,7 +243,7 @@ async function refreshConvs() { await loadConvs(true) }
 // [088] 异步预取「已联系」总数（tab 数字就准，不阻塞主列表）
 async function refreshSideTotals() {
   try {
-    const c = await http.get('/agent/conversations', { params: { mode: 'contacted', offset: 0, limit: 1 } })
+    const c = await http.get('/agent/conversations', { params: { mode: 'contacted', offset: 0, limit: 1, tag: tagFilter.value || undefined } })
     contactedTotal.value = c.total || 0
   } catch {}
 }
@@ -206,7 +255,9 @@ function onConvScroll({ scrollTop }) {
   if (wrap.scrollHeight - scrollTop - wrap.clientHeight < 150) loadConvs(false)
 }
 // 切换 tab：重载对应口径首页
-watch(filterMode, () => { loadConvs(true) })
+watch(filterMode, () => { clearSelection(); loadConvs(true) })
+// [113] 切换标签筛选：清空勾选并重载首页（总数同步按标签口径）
+watch(tagFilter, () => { clearSelection(); loadConvs(true); refreshSideTotals() })
 
 // [090] 按「客户(访客)」加载其所有会话段的完整历史消息（合并成一条时间流）。
 //   配合 [088] 列表按客户聚合：详情也按客户聚合。缓存键统一用 visitorID。
@@ -260,6 +311,11 @@ async function pickConv(c) {
   // 本地把所有访客消息直接标 read（自己看到了）
   for (const m of messages.value) {
     if (m.sender === 'visitor') m.read = true
+  }
+  // [113] 被手动“标为未读”的客户：打开即走 HTTP 标记已读，服务端自动清除 marked_unread（契约第 5 节）
+  if (c.marked_unread === true) {
+    c.marked_unread = false
+    markConversationRead(c.id).catch(() => {})
   }
 }
 
@@ -657,22 +713,11 @@ const grouped = computed(() => {
   return groups
 })
 
-function fmtAbs(t) { return dayjs(t).format('YYYY-MM-DD HH:mm:ss') }
-function fmtHM(t) { return dayjs(t).format('HH:mm') }
-function fmtMsgTime(t) {   // [081] 今天 HH:mm / 今年 MM-DD HH:mm / 往年 YYYY-MM-DD HH:mm
-  const d = dayjs(t), now = dayjs()
-  if (d.isSame(now, 'day')) return d.format('HH:mm')
-  if (d.isSame(now, 'year')) return d.format('MM-DD HH:mm')
-  return d.format('YYYY-MM-DD HH:mm')
-}
-function fmtGroupTime(t) {
-  const d = dayjs(t)
-  const today = dayjs().startOf('day')
-  if (d.isAfter(today)) return '今天 ' + d.format('HH:mm')
-  const yesterday = today.subtract(1, 'day')
-  if (d.isAfter(yesterday)) return '昨天 ' + d.format('HH:mm')
-  return d.format('MM-DD HH:mm')
-}
+// [113] 时间一律按北京时间显示，不随客服电脑的时区变化（原 dayjs(t).format 按浏览器本地时区）
+function fmtAbs(t) { return formatBeijing(t, { empty: '' }) }
+function fmtHM(t) { return formatBeijingHM(t) }
+function fmtMsgTime(t) { return formatMsgTime(t) }   // [081] 今天 HH:mm / 今年 MM-DD HH:mm / 往年 YYYY-MM-DD HH:mm
+function fmtGroupTime(t) { return formatGroupTime(t) }
 
 // [059] 会话列表第 3 行：地理位置 + IP 拼装。任一存在才返非空（外层 v-if 隐藏行）
 function convGeoIp(c) {
@@ -784,6 +829,8 @@ onMounted(async () => {
         if (env.content) ElMessage.error(env.content)
         return
       }
+      // [113] 删除 / 资料更新 / 撤回 / 正在输入 等新事件统一在独立函数处理
+      if (handleFeatureEvent(env)) return
 
       // 语音通话信令分发
       if (env.type && env.type.indexOf('voice_') === 0) {
@@ -834,6 +881,7 @@ onMounted(async () => {
       const fromAgent = env.from && env.from.startsWith('agent:')
       const fromVisitor = env.from && env.from.startsWith('visitor:')
       const fromSys = env.from === 'sys'
+      if (fromVisitor) clearVisitorTyping(env.from)   // [113] 收到访客消息即隐藏“对方正在输入”
       // 多端去重改用 connID：只有自己这一端（同 connID）发的回声才跳过；
       // 同账号另一端（web/app）发的消息，本端正常接受（这才是「双端同步」的关键）
       const isMyConnEcho = env.conn && env.conn === myConnId.value
@@ -948,7 +996,419 @@ onUnmounted(() => {
   if (voice.timer) { clearTimeout(voice.timer); clearInterval(voice.timer) }
   if (voice.pc) { try { voice.pc.close() } catch {} }
   if (voice.localStream) voice.localStream.getTracks().forEach(t => t.stop())
+  // [113] 新功能计时器回收
+  visitorTyping.dispose()
+  if (recallTicker) clearInterval(recallTicker)
+  for (const timer of profileRefreshTimers.values()) clearTimeout(timer)
+  profileRefreshTimers.clear()
 })
+
+// ============================================================
+// [113] 0.8.0 新功能接线：标签筛选 / 多选批量 / 置顶未读 / 拉黑 / 删除导出 /
+//   客户资料 / 快捷回复 / 正在输入 / 消息撤回 / 全局搜索 / 实时事件。
+//   纯逻辑都在 modules/（有 node 测试），这里只做状态接线，不改动既有消息管线。
+// ============================================================
+const toolbarRef = ref(null)
+const selectedVisitors = ref({})     // { [visitorId]: true }
+const selectedIds = computed(() => convs.value.map(c => c.visitor_id).filter(v => selectedVisitors.value[v] === true))
+const batchBusy = ref(false)
+const opBusy = new Set()             // 单客户操作防连点（命令:访客）
+const profileVisible = ref(false)
+const profileTarget = ref(null)
+const profileDrawerRef = ref(null)
+const blockVisible = ref(false)
+const blockTarget = ref(null)
+const searchVisible = ref(false)
+const draftInputRef = ref(null)
+const myAgentId = computed(() => session.agent?.id)
+
+// ---------- 多选 ----------
+function toggleSelect(c, checked) {
+  if (!isValidVisitorId(c?.visitor_id)) return
+  if (checked) selectedVisitors.value[c.visitor_id] = true
+  else delete selectedVisitors.value[c.visitor_id]
+}
+function toggleSelectAll(checked) {
+  const next = {}
+  if (checked) for (const c of convs.value) if (isValidVisitorId(c.visitor_id)) next[c.visitor_id] = true
+  selectedVisitors.value = next
+}
+function clearSelection() { selectedVisitors.value = {} }
+// 列表重载后只保留仍可见的客户：批量操作绝不作用于用户看不到的条目
+function pruneSelection() {
+  const present = new Set(convs.value.map(c => c.visitor_id))
+  const next = {}
+  for (const vid of Object.keys(selectedVisitors.value)) if (present.has(vid)) next[vid] = true
+  selectedVisitors.value = next
+}
+
+// ---------- 本地缓存清理（删除后不在本机残留已删除的聊天内容） ----------
+function purgeVisitorCaches(visitorIds) {
+  const drop = new Set(visitorIds)
+  for (const vid of drop) {
+    delete msgCache[vid]
+    messageLoadVersion[vid] = (messageLoadVersion[vid] || 0) + 1   // 作废在途加载，防止旧响应写回缓存
+    try { localStorage.removeItem(MSG_PREFIX + vid) } catch {}
+  }
+  try {
+    const idx = JSON.parse(localStorage.getItem(MSG_INDEX) || '[]')
+    if (Array.isArray(idx)) localStorage.setItem(MSG_INDEX, JSON.stringify(idx.filter(v => !drop.has(v))))
+  } catch {}
+}
+function purgeAllVisitorCaches() {
+  for (const vid of Object.keys(msgCache)) {
+    delete msgCache[vid]
+    messageLoadVersion[vid] = (messageLoadVersion[vid] || 0) + 1
+  }
+  try {
+    const keys = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(MSG_PREFIX)) keys.push(k)
+    }
+    for (const k of keys) localStorage.removeItem(k)
+  } catch {}
+}
+
+// 从列表移除客户（删除 / 拉黑 / 他端删除事件共用）；purgeCache=true 同时清本地聊天缓存与草稿附件
+function removeVisitorsLocally(visitorIds, { purgeCache = false, closeProfile = true } = {}) {
+  const ids = normalizeVisitorIds(visitorIds)
+  if (!ids.length) return 0
+  const drop = new Set(ids)
+  const { list, removed, removedItems } = removeVisitorsFromList(convs.value, ids)
+  if (removed) convs.value = list
+  for (const vid of ids) {
+    delete selectedVisitors.value[vid]
+    visitorTyping.clear(vid)
+  }
+  if (activeConv.value && drop.has(activeConv.value.visitor_id)) {
+    activeConv.value = null
+    messages.value = []
+  }
+  if (closeProfile && profileVisible.value && drop.has(profileTarget.value?.visitor_id)) profileVisible.value = false
+  if (purgeCache) {
+    for (const c of removedItems) {
+      clearPendingFor(c.id)
+      delete drafts.value[c.id]
+    }
+    purgeVisitorCaches(ids)
+  }
+  if (removed) scheduleConvsRefresh()   // 3 秒防抖后按服务端对账总数与分页
+  return removed
+}
+
+function resetAfterDeleteAll() {
+  for (const c of convs.value) clearPendingFor(c.id)
+  drafts.value = {}
+  convs.value = []
+  activeConv.value = null
+  messages.value = []
+  clearSelection()
+  profileVisible.value = false
+  visitorTyping.dispose()
+  typingState.value = {}
+  purgeAllVisitorCaches()
+  loadConvs(true)
+  refreshSideTotals()
+  scheduleConvsRefresh()   // 兜底：若此刻有在途列表请求，3 秒后再对账一次
+}
+
+function onConversationsDeleted(extra) {
+  if (extra && extra.all === true) {
+    resetAfterDeleteAll()
+    return
+  }
+  const ids = Array.isArray(extra?.visitor_ids) ? extra.visitor_ids.slice(0, 1000) : []
+  removeVisitorsLocally(ids, { purgeCache: true })
+}
+
+// ---------- profile_updated：按客户合并 300ms 内的重复事件；突发过多时直接整页对账 ----------
+const PROFILE_REFRESH_DEBOUNCE_MS = 300
+const PROFILE_REFRESH_BURST_LIMIT = 20
+const profileRefreshTimers = new Map()
+function queueProfileRefresh(vid) {
+  if (!isValidVisitorId(vid) || profileRefreshTimers.has(vid)) return
+  if (profileRefreshTimers.size >= PROFILE_REFRESH_BURST_LIMIT) {
+    scheduleConvsRefresh()
+    return
+  }
+  profileRefreshTimers.set(vid, setTimeout(() => {
+    profileRefreshTimers.delete(vid)
+    refreshVisitorProfile(vid)
+  }, PROFILE_REFRESH_DEBOUNCE_MS))
+}
+async function refreshVisitorProfile(vid) {
+  if (profileVisible.value && profileTarget.value?.visitor_id === vid) profileDrawerRef.value?.reload()
+  const conv = convs.value.find(c => c.visitor_id === vid)
+  if (!conv) {
+    scheduleConvsRefresh()   // 可能是解除拉黑 / 恢复的客户，重新拉列表
+    return
+  }
+  let profile = null
+  try {
+    const r = await getVisitorProfile(vid, { silent: true })
+    profile = r?.data
+  } catch { return }
+  if (!profile) return
+  if (profile.blocked === true) {
+    removeVisitorsLocally([vid], { closeProfile: false })
+    return
+  }
+  const pinnedBefore = conv.pinned === true
+  applyProfileToConversation(conv, profile)
+  if (pinnedBefore !== (conv.pinned === true) || tagFilter.value) scheduleConvsRefresh()
+}
+
+// ---------- 单客户操作菜单 ----------
+async function onConvCommand(cmd, c) {
+  if (!c || !isValidVisitorId(c.visitor_id)) return
+  if (cmd === 'profile') { openProfile(c); return }
+  if (cmd === 'block') {
+    blockTarget.value = { visitor_id: c.visitor_id, identifier: c.identifier || '' }
+    blockVisible.value = true
+    return
+  }
+  if (cmd === 'delete') { await confirmAndDelete([c.visitor_id]); return }
+  const key = cmd + ':' + c.visitor_id
+  if (opBusy.has(key)) return
+  opBusy.add(key)
+  try {
+    if (cmd === 'pin' || cmd === 'unpin') {
+      const pinned = cmd === 'pin'
+      await setVisitorPinned(c.visitor_id, pinned)
+      c.pinned = pinned
+      if (pinned) moveToTop(convs.value, c)
+      scheduleConvsRefresh()   // 最终以服务端排序为准（置顶按置顶时间倒序）
+      ElMessage.success(pinned ? '已置顶' : '已取消置顶')
+    } else if (cmd === 'mark-unread') {
+      await setVisitorMarkedUnread(c.visitor_id, true)
+      c.marked_unread = true
+      if (!(Number(c.unread) > 0)) c.unread = 1
+    } else if (cmd === 'mark-read') {
+      await setVisitorMarkedUnread(c.visitor_id, false)
+      c.marked_unread = false
+      c.unread = 0
+      markConversationRead(c.id).catch(() => {})
+    } else if (cmd === 'export') {
+      const r = await exportVisitor(c.visitor_id, 'xlsx')
+      ElMessage.success('已导出：' + r.filename)
+    }
+  } catch {
+    // 错误提示由 http 拦截器 / 下载模块统一弹出
+  } finally {
+    opBusy.delete(key)
+  }
+}
+
+async function confirmAndDelete(visitorIds) {
+  const check = validateBatchSelection(visitorIds, BATCH_DELETE_MAX)
+  if (!check.ok) { ElMessage.warning(check.error); return }
+  const n = check.ids.length
+  try {
+    await ElMessageBox.confirm(
+      `确定删除${n > 1 ? '选中的 ' + n + ' 位客户' : '该客户'}的全部聊天记录（含图片文件）？删除后进入回收站，保留 7 天后自动彻底删除；访客端聊天窗口会同时清空。`,
+      '删除聊天记录',
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  if (batchBusy.value) return
+  batchBusy.value = true
+  try {
+    const r = await deleteVisitors(check.ids)
+    const data = r?.data || {}
+    ElMessage.success({ message: summarizeDeleteResult(data), duration: 5000 })
+    removeVisitorsLocally(check.ids, { purgeCache: true })
+    // 有无权访问而被跳过的客户：以服务端列表为准重新对账，让它们恢复显示
+    if (Number(data.skipped) > 0) loadConvs(true)
+  } catch {
+    // 错误提示由 http 拦截器统一弹出
+  } finally {
+    batchBusy.value = false
+  }
+}
+function batchDeleteSelected() { confirmAndDelete(selectedIds.value) }
+async function batchExportSelected() {
+  const check = validateBatchSelection(selectedIds.value, BATCH_EXPORT_MAX)
+  if (!check.ok) { ElMessage.warning(check.error); return }
+  if (batchBusy.value) return
+  batchBusy.value = true
+  try {
+    const r = await exportVisitors(check.ids, 'xlsx')
+    ElMessage.success(`已导出 ${check.ids.length} 位客户的聊天记录：${r.filename}`)
+  } catch {
+    // 错误提示由 http 拦截器 / 下载模块统一弹出
+  } finally {
+    batchBusy.value = false
+  }
+}
+
+// ---------- 客户资料 / 拉黑 ----------
+function openProfile(c) {
+  if (!c || !isValidVisitorId(c.visitor_id)) return
+  profileTarget.value = { visitor_id: c.visitor_id, identifier: c.identifier || '' }
+  profileVisible.value = true
+}
+function onProfileSaved(profile) {
+  const vid = profile?.visitor_id
+  const conv = convs.value.find(x => x.visitor_id === vid)
+  if (conv) applyProfileToConversation(conv, profile)
+  if (activeConv.value?.visitor_id === vid && activeConv.value !== conv) applyProfileToConversation(activeConv.value, profile)
+  toolbarRef.value?.reloadTags()
+  if (tagFilter.value) scheduleConvsRefresh()
+}
+function onBlockedChange(payload) {
+  const vid = payload?.visitor_id
+  if (!isValidVisitorId(vid)) return
+  // 拉黑客户不进会话列表（契约第 6 节）；记录保留可查，因此不清本地缓存
+  if (payload.blocked === true) removeVisitorsLocally([vid], { closeProfile: false })
+  else scheduleConvsRefresh()
+}
+
+// ---------- 快捷回复：点击填入输入框，可直接回车发送 ----------
+function onQuickReplyPick(content) {
+  if (!activeConv.value || activeConv.value._readonly) return
+  currentDraft.value = insertQuickReply(currentDraft.value, content)
+  onDraftInput(currentDraft.value)
+  nextTick(() => draftInputRef.value?.focus())
+}
+
+// ---------- 对方正在输入（契约第 10 节） ----------
+const typingState = ref({})          // { [visitorId]: true }
+const visitorTyping = new TypingIndicator({
+  timeoutMs: TYPING_DISPLAY_TIMEOUT_MS,
+  onChange: (vid, on) => {
+    if (on) typingState.value[vid] = true
+    else delete typingState.value[vid]
+  },
+})
+const agentTypingThrottle = new TypingThrottle({ intervalMs: TYPING_SEND_INTERVAL_MS })
+const activeTyping = computed(() => !!(activeConv.value && typingState.value[activeConv.value.visitor_id]))
+function onDraftInput(value) {
+  const conv = activeConv.value
+  if (!conv || conv._readonly || !conv.id || !ws?.alive) return
+  if (!String(value ?? '').trim()) return
+  if (!agentTypingThrottle.tryAcquire(conv.id)) return
+  // 发送失败（连接刚断开）时释放节流，恢复后可立即再发
+  if (!ws.send({ type: 'typing', conv: conv.id, ts: Date.now() })) agentTypingThrottle.reset(conv.id)
+}
+function onTypingEvent(env) {
+  const who = parseParticipant(env.from)
+  if (who.role !== 'visitor') return   // 只展示访客的输入状态；其他客服的 typing 忽略
+  visitorTyping.mark(who.id)
+}
+function clearVisitorTyping(from) {
+  const who = parseParticipant(from)
+  if (who.role === 'visitor') visitorTyping.clear(who.id)
+}
+
+// ---------- 消息撤回（契约第 9 节，仅自己 2 分钟内的消息） ----------
+const recallNow = ref(Date.now())
+let recallTicker = null
+onMounted(() => {
+  recallTicker = setInterval(() => {
+    // 只有当前会话里有消息的“可撤回”状态发生变化时才推进时间，避免整页每 5 秒无谓重渲染
+    const now = Date.now()
+    const me = myAgentId.value
+    const prev = recallNow.value
+    if (messages.value.some(m => canRecallMessage(m, me, now) !== canRecallMessage(m, me, prev))) recallNow.value = now
+  }, 5000)
+})
+const recallingIds = new Set()
+function canRecall(m) { return canRecallMessage(m, myAgentId.value, recallNow.value) }
+function recallText(m) { return recallPlaceholder(m, myAgentId.value) }
+function applyRecallLocally(messageId) {
+  for (const vid of Object.keys(msgCache)) {
+    // 当前会话通过响应式数组修改，界面立即刷新；其他客户直接改缓存
+    const list = activeConv.value?.visitor_id === vid ? messages.value : msgCache[vid]
+    const r = applyRecallToList(list, messageId)
+    if (r.matched) {
+      saveCachedMsgs(vid)
+      return true
+    }
+  }
+  return false
+}
+async function recallMine(m) {
+  if (!canRecallMessage(m, myAgentId.value, Date.now()) || recallingIds.has(m.id)) return
+  try {
+    await ElMessageBox.confirm('撤回后访客端将显示「客服撤回了一条消息」，确定撤回？', '撤回消息', {
+      type: 'warning', confirmButtonText: '撤回', cancelButtonText: '取消',
+    })
+  } catch { return }
+  if (!canRecallMessage(m, myAgentId.value, Date.now())) {
+    ElMessage.warning('已超过 2 分钟，无法撤回')
+    return
+  }
+  recallingIds.add(m.id)
+  try {
+    await recallMessage(m.id)
+    applyRecallLocally(m.id)
+  } catch (e) {
+    if (recallFailureMeansAlreadyRecalled(e)) applyRecallLocally(m.id)   // 40911 已撤回：同步本地状态
+  } finally {
+    recallingIds.delete(m.id)
+  }
+}
+function onBubbleContextMenu(e, m) {
+  if (!canRecall(m)) return
+  e.preventDefault()
+  recallMine(m)
+}
+
+// ---------- 全局搜索：点击结果打开并定位 ----------
+async function openFromSearch(hit) {
+  if (!hit || !isValidVisitorId(hit.visitor_id)) return
+  const conv = convs.value.find(c => c.visitor_id === hit.visitor_id)
+  try {
+    if (conv) {
+      await pickConv(conv)
+    } else {
+      // 不在当前列表（已结束 / 未加载到 / 筛选外）：只读打开历史记录，不允许向旧会话发送
+      activeConv.value = {
+        id: typeof hit.conv_id === 'string' ? hit.conv_id : '',
+        visitor_id: hit.visitor_id,
+        identifier: typeof hit.identifier === 'string' ? hit.identifier : '',
+        unread: 0,
+        _readonly: true,
+      }
+      messages.value = []
+      await loadMessages(hit.visitor_id)
+    }
+  } catch {
+    // 错误提示由 http 拦截器统一弹出
+  }
+  await nextTick()
+  locateMessage(hit.message_id)
+}
+function locateMessage(messageId) {
+  // ID 先按白名单校验再拼选择器，杜绝选择器注入
+  if (typeof messageId !== 'string' || !/^[A-Za-z0-9-]{1,36}$/.test(messageId)) return
+  const el = document.querySelector('#msg-list [data-msg-id="' + messageId + '"]')
+  if (el) el.scrollIntoView({ block: 'center' })
+  else ElMessage.info('会话已打开；该消息较早，未在最近记录中显示')
+}
+
+// ---------- 新实时事件分发 ----------
+function handleFeatureEvent(env) {
+  switch (env.type) {
+    case 'history_cleared':          // 访客端事件，客服端忽略
+      return true
+    case 'conversations_deleted':
+      onConversationsDeleted(env.extra)
+      return true
+    case 'profile_updated':
+      queueProfileRefresh(env.extra?.visitor_id)
+      return true
+    case 'recall':
+      if (typeof env.id === 'string') applyRecallLocally(env.id)
+      return true
+    case 'typing':
+      onTypingEvent(env)
+      return true
+    default:
+      return false
+  }
+}
 
 // ====== 语音通话（接听端） ======
 // 默认仅 STUN 兜底；每次 voiceAccept 都会刷新 fetchTurnCredential
@@ -1165,7 +1625,7 @@ function voiceCleanup() {
 <template>
   <el-container class="console-root">
     <!-- 左：会话列表 -->
-    <el-aside width="320px" class="aside">
+    <el-aside width="360px" class="aside">
       <div class="aside-header">
         <el-row :gutter="8">
           <el-col :span="12">
@@ -1177,21 +1637,34 @@ function voiceCleanup() {
         </el-row>
         <!-- [065] 会话过滤 tab：全部 / 仅主动联系过的访客 -->
         <div class="aside-filter" style="margin-top:8px">
-          <el-radio-group v-model="filterMode" size="small" style="width:100%">
-            <el-radio-button value="all" style="width:50%;text-align:center">
-              全部 ({{ allTotal }})
-            </el-radio-button>
-            <el-radio-button value="contacted" style="width:50%;text-align:center">
-              已联系 ({{ contactedTotal }})
-            </el-radio-button>
-          </el-radio-group>
+          <el-space direction="vertical" fill :size="8">
+            <el-radio-group v-model="filterMode" size="small" style="width:100%">
+              <el-radio-button value="all" style="width:50%;text-align:center">
+                全部 ({{ allTotal }})
+              </el-radio-button>
+              <el-radio-button value="contacted" style="width:50%;text-align:center">
+                已联系 ({{ contactedTotal }})
+              </el-radio-button>
+            </el-radio-group>
+            <!-- [113] 标签筛选 + 多选批量删除/导出 + 全局搜索入口 -->
+            <ConversationToolbar
+              ref="toolbarRef"
+              v-model:tag="tagFilter"
+              :selected-count="selectedIds.length"
+              :loaded-count="convs.length"
+              :busy="batchBusy"
+              @toggle-all="toggleSelectAll"
+              @batch-delete="batchDeleteSelected"
+              @batch-export="batchExportSelected"
+              @open-search="searchVisible = true" />
+          </el-space>
         </div>
       </div>
       <el-divider style="margin:0" />
       <el-scrollbar class="conv-scroll" ref="convScrollRef" @scroll="onConvScroll">
         <el-empty
           v-if="!filteredConvs.length && !convLoading"
-          :description="filterMode==='contacted' ? '暂无主动联系过的客户' : '暂无访客'"
+          :description="tagFilter ? '该标签下暂无客户' : (filterMode==='contacted' ? '暂无主动联系过的客户' : '暂无访客')"
           :image-size="80" />
         <template v-else>
           <div
@@ -1200,6 +1673,10 @@ function voiceCleanup() {
             class="conv-item"
             :class="{ 'conv-item--active': activeConv?.id === c.id }"
             @click="pickConv(c)">
+            <!-- [113] 多选复选框：阻止冒泡，勾选不切换会话 -->
+            <span @click.stop>
+              <el-checkbox :model-value="selectedVisitors[c.visitor_id] === true" @change="(v) => toggleSelect(c, v === true)" />
+            </span>
             <el-avatar :size="40" :style="{ background: visitorAvatarColor(c.visitor_id), color:'#fff', fontSize:'14px', fontWeight:600 }">
               {{ avatarChar(c.identifier || c.visitor_id) }}
             </el-avatar>
@@ -1212,11 +1689,15 @@ function voiceCleanup() {
                 <span class="conv-preview">{{ lastMsgPreview(c) }}</span>
                 <el-badge v-if="c.unread > 0" :value="c.unread" :max="99" />
               </div>
+              <!-- [113] 置顶 / 手动未读 / 标签 / 备注摘要（纯文本渲染） -->
+              <ConversationMeta :conv="c" />
               <!-- [059] 第 3 行：访客地理位置 + IP（任一非空才显示，省垂直空间）-->
               <div v-if="convGeoIp(c)" class="conv-row3">
                 <span class="conv-geoip">{{ convGeoIp(c) }}</span>
               </div>
             </div>
+            <!-- [113] 单客户操作菜单 -->
+            <ConversationActions :conv="c" @command="(cmd) => onConvCommand(cmd, c)" />
           </div>
           <div v-if="convLoading" style="text-align:center;padding:10px;color:#909399;font-size:12px">加载中…</div>
           <div v-else-if="!convHasMore && filteredConvs.length" style="text-align:center;padding:10px;color:#c0c4cc;font-size:12px">— 没有更多了 —</div>
@@ -1243,6 +1724,9 @@ function voiceCleanup() {
               <el-button link type="primary" size="small" @click="openRelatedDialog(activeConv.visitor_id)">
                 关联访客 <span v-if="relatedCount[activeConv.visitor_id] != null">({{ relatedCount[activeConv.visitor_id] }})</span>
               </el-button>
+              <!-- [113] 客户资料：备注 / 标签 / 拉黑 -->
+              <el-button link type="primary" size="small" @click="openProfile(activeConv)">客户资料</el-button>
+              <el-tag v-if="activeConv._readonly" size="small" type="info">只读（历史记录）</el-tag>
             </div>
           </div>
         </div>
@@ -1270,7 +1754,7 @@ function voiceCleanup() {
           </el-table-column>
           <el-table-column label="最近活动">
             <template #default="{ row }">
-              {{ dayjs(row.last_seen).format('YYYY-MM-DD HH:mm') }}
+              {{ formatBeijing(row.last_seen, { seconds: false, empty: '' }) }}
             </template>
           </el-table-column>
         </el-table>
@@ -1312,10 +1796,15 @@ function voiceCleanup() {
               <div class="msg-stack">
                 <div class="msg-stack-name">{{ senderName(g) }}</div>
                 <template v-for="m in g.items" :key="m.id">
+                  <!-- [113] 已撤回：只显示占位文字，不渲染任何正文/附件 -->
+                  <el-text v-if="m.recalled === true" size="small" type="info" :data-msg-id="m.id">{{ recallText(m) }}</el-text>
                   <div
+                    v-else
                     class="bubble"
                     :class="{ 'bubble--mine': isMineGroup(g) }"
-                    :title="fmtAbs(m.created_at)">
+                    :title="fmtAbs(m.created_at)"
+                    :data-msg-id="m.id"
+                    @contextmenu="onBubbleContextMenu($event, m)">
                     <template v-if="mediaURL(m)">
                       <el-image
                         v-if="mediaKind(m) === 'image'"
@@ -1344,16 +1833,20 @@ function voiceCleanup() {
                     </span>
                   </div>
                   <!-- [098] 每条消息保留自己的状态，后续消息不会覆盖前一条已读。 -->
-                  <div v-if="isMineGroup(g)" class="read-indicator">
-                    <el-link
-                      v-if="canonicalMessageStatus(m) === 'failed'"
-                      type="danger"
-                      :underline="false"
-                      @click.stop="resendMsg(m)">
-                      <el-icon><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5"/><path d="M12 18h.01"/></svg></el-icon>
-                      <span>{{ messageStatusLabel(m) }}</span>
-                    </el-link>
-                    <el-text v-else size="small" type="info">{{ messageStatusLabel(m) }}</el-text>
+                  <div v-if="isMineGroup(g) && m.recalled !== true" class="read-indicator">
+                    <el-space :size="8">
+                      <el-link
+                        v-if="canonicalMessageStatus(m) === 'failed'"
+                        type="danger"
+                        :underline="false"
+                        @click.stop="resendMsg(m)">
+                        <el-icon><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 2 21h20L12 3Z"/><path d="M12 9v5"/><path d="M12 18h.01"/></svg></el-icon>
+                        <span>{{ messageStatusLabel(m) }}</span>
+                      </el-link>
+                      <el-text v-else size="small" type="info">{{ messageStatusLabel(m) }}</el-text>
+                      <!-- [113] 2 分钟内自己的消息可撤回（也可右键气泡） -->
+                      <el-button v-if="canRecall(m)" link type="primary" size="small" @click.stop="recallMine(m)">撤回</el-button>
+                    </el-space>
                   </div>
                 </template>
               </div>
@@ -1362,7 +1855,7 @@ function voiceCleanup() {
         </template>
       </el-main>
 
-      <el-footer v-if="activeConv" class="chat-footer">
+      <el-footer v-if="activeConv && !activeConv._readonly" class="chat-footer">
         <!-- [040] pending 多文件预览队列：粘贴 / 选附件追加到这里，点发送才依次上传 -->
         <!-- [068] currentPendingFiles：仅显示当前活跃会话的 pending，切会话自动切换显示 -->
         <div v-if="currentPendingFiles.length" class="pending-list">
@@ -1382,24 +1875,44 @@ function voiceCleanup() {
             <button class="remove-btn" title="移除" @click="removePendingFile(it, activeConv?.id)">×</button>
           </div>
         </div>
+        <!-- [113] 访客正在输入（5 秒无新 typing 或收到访客消息后自动隐藏） -->
+        <el-text v-if="activeTyping" size="small" type="info">对方正在输入…</el-text>
         <!-- [068] v-model 绑定 currentDraft computed，自动 per-conv 隔离 -->
         <el-input
+          ref="draftInputRef"
           v-model="currentDraft"
           type="textarea"
           :rows="3"
           resize="none"
           placeholder="回车发送，Shift+回车换行，粘贴可上传图片/文件（可多张）"
           @keydown.enter.exact.prevent="sendText"
+          @input="onDraftInput"
           @paste.native="onPasteDraft" />
         <div class="chat-footer-actions">
           <div>
             <el-button :icon="undefined" plain size="small" @click="fileInput.click()">附件 / 图片</el-button>
+            <!-- [113] 快捷回复：点击填入输入框，回车即可发送 -->
+            <QuickReplyPicker @pick="onQuickReplyPick" />
             <input ref="fileInput" type="file" multiple style="display:none" @change="pickFile" />
           </div>
           <el-button type="primary" :loading="sending" @click="sendText">发送</el-button>
         </div>
       </el-footer>
+      <!-- [113] 搜索打开的非列表客户：只读查看，不向旧会话发送 -->
+      <el-footer v-else-if="activeConv" class="chat-footer">
+        <el-alert type="info" :closable="false" show-icon title="该客户当前不在会话列表中（可能已结束或不在当前筛选内），仅可查看聊天记录" />
+      </el-footer>
     </el-container>
+
+    <!-- [113] 客户资料 / 拉黑 / 全局搜索（均挂载到 body，不影响布局） -->
+    <VisitorProfileDrawer
+      ref="profileDrawerRef"
+      v-model="profileVisible"
+      :visitor="profileTarget"
+      @saved="onProfileSaved"
+      @blocked-change="onBlockedChange" />
+    <BlockVisitorDialog v-model="blockVisible" :visitor="blockTarget" @done="onBlockedChange" />
+    <ChatSearchDialog v-model="searchVisible" @open="openFromSearch" />
 
     <!-- 语音通话浮窗（来电 / 通话中 / 结束） -->
     <div v-if="voiceState !== 'idle'" class="voice-overlay" :class="`voice-overlay--${voiceState}`">

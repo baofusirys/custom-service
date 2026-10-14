@@ -3,6 +3,17 @@ import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
 import { listSounds, playSound, unlockAudio } from '../api/sound'
+import { useSession } from '../store/session'
+import DeleteAllChats from '../components/settings/DeleteAllChats.vue'
+import {
+  AUTO_CLEAN_DEFAULT_DAYS,
+  AUTO_CLEAN_MAX_DAYS,
+  AUTO_CLEAN_MIN_DAYS,
+  parseAutoCleanDays,
+  serializeAutoCleanDays,
+} from '../modules/autoClean'
+
+const session = useSession()
 
 const loading = ref(false)
 const saving = ref(false)
@@ -24,7 +35,10 @@ const form = ref({
   // voice-ring.mp3（[036]）跟这个无关
   push_sound_enter: '1',    // 新访客打开 widget
   push_sound_message: '9',  // 已有会话中访客发新消息
-  push_sound_call: '4'      // [043] 语音来电（系统通知栏）
+  push_sound_call: '4',     // [043] 语音来电（系统通知栏）
+  // [113] 自动清理：关闭 / 7-3650 天（存储为字符串 auto_clean_days，"0" 表示关闭）
+  auto_clean_enabled: false,
+  auto_clean_days: AUTO_CLEAN_DEFAULT_DAYS
 })
 
 // luckfast 推送提示音：0-15 共 16 种（具体音色需要在 iPhone 上听）
@@ -53,12 +67,20 @@ async function load() {
     form.value.push_sound_enter = d.push_sound_enter || '1'
     form.value.push_sound_message = d.push_sound_message || '9'
     form.value.push_sound_call = d.push_sound_call || '4'
+    const autoClean = parseAutoCleanDays(d.auto_clean_days)
+    form.value.auto_clean_enabled = autoClean.enabled
+    form.value.auto_clean_days = autoClean.days
   } finally {
     loading.value = false
   }
 }
 
 async function save() {
+  const autoClean = serializeAutoCleanDays(form.value.auto_clean_enabled, form.value.auto_clean_days)
+  if (!autoClean.ok) {
+    ElMessage.warning(autoClean.error)
+    return
+  }
   saving.value = true
   try {
     const payload = {
@@ -74,7 +96,8 @@ async function save() {
       push_user_key: (form.value.push_user_key || '').trim(),
       push_sound_enter: form.value.push_sound_enter || '1',
       push_sound_message: form.value.push_sound_message || '9',
-      push_sound_call: form.value.push_sound_call || '4'
+      push_sound_call: form.value.push_sound_call || '4',
+      auto_clean_days: autoClean.value
     }
     await http.post('/admin/settings', payload)
     ElMessage.success('保存成功')
@@ -194,11 +217,36 @@ onMounted(load)
         <div class="form-tip">访客发起语音通话时，iPhone 系统通知栏弹通知的提示音（点通知拉起 App 接听）。注：App 内看到来电界面后会循环播 voice-ring.mp3 内置铃声，跟此项独立。</div>
       </el-form-item>
 
+      <el-divider content-position="left">自动清理</el-divider>
+
+      <el-form-item label="自动清理聊天记录">
+        <el-switch v-model="form.auto_clean_enabled" active-text="开启" inactive-text="关闭" />
+        <div class="form-tip">每天北京时间 04:30 把最近活动早于设定天数的会话移入回收站（置顶客户除外），回收站保留 7 天后自动彻底删除。</div>
+      </el-form-item>
+
+      <el-form-item v-if="form.auto_clean_enabled" label="清理早于（天）">
+        <el-input-number
+          v-model="form.auto_clean_days"
+          :min="AUTO_CLEAN_MIN_DAYS"
+          :max="AUTO_CLEAN_MAX_DAYS"
+          :step="1"
+          :precision="0"
+          step-strictly
+          controls-position="right" />
+        <div class="form-tip">范围 {{ AUTO_CLEAN_MIN_DAYS }}–{{ AUTO_CLEAN_MAX_DAYS }} 天；最近活动早于该天数的会话会被自动清理。</div>
+      </el-form-item>
+
       <el-form-item>
         <el-button type="primary" :loading="saving" @click="save">保 存</el-button>
         <el-button @click="load">重置</el-button>
       </el-form-item>
     </el-form>
+
+    <!-- [113] 危险操作放在页面最下方，仅管理员可见 -->
+    <template v-if="session.agent?.role === 'admin'">
+      <el-divider content-position="left">危险操作</el-divider>
+      <DeleteAllChats />
+    </template>
   </el-card>
 </template>
 

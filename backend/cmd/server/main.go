@@ -154,10 +154,14 @@ func main() {
 		AllowOrigins:     cfg.CORSAllowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "OPTIONS"},
 		AllowHeaders:     []string{"Authorization", "Content-Type"},
-		ExposeHeaders:    []string{"Content-Length"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Disposition"}, // [113] 导出下载需读取文件名
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
+
+	// [113] 回收站彻底删除时同步删除磁盘文件；后台维护（回收站到期清理、自动清理）
+	svc.SetUploadsDir(uploads)
+	svc.StartMaintenance(hubCtx)
 
 	h := handler.NewHTTP(cfg, svc, hub, uploads)
 	api := r.Group("/api")
@@ -195,6 +199,23 @@ func main() {
 			ag.GET("/visitor/:vid/related", h.RelatedVisitors)
 			// [090] 按客户聚合的完整历史对话（跨该访客所有会话段，含已结束）
 			ag.GET("/visitor/:vid/messages", h.ListMessagesByVisitor)
+			// [113] 新功能（契约见 _internal/reports/api-0.8.0-features.md）
+			ag.POST("/visitors/delete", h.DeleteVisitors)
+			ag.GET("/quick-replies", h.ListQuickReplies)
+			ag.POST("/quick-replies", h.CreateQuickReply)
+			ag.POST("/quick-replies/:id/update", h.UpdateQuickReply)
+			ag.POST("/quick-replies/:id/delete", h.DeleteQuickReply)
+			ag.GET("/visitor/:vid/profile", h.GetVisitorProfile)
+			ag.POST("/visitor/:vid/profile", h.SaveVisitorProfile)
+			ag.POST("/visitor/:vid/pin", h.SetVisitorPinned)
+			ag.POST("/visitor/:vid/unread", h.SetVisitorUnread)
+			ag.POST("/visitor/:vid/block", h.SetVisitorBlocked)
+			ag.GET("/visitor/:vid/export", h.ExportVisitor)
+			ag.POST("/export", h.ExportVisitors)
+			ag.GET("/tags", h.ListTags)
+			ag.GET("/blocked", h.ListBlockedVisitors)
+			ag.GET("/search", h.SearchMessages)
+			ag.POST("/messages/:id/recall", h.RecallMessage)
 		}
 
 		// 管理（仅 admin）
@@ -205,6 +226,11 @@ func main() {
 			adm.POST("/agents/active", h.DisableAgent)
 			adm.GET("/settings", h.GetSettings)
 			adm.POST("/settings", h.UpdateSettings)
+			// [113] 删除全部与回收站
+			adm.POST("/visitors/delete-all", h.DeleteAllVisitors)
+			adm.GET("/recycle-bin", h.ListRecycleBin)
+			adm.POST("/recycle-bin/restore", h.RestoreRecycleBin)
+			adm.POST("/recycle-bin/purge", h.PurgeRecycleBin)
 		}
 
 		// 文件上传 / 下载

@@ -439,10 +439,18 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 		}
 		h.sink.OnPageNavigation(c.ID, boundConv, url, title)
 	case "typing":
-		// 仅转发，不落库
-		h.FanoutToConv(ctx, e)
+		// [113] 仅转发、不落库。会话与发送方一律取服务器绑定值（不信任客户端 conv/from），
+		// 丢弃一切内容字段防被当作隐蔽消息通道；每连接 1 秒最多转发 1 次；已拉黑访客不转发。
+		if typing := buildTypingEnvelope(c, time.Now().UnixMilli()); typing != nil {
+			h.FanoutToConv(ctx, typing)
+		}
 	case "voice_call", "voice_accept", "voice_reject", "voice_taken",
 		"voice_offer", "voice_answer", "voice_ice", "voice_end":
+		// [113] 已拉黑访客的来电与信令静默丢弃：客服端不弹来电、不推送。
+		if c.Kind == KindVisitor && c.Blocked.Load() {
+			h.bizLog.Info("voice_signal_dropped_blocked", zap.String("vid", c.ID), zap.String("type", e.Type))
+			return
+		}
 		// 语音通话信令：纯信令，后端无状态转发，不落库
 		//   - voice_call (To 空): 访客发起 → 广播给所有 agent (来电浮窗)
 		//   - voice_accept/reject (To=visitor:xx): agent 接听/拒绝 → 直推 visitor
@@ -847,7 +855,7 @@ func (h *Hub) fanoutLocal(e *Envelope) FanoutResult {
 			return true
 		})
 	}
-	if e.Type == "chat" || e.Type == "read" || e.Type == "delivery" {
+	if e.Type == "chat" || e.Type == "read" || e.Type == "delivery" || e.Type == "recall" {
 		h.agents.Range(func(_, v any) bool {
 			v.(*sync.Map).Range(func(_, cv any) bool {
 				c := cv.(*Client)
