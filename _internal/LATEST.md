@@ -1,4 +1,4 @@
-### 当前版本：v0.8.2（待部署，生产 v0.8.1）· App 3.0.1 (7) Flutter 版 · 2026-10-15（北京时间）
+### 当前版本：v0.8.2（已部署生产）· App 3.0.1 (7) Flutter 版 · 2026-10-15（北京时间）
 
 > 本文件是维护交接的「第一站」。看完这一份再去看 `_internal/CHANGELOG.md`，别凭印象答。
 
@@ -14,7 +14,7 @@
   - 签名：免费 Personal Team `4JZ8K387NU`（唯一来源 `ios/Runner.xcodeproj` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；手机上是 3.0.0 (6)（装机序号 3904）；3.0.1 (7) 已构建待装（2026-10-15 05:35 起手机不可达，Mac 后台每 2 分钟补装 3 小时，之后 launchd 每天 9/14/21 点），有效期至 `2026-10-21T02:25:04+08:00`。
   - 自动续签：App 仓库 `scripts/auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点，已改指向 Flutter 脚本），日志 Mac `~/Library/Logs/custom_service_app/auto_reinstall.log`（旧版历史在同目录 `auto_reinstall-swift-history.log`）；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
   - 待办：轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
-- **发布到生产/下游**：v0.8.1 已推送 GitHub（标签 v0.8.1）并于 2026-10-15 00:44 部署生产（只改 IMAGE_TAG、只更新 7 个 cs 容器，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.8.1-20261015-004024.sql.gz`，迁移 014 已执行）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。**爷爷本地 fakami 项目的 .env 需把 IMAGE_TAG 同步为 0.8.1，否则下次部署 fakami 会把客服退回旧版。**
+- **发布到生产/下游**：v0.8.2 已推送 GitHub（标签 v0.8.2）并于 2026-10-15 05:41 部署生产（只改 IMAGE_TAG、只更新 7 个 cs 容器，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.8.2-20261015-053717.sql.gz`）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。**爷爷本地 fakami 项目的 .env 需把 IMAGE_TAG 同步为 0.8.2，否则下次部署 fakami 会把客服退回旧版。**
 - **待发布**：无（v0.8.1 已上线）。
 
 ## 当前部署坐标
