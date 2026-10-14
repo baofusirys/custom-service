@@ -88,3 +88,27 @@ func TestNormalizeNoteQuickSearchClean(t *testing.T) {
 		t.Fatal("标签筛选")
 	}
 }
+
+// [115] 已读接口的会话 ID 校验：只允许字母数字与中划线（UUID），注入、路径穿越、超长一律拒绝（不访问数据库）。
+func TestValidConversationID(t *testing.T) {
+	for _, ok := range []string{"0b8d7b52-3f0e-4f7d-9d43-1a2b3c4d5e6f", "c0000000-0000-4000-8000-000000000001"} {
+		if !ValidConversationID(ok) {
+			t.Fatalf("合法会话 ID 被拒绝: %s", ok)
+		}
+	}
+	for _, bad := range []string{"", "x' OR '1'='1", "../../etc/passwd", "a b", "conv;DROP", strings.Repeat("a", 65), "会话"} {
+		if ValidConversationID(bad) {
+			t.Fatalf("非法会话 ID 被放行: %q", bad)
+		}
+	}
+}
+
+func TestLogSafeParamTruncates(t *testing.T) {
+	if got := logSafeParam("abc"); got != "abc" {
+		t.Fatalf("短参数应原样保留: %s", got)
+	}
+	long := strings.Repeat("x", 500)
+	if got := logSafeParam(long); len(got) > 64+len("…(truncated)") || !strings.HasSuffix(got, "…(truncated)") {
+		t.Fatalf("超长参数必须截断: len=%d", len(got))
+	}
+}

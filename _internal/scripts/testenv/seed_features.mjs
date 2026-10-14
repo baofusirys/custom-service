@@ -16,7 +16,7 @@ const post = async (path, body) => {
 };
 // 清理历次 UI 测试创建的同名快捷回复
 const qr = await (await fetch(BASE + '/api/agent/quick-replies', { headers: { Authorization: 'Bearer ' + login.token } })).json();
-for (const q of (qr.data || []).filter((x) => x.title === '付款方式' && x.scope === 'personal')) await post('/api/agent/quick-replies/' + q.id + '/delete', {});
+for (const q of (qr.data || []).filter((x) => x.scope === 'personal' && (x.title === '付款方式' || String(x.title || '').startsWith('F巡检')))) await post('/api/agent/quick-replies/' + q.id + '/delete', {});
 for (const [name, file] of Object.entries(names)) {
   const vf = HOME + '/cs-testenv/vids/' + file;
   if (existsSync(vf)) {

@@ -1,4 +1,4 @@
-### 当前版本：v0.8.0（已部署生产）· 2026-10-14（北京时间）
+### 当前版本：v0.8.1（待发布；生产运行 v0.8.0）· App 3.0.0 (6) Flutter 版 · 2026-10-15（北京时间）
 
 > 本文件是维护交接的「第一站」。看完这一份再去看 `_internal/CHANGELOG.md`，别凭印象答。
 
@@ -8,14 +8,14 @@
 > 排查 App/客服问题时看这里，别被下面的模板占位坐标误导。
 - **生产（App 实际连的就是这台）**：`发卡密国内服 49.233.156.149`（MCP 配置 [3]，2026-10-14 核对）。同机跑 custom_service 全栈（cs-backend 等，镜像 `crpi-…aliyuncs.com/baofusir/cs-*:<IMAGE_TAG>`，版本由 `/fakami/.env` 与 `/srv/cs-data/.env` 的 `IMAGE_TAG` 控制，编排在 `/fakami/docker-compose.yml`）**＋ 发卡密 fakami 业务栈**。后端真实日志：`/srv/cs-data/logs/backend/{business,raw_ws,security,audit}.log`。
 - **测试服（custom_service 当前已下线）**：`38.76.193.68`（MCP [5]，2026-10-14 核对）。2026-08-23 21:17 已恢复同机 `weixian-douxiaoyin`，其 7 个常驻服务全部 healthy；`custom_service` 容器数为 0，但 `cs_mysql_data`、`cs_redis_data`、证书卷和 `/srv/cs-data/` 均完整保留，可随时重新切回。公网 `https://maihaocs.icu/healthz` 返回 200。
-- **App(SwiftUI) 源码**：家中 Mac `/Users/chengmeiran/code/custom_service_swift`（独立 git 仓库，无远端；旧 `mobile_app` Flutter 版已归档）。构建机为 MCP 配置「Mac开发机-iOS构建」（192.168.3.6）。
-  - 当前版本 2.1 (5)（[113] 新增删除/回收站、快捷回复、备注标签、拉黑、导出、全局搜索、置顶未读、正在输入、撤回；[111] 完全重写，分层 App/Core/Domain/Features/Shared；组合根 `Sources/App/AppModel.swift`，唯一来源 `project.yml` 的 `MARKETING_VERSION`/`CURRENT_PROJECT_VERSION`），后端写死 `Sources/Core/Config/AppConfig.swift` 的 `productionBackendURL` = `https://k7m2x9p3.xn--5kroo.com`（k7m2x9p3.卖号.com）；会话与自动登录凭据存钥匙串（`SessionVault`），重装同一开发者账号的 App 免输密码。
-  - 测试：Mac 本机隔离测试环境 `~/cs-testenv`（只监听 127.0.0.1，凭证见其 `secrets/test.env`），脚本与说明在 App 仓库 `scripts/qa/`；模拟器构建可用 `CS_BACKEND_URL` 指向测试后端，真机构建编译期剔除。测试后端二进制用本仓库 `_internal/scripts/build-testenv-backend.ps1` 构建；新功能接口/数据复位/后台与访客端浏览器联调脚本在 `_internal/scripts/testenv/`。
-  - 签名：免费 Personal Team `4JZ8K387NU`（[108] 起，唯一来源 `project.yml` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前手机上是 2.1(5)（装机序号 3896，2026-10-14 22:01 安装，已回读确认），描述文件有效期至 `2026-10-21T02:25:04+08:00`。
-  - 自动续签：`auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点），日志 `auto_reinstall.log`；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
-  - 待办：iPhone 需信任新开发者证书并首次登录一次（之后免密）；轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
+- **App（Flutter，[115] 起）源码**：家中 Mac `/Users/chengmeiran/code/custom_service_flutter`（独立 git 仓库，无远端，初始快照 9180242）。构建机为 MCP 配置「Mac开发机-iOS构建」（192.168.3.6）。旧 SwiftUI 版目录已按爷爷要求删除，完整归档（含 git 历史，已校验可恢复）在 Mac `~/code/_archive/custom_service_swift-20261015-001756.tar.gz`。
+  - 当前版本 3.0.0 (6)（唯一来源 `pubspec.yaml` 的 `version`），功能与 Swift v2.1 一致、界面全新设计；分层 lib/core、domain、features、ui，组合根 `lib/app/app_model.dart`；后端写死 `lib/core/config.dart` 的 `productionBackendURL` = `https://k7m2x9p3.xn--5kroo.com`。包名 `com.chengmeiran.customservice` 与钥匙串条目不变（原生通道 `ios/Runner/AppDelegate.swift` 的 cs/keychain），从旧版升级免重新登录。
+  - 测试：Mac 本机隔离测试环境 `~/cs-testenv`（只监听 127.0.0.1，凭证见其 `secrets/test.env`）；App 单测 `flutter test test`，模拟器端到端 `scripts/run_e2e.sh <标签>`（测试后端地址仅模拟器生效）。测试后端二进制用本仓库 `_internal/scripts/build-testenv-backend.ps1` 构建；接口/数据复位/造数/列表耗时/浏览器联调脚本在 `_internal/scripts/testenv/`。CocoaPods 的 WebRTC 二进制需经 Mac 本机代理下载（见 App 仓库 README）。
+  - 签名：免费 Personal Team `4JZ8K387NU`（唯一来源 `ios/Runner.xcodeproj` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前手机上是 3.0.0 (6)（装机序号 3904，2026-10-15 00:14 安装，已回读确认），有效期至 `2026-10-21T02:25:04+08:00`。
+  - 自动续签：App 仓库 `scripts/auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点，已改指向 Flutter 脚本），日志 Mac `~/Library/Logs/custom_service_app/auto_reinstall.log`（旧版历史在同目录 `auto_reinstall-swift-history.log`）；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
+  - 待办：轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
 - **发布到生产/下游**：v0.8.0 已推送 GitHub（标签 v0.8.0）并于 2026-10-14 22:25 部署生产（只改 IMAGE_TAG、只更新 7 个 cs 容器，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.8.0-20261014-222223.sql.gz`，迁移 013 已执行）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代）。**爷爷本地 fakami 项目的 .env 需把 IMAGE_TAG 同步为 0.8.0，否则下次部署 fakami 会把客服退回旧版。**
-- **待发布**：无（v0.8.0 已上线）。
+- **待发布 v0.8.1（[115]）**：会话列表两阶段查询 + 迁移 014 覆盖索引（测试环境同规模列表 306ms→59ms）、已读权限与查看口径一致（修「他人接管过的会话未读清不掉」）；已在本地 `main` 提交并通过隔离环境全部验证，**未推送、未部署**，需爷爷同意后发布。App 3.0 的「未读清不掉」问题依赖它上线才彻底解决。
 
 ## 当前部署坐标
 > 部署到你自己服务器后，把下面占位换成你的实际值，方便后续 AI / 队友接手时一眼定位
@@ -66,6 +66,8 @@
 | 0.8.0 新功能接口契约 | `_internal/reports/api-0.8.0-features.md` | 全文 |
 | 回收站保留期 / 撤回时限 | `backend/internal/store/features_deletion.go` / `features_messages.go` | `RecycleRetention` / `RecallWindow` |
 | 自动清理执行时间与任务锁 | `backend/internal/service/features.go` | `autoCleanHour` / `StartMaintenance` |
+| 会话列表两阶段查询与排序口径 | `backend/internal/store/conversation_list.go` | 文件头注释 |
+| 会话已读权限（与查看口径一致） | `backend/internal/store/store.go` | `AgentCanReadConversation` |
 
 ## 部署坐标
 - 部署方式：把整个仓库目录 rsync/sftp 上传到服务器后，进入目录执行 **`docker compose up -d --build`**，一条命令完成。
@@ -90,9 +92,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[115] 2026-10-15（北京时间）App 用 Flutter 完全重写 v3.0.0(6) + 后端 0.8.1**：功能不变、界面全新；启动先显示本地快照、列表请求合并；后端列表提速约 5 倍、已读权限修复（待发布）；旧 Swift 目录已归档后删除。
 - **[114] 2026-10-14（北京时间）v0.8.0 上线生产**：只更新 7 个 cs 容器，迁移 013 自动执行，验收全部通过；fakami 业务未受影响。
 - **[113] 2026-10-14（北京时间）v0.7.5 上生产 + 0.8.0 新功能**：删除与回收站、快捷回复、备注标签、拉黑、导出、全局搜索、自动清理、置顶未读、正在输入、撤回，后端/后台/访客端/App 2.1(5) 全部接入并通过隔离环境全量测试。
-- **[112] 2026-10-14（北京时间）v0.7.5 发布准备**：部署前漏洞体检升级 Go 1.26.9、x/net 0.60.0、vue 补丁版；推送 GitHub 构建镜像。
 
 ## 维护交接阅读顺序
 1. 本文件（`_internal/LATEST.md`）

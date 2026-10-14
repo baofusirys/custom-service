@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -532,16 +533,42 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 40053, "msg": "标签不合法"})
 		return
 	}
+	// [115] 列表与总数互不依赖：总数在独立 goroutine 中并行查询（各用一个连接），接口耗时 ≈ max(列表, 计数)。
+	// goroutine 只使用请求 ctx 与局部变量，不触碰 gin.Context；自带 recover，避免计数异常拖垮进程。
+	ctx := c.Request.Context()
+	st := h.svc.Store()
 	var (
-		rows []map[string]any
-		err  error
+		rows     []map[string]any
+		err      error
+		total    int
+		countErr error
+		wg       sync.WaitGroup
 	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if p := recover(); p != nil {
+				countErr = fmt.Errorf("count panic: %v", p)
+			}
+		}()
+		if mode == "contacted" {
+			total, countErr = st.CountContactedVisitors(ctx, tag)
+		} else {
+			total, countErr = st.CountAllVisitors(ctx, tag)
+		}
+	}()
 	if mode == "contacted" {
-		rows, err = h.svc.Store().ListContactedConversations(c.Request.Context(), tag, limit, offset)
+		rows, err = st.ListContactedConversations(ctx, tag, limit, offset)
 	} else {
-		rows, err = h.svc.Store().ListAllVisitorConversations(c.Request.Context(), tag, limit, offset)
+		rows, err = st.ListAllVisitorConversations(ctx, tag, limit, offset)
 	}
+	wg.Wait()
 	if err != nil {
+		reqID, _ := c.Get("request_id")
+		h.svc.BizLog().Error("conversation_list_failed", zap.Error(err), zap.String("mode", mode),
+			zap.Int("limit", limit), zap.Int("offset", offset), zap.Bool("tag_filter", tag != ""),
+			zap.String("request_id", fmt.Sprintf("%v", reqID)))
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50006, "msg": "查询失败"})
 		return
 	}
@@ -556,11 +583,12 @@ func (h *HTTP) ListConversations(c *gin.Context) {
 		delete(row, "ip_cipher") // 不外泄密文
 	}
 	// [085] 附带总数：前端显示「已联系 (N)」/「全部 (N)」；滚动是否到底用「返回条数<limit」判断
-	var total int
-	if mode == "contacted" {
-		total, _ = h.svc.Store().CountContactedVisitors(c.Request.Context(), tag)
-	} else {
-		total, _ = h.svc.Store().CountAllVisitors(c.Request.Context(), tag)
+	if countErr != nil {
+		// 计数失败不影响列表本身（与旧行为一致返回 total=0），但必须留痕便于排障。
+		reqID, _ := c.Get("request_id")
+		h.svc.BizLog().Warn("conversation_count_failed", zap.Error(countErr), zap.String("mode", mode),
+			zap.String("request_id", fmt.Sprintf("%v", reqID)))
+		total = 0
 	}
 	c.JSON(http.StatusOK, gin.H{"code": 0, "data": rows, "total": total})
 }
@@ -645,8 +673,6 @@ func (h *HTTP) agentCanAccessVisitor(c *gin.Context, visitorID string) bool {
 	return err == nil && okay
 }
 
-// MarkRead 标记已读（HTTP 兜底；正常实时走 WSS type=read）。
-// 同步更新 last_read_agent_at + 清零 unread_agent。
 // [055] RelatedVisitors 查同 IP 30 天内出现的其他 vid（最多 10 个），按 last_seen 倒序。
 // 给客服端访客详情页「关联访客 (N)」面板用，参考"疑似同一人"，不强行合并 vid。
 // 路径参数 :vid 是当前访客 ID，用来从 visitors 表读出 ip_hash 再反查同 hash 的别人。
@@ -705,24 +731,43 @@ func (h *HTTP) RelatedVisitors(c *gin.Context) {
 	})
 }
 
+// MarkRead 标记已读（HTTP 兜底；正常实时走 WSS type=read）。同步推进 last_read_agent_at 并按游标重算 unread_agent。
+// [115] 权限 =「能查看该会话聊天记录」（store.AgentCanReadConversation）：管理员，或会话/该访客任一未删除会话
+// 分配给本人或未分配。解决「他人接管过、自己仍能看记录，但未读永远清不掉」的问题。
+// 发送消息、接管、上传、关闭等写操作的归属规则不变（AgentOwnsConversation）。
+// 会话不存在、已删除、ID 非法、无权查看一律 403（同一错误码，不区分存在性，防枚举），并写安全日志。
 func (h *HTTP) MarkRead(c *gin.Context) {
 	convID := c.Param("id")
-	agentIDValue, _ := c.Get("agent_id")
-	agentID := fmt.Sprintf("%v", agentIDValue)
-	allowed, err := h.svc.Store().AgentOwnsConversation(c.Request.Context(), convID, agentID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": 50009, "msg": "会话校验失败"})
-		return
+	a := currentAgent(c)
+	agentID := a.IDStr
+	allowed := false
+	if ValidConversationID(convID) {
+		ok, err := h.svc.Store().AgentCanReadConversation(c.Request.Context(), convID, a.ID, a.Admin)
+		if err != nil {
+			requestID, _ := c.Get("request_id")
+			h.svc.BizLog().Error("http_read_receipt_check_failed", zap.Error(err),
+				zap.String("agent", agentID), zap.String("conv", convID),
+				zap.String("request_id", fmt.Sprintf("%v", requestID)))
+			c.JSON(http.StatusInternalServerError, gin.H{"code": 50009, "msg": "会话校验失败"})
+			return
+		}
+		allowed = ok
 	}
 	if !allowed {
 		requestID, _ := c.Get("request_id")
 		h.svc.SecurityLog().Warn("http_read_receipt_forbidden",
-			zap.String("agent", agentID), zap.String("conv", convID),
+			zap.String("agent", agentID), zap.String("agent_username", a.Username), zap.Bool("admin", a.Admin),
+			zap.String("conv", logSafeParam(convID)), zap.Bool("conv_id_valid", ValidConversationID(convID)),
+			zap.String("ip", security.ClientIP(c)), zap.String("path", c.FullPath()),
 			zap.String("request_id", fmt.Sprintf("%v", requestID)))
 		c.JSON(http.StatusForbidden, gin.H{"code": 40302, "msg": "会话不存在或无权操作"})
 		return
 	}
 	if err := h.svc.Store().UpdateLastRead(c.Request.Context(), convID, "agent", time.Now()); err != nil {
+		requestID, _ := c.Get("request_id")
+		h.svc.BizLog().Error("http_read_receipt_update_failed", zap.Error(err),
+			zap.String("agent", agentID), zap.String("conv", convID),
+			zap.String("request_id", fmt.Sprintf("%v", requestID)))
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50009, "msg": "失败"})
 		return
 	}

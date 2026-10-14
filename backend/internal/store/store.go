@@ -367,123 +367,7 @@ func (s *Store) CloseConversation(ctx context.Context, convID string) error {
 	return err
 }
 
-// ListOpenConversations 给客服后台用：当前所有进行中的会话（含访客信息 + 最后一条消息预览）。
-// listVisitorAggregated [088] 会话列表统一实现：按「客户(访客)」聚合，每个访客取最新一条会话，
-// 跨 open/closed（人走了 / 会话关了也算）。onlyContacted=true 时只保留「主动操作过」(visitor_engaged)的客户。
-//
-//	「全部」  = 所有来过的访客(含只浏览没说话 / 已离线 / 已关闭)，一人一条。
-//	「已联系」= 访客主动发过文字/图片 或 打过语音电话(visitor_engaged=1)的客户，一人一条。
-//
-// 每行带 contacted 字段(该客户是否主动操作过)，供「全部」tab 标记。
-// [111] 每位访客优先取进行中(open)的会话：超时「关旧开新」时旧会话 updated_at 与新会话同一秒，
-// 只按 updated_at 排会随机取到已关闭的旧会话，客服打开后把消息发进已关闭会话、访客收不到。
-// filter 是代码内常量拼接(非用户输入)，limit/offset 全参数化 ? 占位，无注入风险。
-func (s *Store) listVisitorAggregated(ctx context.Context, onlyContacted bool, tag string, limit, offset int) ([]map[string]any, error) {
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	if offset < 0 {
-		offset = 0
-	}
-	// [113] 排除回收站中的会话与已拉黑客户；置顶客户在前；可按标签筛选。filter 为代码常量，值全部参数化。
-	filter := "WHERE c.deleted_at IS NULL"
-	if onlyContacted {
-		filter += " AND c.visitor_id IN (SELECT DISTINCT visitor_id FROM conversations WHERE visitor_engaged = 1 AND deleted_at IS NULL)"
-	}
-	args := []any{}
-	tagFilter := ""
-	if tag != "" {
-		tagFilter = " AND EXISTS (SELECT 1 FROM visitor_tags vt WHERE vt.visitor_id = t.visitor_id AND vt.tag = ?)"
-		args = append(args, tag)
-	}
-	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, `
-SELECT t.id, t.visitor_id, t.agent_id, t.unread_agent, t.status, t.started_at, t.updated_at,
-       v.identifier, v.country, v.city, v.last_page, v.referer, v.ip_cipher,
-       EXISTS(SELECT 1 FROM conversations c3 WHERE c3.visitor_id = t.visitor_id AND c3.visitor_engaged = 1 AND c3.deleted_at IS NULL) AS contacted,
-       COALESCE(p.note, ''), p.pinned_at IS NOT NULL, COALESCE(p.marked_unread, 0)
-FROM (
-  SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.status, c.started_at, c.updated_at,
-         ROW_NUMBER() OVER (PARTITION BY c.visitor_id ORDER BY (c.status = 'open') DESC, c.updated_at DESC, c.started_at DESC) AS rn
-  FROM conversations c
-  `+filter+`
-) t
-JOIN visitors v ON v.id = t.visitor_id
-LEFT JOIN visitor_profiles p ON p.visitor_id = t.visitor_id
-WHERE t.rn = 1 AND p.blocked_at IS NULL`+tagFilter+`
-ORDER BY (p.pinned_at IS NOT NULL) DESC, p.pinned_at DESC, t.updated_at DESC
-LIMIT ? OFFSET ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]map[string]any, 0, limit)
-	for rows.Next() {
-		var (
-			id, vid                                   string
-			aid                                       sql.NullInt64
-			unread                                    int
-			status                                    string
-			started, updated                          time.Time
-			ident, country, city, page, ref, ipCipher sql.NullString
-			contacted                                 bool
-			note                                      string
-			pinned, markedUnread                      bool
-		)
-		if err := rows.Scan(&id, &vid, &aid, &unread, &status, &started, &updated,
-			&ident, &country, &city, &page, &ref, &ipCipher, &contacted, &note, &pinned, &markedUnread); err != nil {
-			return nil, err
-		}
-		// [113] 手动标为未读：至少显示 1 条未读
-		if markedUnread && unread == 0 {
-			unread = 1
-		}
-		out = append(out, map[string]any{
-			"id":              id,
-			"visitor_id":      vid,
-			"agent_id":        nullInt(aid),
-			"unread":          unread,
-			"status":          status, // open/closed，前端可标记「已结束」
-			"started_at":      started,
-			"updated_at":      updated,
-			"identifier":      nullStr(ident),
-			"country":         nullStr(country),
-			"city":            nullStr(city),
-			"last_page":       nullStr(page),
-			"referer":         nullStr(ref),
-			"ip_cipher":       nullStr(ipCipher), // handler 层会解密成 ip 明文并删掉这个字段
-			"contacted":       contacted,         // [088] 该客户是否主动操作过(发消息/图片/语音电话)
-			"has_visitor_msg": contacted,         // 兼容前端旧字段名
-			"note":            note,              // [113] 客户备注
-			"tags":            []string{},        // [113] 下方批量填充
-			"pinned":          pinned,            // [113] 置顶
-			"marked_unread":   markedUnread,      // [113] 手动标为未读
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	vids := make([]string, 0, len(out))
-	for _, c := range out {
-		if cid, ok := c["id"].(string); ok {
-			if lm, err := s.getLastMessagePreview(ctx, cid); err == nil && lm != nil {
-				c["last_message"] = lm
-			}
-		}
-		if vid, ok := c["visitor_id"].(string); ok {
-			vids = append(vids, vid)
-		}
-	}
-	// [113] 一次查询批量补标签，避免逐行 N+1
-	if tags, err := s.TagsForVisitors(ctx, vids); err == nil {
-		for _, c := range out {
-			if t, ok := tags[c["visitor_id"].(string)]; ok {
-				c["tags"] = t
-			}
-		}
-	}
-	return out, nil
-}
+// listVisitorAggregated / countVisibleVisitors 见 conversation_list.go（[115] 两阶段查询）。
 
 // ListAllVisitorConversations [088]「全部」：所有来过的访客(一人一条最新会话，跨 open/closed)。
 func (s *Store) ListAllVisitorConversations(ctx context.Context, tag string, limit, offset int) ([]map[string]any, error) {
@@ -517,69 +401,9 @@ func (s *Store) CountContactedVisitors(ctx context.Context, tag string) (int, er
 	return s.countVisibleVisitors(ctx, true, tag)
 }
 
-// countVisibleVisitors [113] 与列表同口径计数：排除回收站、已拉黑客户，可按标签筛选。
-func (s *Store) countVisibleVisitors(ctx context.Context, onlyContacted bool, tag string) (int, error) {
-	q := `
-SELECT COUNT(DISTINCT c.visitor_id) FROM conversations c
-LEFT JOIN visitor_profiles p ON p.visitor_id = c.visitor_id
-WHERE c.deleted_at IS NULL AND p.blocked_at IS NULL`
-	args := []any{}
-	if onlyContacted {
-		q += " AND c.visitor_engaged = 1"
-	}
-	if tag != "" {
-		q += " AND EXISTS (SELECT 1 FROM visitor_tags vt WHERE vt.visitor_id = c.visitor_id AND vt.tag = ?)"
-		args = append(args, tag)
-	}
-	var n int
-	err := s.db.QueryRowContext(ctx, q, args...).Scan(&n)
-	return n, err
-}
-
 // CountAllVisitors [088]「全部」客户总数（所有来过的去重访客，跨 open/closed）。
 func (s *Store) CountAllVisitors(ctx context.Context, tag string) (int, error) {
 	return s.countVisibleVisitors(ctx, false, tag)
-}
-
-// getLastMessagePreview 返回会话最近一条消息的预览（用于列表展示）。
-// 图片/文件类型用占位文案，文本超长截断 50 字。
-func (s *Store) getLastMessagePreview(ctx context.Context, convID string) (map[string]any, error) {
-	var sender, content string
-	var mediaKind sql.NullString
-	var createdAt time.Time
-	var recalled bool
-	// [072] 侧边「最新消息预览」跳过 page_navigation（访客浏览动作），显示真正的最后一句对话。
-	err := s.db.QueryRowContext(ctx, `
-SELECT sender, content, media_kind, created_at, recalled_at IS NOT NULL
-FROM messages WHERE conv_id=? AND NOT (sender='sys' AND sender_ref LIKE 'page:%')
-ORDER BY created_at DESC LIMIT 1`, convID).Scan(
-		&sender, &content, &mediaKind, &createdAt, &recalled)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	preview := content
-	if recalled {
-		preview = "[已撤回]"
-	} else if preview == "" && mediaKind.Valid {
-		switch mediaKind.String {
-		case "image":
-			preview = "[图片]"
-		default:
-			preview = "[文件]"
-		}
-	}
-	rs := []rune(preview)
-	if len(rs) > 50 {
-		preview = string(rs[:50]) + "…"
-	}
-	return map[string]any{
-		"sender":     sender,
-		"content":    preview,
-		"created_at": createdAt,
-	}, nil
 }
 
 // ============ Message ============
@@ -620,6 +444,47 @@ func (s *Store) AgentCanAccessVisitor(ctx context.Context, visitorID, agentID st
 	var n int
 	err := s.db.QueryRowContext(ctx,
 		`SELECT 1 FROM conversations WHERE visitor_id=? AND deleted_at IS NULL AND (agent_id=CAST(? AS UNSIGNED) OR agent_id IS NULL) LIMIT 1`, visitorID, agentID).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// AgentCanReadConversation [115] 标记已读权限 =「能查看该会话聊天记录」：
+// 会话存在且未删除，且（管理员 或 会话 agent_id=本人/未分配 或 该访客存在 agent_id=本人/未分配 的未删除会话）。
+// 后半段与 AgentCanAccessVisitor（GET /agent/visitor/:vid/messages）同口径：客服能看到的记录就能清零未读。
+// 只用于已读；发送消息、接管、上传、关闭等写操作仍走 AgentOwnsConversation，归属规则不变。
+// 全参数化；agentID<=0 的非管理员直接拒绝（不发查询）。
+func (s *Store) AgentCanReadConversation(ctx context.Context, convID string, agentID int64, isAdmin bool) (bool, error) {
+	if convID == "" {
+		return false, nil
+	}
+	var (
+		query string
+		args  []any
+	)
+	if isAdmin {
+		query = `SELECT 1 FROM conversations WHERE id=? AND deleted_at IS NULL LIMIT 1`
+		args = []any{convID}
+	} else {
+		if agentID <= 0 {
+			return false, nil
+		}
+		query = `
+SELECT 1 FROM conversations c
+WHERE c.id = ? AND c.deleted_at IS NULL
+  AND (c.agent_id = ? OR c.agent_id IS NULL
+       OR EXISTS (SELECT 1 FROM conversations o
+                  WHERE o.visitor_id = c.visitor_id AND o.deleted_at IS NULL
+                    AND (o.agent_id = ? OR o.agent_id IS NULL)))
+LIMIT 1`
+		args = []any{convID, agentID, agentID}
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

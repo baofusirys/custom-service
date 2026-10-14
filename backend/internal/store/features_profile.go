@@ -156,13 +156,18 @@ ON DUPLICATE KEY UPDATE note=VALUES(note), updated_by=VALUES(updated_by), update
 
 // TagsForVisitors 批量读取标签（按添加顺序）。
 func (s *Store) TagsForVisitors(ctx context.Context, visitorIDs []string) (map[string][]string, error) {
+	return tagsForVisitors(ctx, s.db, visitorIDs)
+}
+
+// tagsForVisitors 批量读取标签（一条 SQL）；q 可以是 *sql.DB 或只读快照事务 *sql.Tx。
+func tagsForVisitors(ctx context.Context, q queryer, visitorIDs []string) (map[string][]string, error) {
 	out := map[string][]string{}
 	ids := uniqueNonEmpty(visitorIDs)
 	if len(ids) == 0 {
 		return out, nil
 	}
 	ph, args := inPlaceholders(ids)
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT visitor_id, tag FROM visitor_tags WHERE visitor_id IN (`+ph+`) ORDER BY created_at, tag`, args...)
 	if err != nil {
 		return nil, err

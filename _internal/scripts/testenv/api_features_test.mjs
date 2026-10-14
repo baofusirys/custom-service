@@ -307,6 +307,9 @@ check('彻底删除后数据库无残留', sql("SELECT COUNT(*) FROM conversatio
 check('彻底删除同时删除上传文件', v2File !== '' && !existsSync(UPLOADS + v2File), v2File);
 
 // 删除全部 + 一次性全部恢复（不破坏后续 UI 测试数据）
+// [115] 只恢复本次「删除全部」移入回收站的客户：删除前就整段在回收站里的客户（如批量造数的回收站数据）保持原状，
+//   按 SQL 直接取 ID 分批恢复（不依赖回收站分页顺序，万级客户也不会漏恢复）。
+const preBin = new Set(sql("SELECT DISTINCT visitor_id FROM conversations WHERE deleted_at IS NOT NULL AND visitor_id NOT IN (SELECT visitor_id FROM conversations WHERE deleted_at IS NULL)").split('\n').filter(Boolean));
 r = await api('POST', '/api/admin/visitors/delete-all', { token: admin.token, body: { confirm: '删除' } });
 check('拒绝：删除全部确认文字错误', r.status === 400 && r.code === 40052, r);
 r = await api('POST', '/api/admin/visitors/delete-all', { token: B.token, body: { confirm: '删除全部' } });
@@ -318,11 +321,15 @@ r = await listAll(admin.token);
 check('删除全部后列表为空', r.code === 0 && r.total === 0 && r.data.length === 0, r.total);
 check('删除全部广播 all', !!(await waitFor(admin.events, (e) => e.type === 'conversations_deleted' && e.extra && e.extra.all === true)));
 let restored = 0;
-for (let i = 0; i < 20; i++) {
-  const bin = await api('GET', '/api/admin/recycle-bin?limit=200', { token: admin.token });
-  const ids = (bin.data || []).map((x) => x.visitor_id);
-  if (!ids.length) break;
-  const rr = await api('POST', '/api/admin/recycle-bin/restore', { token: admin.token, body: { visitor_ids: ids } });
+const toRestore = sql('SELECT DISTINCT visitor_id FROM conversations WHERE deleted_at IS NOT NULL').split('\n').filter((id) => id && !preBin.has(id));
+for (let i = 0; i < toRestore.length; i += 200) {
+  let rr;
+  // 恢复接口按「账号+IP」限流 30 次/分钟（安全机制，不绕过）：遇 429 等窗口过去后重试同一批，最多 3 次
+  for (let attempt = 0; attempt < 4; attempt++) {
+    rr = await api('POST', '/api/admin/recycle-bin/restore', { token: admin.token, body: { visitor_ids: toRestore.slice(i, i + 200) } });
+    if (rr.status !== 429) break;
+    await sleep(61000);
+  }
   restored += rr.data ? rr.data.visitors : 0;
 }
 r = await listAll(admin.token);
@@ -337,10 +344,64 @@ r = await api('GET', '/api/admin/settings', { token: admin.token });
 check('读取自动清理天数', r.code === 0 && JSON.stringify(r).includes('"auto_clean_days":"30"'), null);
 await api('POST', '/api/admin/settings', { token: admin.token, body: { auto_clean_days: '0' } });
 
-// ===== 11. 清理测试数据 =====
-await api('POST', '/api/agent/visitors/delete', { token: admin.token, body: { visitor_ids: [V1.vid, V3.vid, V4.vid] } });
-await api('POST', '/api/admin/recycle-bin/purge', { token: admin.token, body: { visitor_ids: [V1.vid, V3.vid, V4.vid] } });
+// ===== 11. [115] 已读权限：能查看聊天记录即可标记已读；写操作归属不变 =====
+const SECLOG = HOME + '/cs-testenv/app/logs/security.log';
+const secCount = () => { try { return (readFileSync(SECLOG, 'utf8').match(/http_read_receipt_forbidden/g) || []).length; } catch { return -1; } };
+const V5 = await visitor('已读权限甲' + run);
+await V5.say('甲：他人接管但我能查看');
+await sleep(300);
+// 构造生产场景：访客另有一段未分配的历史会话（B 可查看该访客记录），当前会话已被管理员接管（agent_id=管理员）
+sql("INSERT INTO conversations(id, site_id, visitor_id, agent_id, status, unread_visitor, unread_agent, started_at, updated_at, closed_at) VALUES('" + randomUUID() + "', 'default', '" + V5.vid + "', NULL, 'closed', 0, 0, NOW() - INTERVAL 2 DAY, NOW() - INTERVAL 2 DAY, NOW() - INTERVAL 2 DAY)");
+sql("UPDATE conversations SET agent_id=" + Number(admin.id) + ", unread_agent=3 WHERE id='" + V5.conv + "'");
+r = await api('GET', '/api/agent/visitor/' + V5.vid + '/messages', { token: B.token });
+check('前提：普通客服能查看该访客聊天记录', r.status === 200 && r.code === 0, r);
+r = await api('POST', '/api/agent/conversations/' + V5.conv + '/assign', { token: B.token });
+check('写操作不变：普通客服仍不能接管他人会话', r.status === 403 && r.code === 40302, r);
+const bMark = B.events.length;
+const bSend = await agentSay(B, V5.conv, '越权发送 ' + run);
+check('写操作不变：普通客服不能向他人会话发消息', !bSend && !!(await waitFor(B.events, (e) => B.events.indexOf(e) >= bMark && e.type === 'error', 3000)), bSend);
+r = await api('POST', '/api/agent/conversations/' + V5.conv + '/read', { token: B.token });
+check('普通客服对「他人接管但自己可查看」的会话标记已读成功', r.status === 200 && r.code === 0, r);
+check('标记已读后未读清零、读游标已写入', sql("SELECT CONCAT(unread_agent, '|', last_read_agent_at IS NOT NULL, '|', agent_id) FROM conversations WHERE id='" + V5.conv + "'") === '0|1|' + admin.id, null);
+r = await api('GET', '/api/agent/conversations?mode=all&limit=50', { token: B.token });
+row = (r.data || []).find((c) => c.visitor_id === V5.vid);
+check('列表中该客户未读为 0（重启/重新拉取后不再回来）', row && row.unread === 0 && row.id === V5.conv, row);
+
+const V6 = await visitor('已读权限乙' + run);
+await V6.say('乙：完全无权');
+await sleep(300);
+sql("UPDATE conversations SET agent_id=" + Number(admin.id) + ", unread_agent=2 WHERE visitor_id='" + V6.vid + "'");
+const sec0 = secCount();
+r = await api('POST', '/api/agent/conversations/' + V6.conv + '/read', { token: B.token });
+check('拒绝：普通客服对完全无权的会话标记已读', r.status === 403 && r.code === 40302, r);
+check('拒绝后未读保持不变', sql("SELECT unread_agent FROM conversations WHERE id='" + V6.conv + "'") === '2', null);
+r = await api('GET', '/api/agent/visitor/' + V6.vid + '/messages', { token: B.token });
+check('口径一致：同一客服也查看不到该访客记录', r.status === 403, r);
+r = await api('POST', '/api/agent/conversations/' + V6.conv + '/read', { token: admin.token });
+check('管理员可标记任意未删除会话已读', r.code === 0 && sql("SELECT unread_agent FROM conversations WHERE id='" + V6.conv + "'") === '0', r);
+
+const V7 = await visitor('已读权限丙' + run);
+await V7.say('丙：会话将被删除');
+await sleep(300);
+r = await api('POST', '/api/agent/visitors/delete', { token: admin.token, body: { visitor_ids: [V7.vid] } });
+r = await api('POST', '/api/agent/conversations/' + V7.conv + '/read', { token: B.token });
+check('拒绝：普通客服标记已删除（回收站）会话', r.status === 403 && r.code === 40302, r);
+r = await api('POST', '/api/agent/conversations/' + V7.conv + '/read', { token: admin.token });
+check('拒绝：管理员也不能标记回收站会话', r.status === 403 && r.code === 40302, r);
+r = await api('POST', '/api/agent/conversations/' + randomUUID() + '/read', { token: B.token });
+check('拒绝：不存在的会话', r.status === 403 && r.code === 40302, r);
+r = await api('POST', '/api/agent/conversations/' + encodeURIComponent("x' OR '1'='1") + '/read', { token: B.token });
+check('拒绝：注入字符会话 ID（403 而非 500）', r.status === 403 && r.code === 40302, r);
+r = await api('POST', '/api/agent/conversations/' + V5.conv + '/read');
+check('拒绝：未登录标记已读', r.status === 401, r);
+await sleep(500);
+const sec1 = secCount();
+check('越权标记已读写入安全日志（≥5 条）', sec0 >= 0 && sec1 - sec0 >= 5, { sec0, sec1 });
+
+// ===== 12. 清理测试数据 =====
+await api('POST', '/api/agent/visitors/delete', { token: admin.token, body: { visitor_ids: [V1.vid, V3.vid, V4.vid, V5.vid, V6.vid] } });
+await api('POST', '/api/admin/recycle-bin/purge', { token: admin.token, body: { visitor_ids: [V1.vid, V3.vid, V4.vid, V5.vid, V6.vid, V7.vid] } });
 await api('POST', '/api/admin/agents/active', { token: admin.token, body: { id: Number(B.id), active: false } });
-for (const x of [V1, V2, V3, V4, admin, B]) { try { x.ws.close(1000); } catch {} }
+for (const x of [V1, V2, V3, V4, V5, V6, V7, admin, B]) { try { x.ws.close(1000); } catch {} }
 console.log('SUMMARY passed=' + passed + ' failed=' + failed);
 process.exit(failed ? 1 : 0);

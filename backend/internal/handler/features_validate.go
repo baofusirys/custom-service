@@ -37,6 +37,17 @@ const (
 // ValidVisitorID 访客 ID：UUID 等字母数字与中划线，最长 64。
 func ValidVisitorID(id string) bool { return visitorIDPattern.MatchString(id) }
 
+// ValidConversationID [115] 会话 ID：服务端生成的 UUID，格式规则与访客 ID 相同（字母数字与中划线，最长 64）。
+func ValidConversationID(id string) bool { return visitorIDPattern.MatchString(id) }
+
+// logSafeParam [115] 写安全日志用：路径参数为不可信输入，只保留前 64 字节，防超长参数放大日志。
+func logSafeParam(s string) string {
+	if len(s) <= 64 {
+		return s
+	}
+	return s[:64] + "…(truncated)"
+}
+
 // ParseIDList 去重、去空白、逐个校验格式；数量 1..max。
 func ParseIDList(ids []string, max int) ([]string, error) {
 	seen := make(map[string]struct{}, len(ids))
