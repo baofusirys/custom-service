@@ -361,6 +361,8 @@ func (s *Store) CloseConversation(ctx context.Context, convID string) error {
 //	「已联系」= 访客主动发过文字/图片 或 打过语音电话(visitor_engaged=1)的客户，一人一条。
 //
 // 每行带 contacted 字段(该客户是否主动操作过)，供「全部」tab 标记。
+// [111] 每位访客优先取进行中(open)的会话：超时「关旧开新」时旧会话 updated_at 与新会话同一秒，
+// 只按 updated_at 排会随机取到已关闭的旧会话，客服打开后把消息发进已关闭会话、访客收不到。
 // filter 是代码内常量拼接(非用户输入)，limit/offset 全参数化 ? 占位，无注入风险。
 func (s *Store) listVisitorAggregated(ctx context.Context, onlyContacted bool, limit, offset int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 200 {
@@ -379,7 +381,7 @@ SELECT t.id, t.visitor_id, t.agent_id, t.unread_agent, t.status, t.started_at, t
        EXISTS(SELECT 1 FROM conversations c3 WHERE c3.visitor_id = t.visitor_id AND c3.visitor_engaged = 1) AS contacted
 FROM (
   SELECT c.id, c.visitor_id, c.agent_id, c.unread_agent, c.status, c.started_at, c.updated_at,
-         ROW_NUMBER() OVER (PARTITION BY c.visitor_id ORDER BY c.updated_at DESC) AS rn
+         ROW_NUMBER() OVER (PARTITION BY c.visitor_id ORDER BY (c.status = 'open') DESC, c.updated_at DESC, c.started_at DESC) AS rn
   FROM conversations c
   `+filter+`
 ) t
