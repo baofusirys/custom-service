@@ -78,6 +78,9 @@ func RegisterRoutes(r *gin.Engine, h *HTTP, st *store.Store) {
 			ag.POST("/hall/moderate", h.HallAgentModerate)
 			ag.GET("/hall/messages", h.HallAgentMessages)
 			ag.POST("/hall/messages/:id/delete", h.HallAgentDeleteMessage)
+			// [123] 大厅开关：所有客服账号可切换
+			ag.GET("/hall/switches", h.HallSwitchesGet)
+			ag.POST("/hall/switches", h.HallSwitchesUpdate)
 		}
 
 		// 管理（仅 admin）

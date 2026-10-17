@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   HALL_SETTING_DEFAULTS,
+  HALL_SWITCH_SETTING_KEYS,
+  buildHallSettingsSavePayload,
   estimateHallBandwidth,
   normalizeHallSettingsEvent,
   parseHallSettings,
@@ -12,32 +14,47 @@ import {
 test('缺省设置回落到契约默认值', () => {
   assert.deepEqual(parseHallSettings({}), HALL_SETTING_DEFAULTS)
   assert.deepEqual(parseHallSettings(null), HALL_SETTING_DEFAULTS)
-  assert.deepEqual(HALL_SETTING_DEFAULTS, { hall_enabled: true, hall_video_enabled: false, hall_max_speakers: 6, hall_max_cameras: 2, hall_max_participants: 100 })
+  assert.deepEqual(HALL_SETTING_DEFAULTS, { hall_enabled: true, hall_chat_enabled: true, hall_voice_enabled: true, hall_video_enabled: false, hall_max_speakers: 6, hall_max_cameras: 2, hall_max_participants: 100 })
 })
 
 test('解析字符串设置：布尔、整数、越界夹紧、非法回落', () => {
   assert.deepEqual(parseHallSettings({
     hall_enabled: 'false', hall_video_enabled: 'true', hall_max_speakers: '25', hall_max_cameras: '-1', hall_max_participants: 'abc',
-  }), { hall_enabled: false, hall_video_enabled: true, hall_max_speakers: 20, hall_max_cameras: 0, hall_max_participants: 100 })
+  }), { hall_enabled: false, hall_chat_enabled: true, hall_voice_enabled: true, hall_video_enabled: true, hall_max_speakers: 20, hall_max_cameras: 0, hall_max_participants: 100 })
+  assert.equal(parseHallSettings({ hall_chat_enabled: 'false' }).hall_chat_enabled, false)
+  assert.equal(parseHallSettings({ hall_voice_enabled: 'false' }).hall_voice_enabled, false)
   assert.equal(parseHallSettings({ hall_max_speakers: '3.5' }).hall_max_speakers, 6)
   assert.equal(parseHallSettings({ hall_max_participants: ' 250 ' }).hall_max_participants, 250)
   assert.equal(parseHallSettings({ hall_enabled: 'yes' }).hall_enabled, true)
 })
 
 test('保存校验：严格范围，输出与现有设置接口一致的字符串', () => {
-  const ok = validateHallSettings({ hall_enabled: true, hall_video_enabled: false, hall_max_speakers: 1, hall_max_cameras: 0, hall_max_participants: 500 })
-  assert.deepEqual(ok, { ok: true, payload: { hall_enabled: 'true', hall_video_enabled: 'false', hall_max_speakers: '1', hall_max_cameras: '0', hall_max_participants: '500' } })
-  const base = { hall_enabled: true, hall_video_enabled: true, hall_max_speakers: 6, hall_max_cameras: 2, hall_max_participants: 100 }
+  const ok = validateHallSettings({ hall_enabled: true, hall_chat_enabled: false, hall_voice_enabled: true, hall_video_enabled: false, hall_max_speakers: 1, hall_max_cameras: 0, hall_max_participants: 500 })
+  assert.deepEqual(ok, { ok: true, payload: { hall_enabled: 'true', hall_chat_enabled: 'false', hall_voice_enabled: 'true', hall_video_enabled: 'false', hall_max_speakers: '1', hall_max_cameras: '0', hall_max_participants: '500' } })
+  const base = { hall_enabled: true, hall_chat_enabled: true, hall_voice_enabled: true, hall_video_enabled: true, hall_max_speakers: 6, hall_max_cameras: 2, hall_max_participants: 100 }
   for (const bad of [
     { hall_max_speakers: 0 }, { hall_max_speakers: 21 }, { hall_max_cameras: 7 }, { hall_max_cameras: -1 },
     { hall_max_participants: 9 }, { hall_max_participants: 501 }, { hall_max_participants: 50.5 }, { hall_max_speakers: null },
-    { hall_max_speakers: '6' }, { hall_enabled: 'true' },
+    { hall_max_speakers: '6' }, { hall_enabled: 'true' }, { hall_chat_enabled: 'false' }, { hall_voice_enabled: undefined },
   ]) {
     const r = validateHallSettings({ ...base, ...bad })
     assert.equal(r.ok, false, JSON.stringify(bad))
     assert.match(r.error, /[\u4e00-\u9fa5]/)
   }
   assert.equal(validateHallSettings(null).ok, false)
+})
+
+test('[123] 设置页保存只提交管理员改动过的开关，其它设置照常提交', () => {
+  assert.deepEqual(HALL_SWITCH_SETTING_KEYS, ['hall_enabled', 'hall_chat_enabled', 'hall_voice_enabled', 'hall_video_enabled'])
+  const loaded = { hall_enabled: true, hall_chat_enabled: true, hall_voice_enabled: true, hall_video_enabled: false, hall_max_speakers: 6, hall_max_cameras: 2, hall_max_participants: 100 }
+  const same = buildHallSettingsSavePayload({ ...loaded, hall_max_speakers: 8 }, loaded)
+  assert.deepEqual(same, { ok: true, payload: { hall_max_speakers: '8', hall_max_cameras: '2', hall_max_participants: '100' } })
+  const changed = buildHallSettingsSavePayload({ ...loaded, hall_voice_enabled: false }, loaded)
+  assert.deepEqual(changed.payload, { hall_voice_enabled: 'false', hall_max_speakers: '6', hall_max_cameras: '2', hall_max_participants: '100' })
+  // 没有载入快照时与原行为一致：全部提交
+  assert.equal(Object.keys(buildHallSettingsSavePayload(loaded, null).payload).length, 7)
+  // 校验失败原样返回
+  assert.equal(buildHallSettingsSavePayload({ ...loaded, hall_max_cameras: 9 }, loaded).ok, false)
 })
 
 test('WS hall_settings 与 state.settings 两种字段名都能识别', () => {

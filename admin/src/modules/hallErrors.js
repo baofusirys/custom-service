@@ -1,5 +1,5 @@
 // 多人大厅错误码 / 媒体设备错误 / 断线原因 → 中文提示的唯一映射来源（纯函数，可在 node 测试中直接运行）。
-// 契约：_internal/reports/hall-contract.md 第 8 节与第 9.4 节。视图层只调用本模块，不在组件里散落提示文案。
+// 契约：_internal/reports/hall-contract.md 第 8 节、第 9.4 节与第 10.5 节。视图层只调用本模块，不在组件里散落提示文案。
 
 export const HALL_ERROR_CODES = Object.freeze({
   INVALID_TARGET: 40376,
@@ -17,6 +17,9 @@ export const HALL_ERROR_CODES = Object.freeze({
   FILTER_INVALID: 40062,
   ALERT_MAIL_INVALID: 40063,
   ALERT_MAIL_SEND_FAILED: 50271,
+  // 契约第 10.5 节（客服可控的大厅开关）
+  VOICE_DISABLED: 40377,
+  CHAT_DISABLED: 40378,
 })
 
 const CODE_MESSAGES = new Map([
@@ -40,6 +43,9 @@ const CODE_MESSAGES = new Map([
   [40062, '敏感词设置不合法，请检查后重新保存'],
   [40063, '邮件设置不合法，请检查后重新保存'],
   [50271, '测试邮件发送失败，请检查邮件设置后重试'],
+  // 契约第 10.5 节（客服可控的大厅开关）
+  [40377, '大厅语音已暂停，暂时无法开麦'],
+  [40378, '大厅文字聊天已暂停，暂时无法发送消息、图片或文件'],
   // 复用的现有通用错误码
   [40101, '未登录或登录已失效，请重新登录'],
   [40102, '登录已过期，请重新登录'],

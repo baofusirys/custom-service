@@ -3,6 +3,7 @@
 import { normalizeHallMessageList, HALL_PAGE_SIZE } from './hallMessages.js'
 import { isValidHallIdentity } from './hallParticipants.js'
 import { normalizeHallSettingsEvent } from './hallSettings.js'
+import { parseSwitchBool } from './hallSwitches.js'
 
 const JWT = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/
 const ICE_URL = /^(stun|turn|turns):[^\s]{1,200}$/
@@ -70,6 +71,9 @@ export function normalizeJoinResponse(data, { pageProtocol = 'https:' } = {}) {
       identity: data.identity,
       name: typeof data.name === 'string' ? data.name.slice(0, 64) : '',
       videoEnabled: data.video_enabled === true || data.video_enabled === 'true',
+      // [123] 契约 10.3：入场返回增加文字聊天 / 语音开关；缺失或非法时为 undefined（不改动页面已有状态）
+      chatEnabled: parseSwitchBool(data.chat_enabled),
+      voiceEnabled: parseSwitchBool(data.voice_enabled),
       maxSpeakers: intIn(data.max_speakers, 1, 20, 6),
       maxCameras: intIn(data.max_cameras, 0, 6, 2),
       iceServers: normalizeIceServers(data.ice_servers),

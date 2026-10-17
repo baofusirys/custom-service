@@ -9,6 +9,7 @@
  *   - join 返回值校验（LiveKit 地址协议、ICE 服务器白名单）
  *   - 上传前置校验（与后端 security.ValidateUpload 白名单一致）
  *   - 参与者排序、视频订阅挑选、发送频率滑动窗口
+ *   - [123] 客服可控的大厅开关（总开关 / 文字聊天 / 语音 / 视频）：设置合并、开关 → 界面状态映射、变化提示
  *
  * 浏览器中挂到 window.CSHallCore；Node 中通过 module.exports 导出。
  */
@@ -265,7 +266,9 @@
         return '您已被移出大厅' + (m ? '，约 ' + m + ' 分钟后可重新进入' : '');
       }
       case 40374: return action === 'camera' ? '当前无法开启摄像头' : (action === 'chat' ? '当前无法在大厅发言' : '当前无法开麦');
-      case 40375: return '管理员未开启视频，暂时不能开摄像头';
+      case 40375: return '大厅暂未开启视频，暂时不能开摄像头';
+      case 40377: return '大厅语音已关闭';
+      case 40378: return '大厅聊天已关闭';
       case 40973: {
         var used = toInt(data.used, -1), max = toInt(data.max, -1);
         return '开麦人数已满' + (used >= 0 && max > 0 ? '（' + used + '/' + max + '）' : '') + '，请稍后再试';
@@ -314,14 +317,95 @@
   }
 
   // ====== 设置规范化（hall_settings.extra / 访客公开设置 / join 返回值） ======
+  // [123] 契约第 10 节四个开关：enabled（总开关）、chatEnabled（文字/图片/文件）、voiceEnabled（语音）、videoEnabled（摄像头）。
+  // 键名兼容三种来源：hall_settings.extra 与入场返回用 enabled / chat_enabled / voice_enabled / video_enabled，
+  // /api/visitor/settings 用 hall_enabled / hall_chat_enabled / hall_voice_enabled / hall_video_enabled。
+  // 缺省或取值不合法时沿用 prev（旧后端没有新开关字段时保持默认开启）。
+  // 总开关关闭时服务端下发的文字/语音开关可能是派生出的 false（契约 10.3），而真实值保留不变（契约 10.1）：
+  // 此时不覆盖已知的文字/语音开关，总开关重新打开时以广播或入场返回的真实值为准。
+  function boolOr(v, d) { return typeof v === 'boolean' ? v : d; }
+  function pickKey(raw, a, b) { return raw[a] !== undefined ? raw[a] : raw[b]; }
   function normalizeSettings(raw, prev) {
-    prev = prev || { enabled: true, videoEnabled: false, maxSpeakers: 6, maxCameras: 2 };
+    var p = prev && typeof prev === 'object' ? prev : {};
+    var base = {
+      enabled: boolOr(p.enabled, true),
+      videoEnabled: boolOr(p.videoEnabled, false),
+      chatEnabled: boolOr(p.chatEnabled, true),
+      voiceEnabled: boolOr(p.voiceEnabled, true),
+      maxSpeakers: toInt(p.maxSpeakers, 6),
+      maxCameras: toInt(p.maxCameras, 2)
+    };
     raw = raw && typeof raw === 'object' ? raw : {};
-    var enabled = toBool(raw.enabled !== undefined ? raw.enabled : raw.hall_enabled, prev.enabled);
-    var video = toBool(raw.video_enabled !== undefined ? raw.video_enabled : raw.hall_video_enabled, prev.videoEnabled);
-    var sp = toInt(raw.max_speakers !== undefined ? raw.max_speakers : raw.hall_max_speakers, prev.maxSpeakers);
-    var cam = toInt(raw.max_cameras !== undefined ? raw.max_cameras : raw.hall_max_cameras, prev.maxCameras);
-    return { enabled: enabled, videoEnabled: video, maxSpeakers: clamp(sp, 1, 20), maxCameras: clamp(cam, 0, 6) };
+    var enabled = toBool(pickKey(raw, 'enabled', 'hall_enabled'), base.enabled);
+    var video = toBool(pickKey(raw, 'video_enabled', 'hall_video_enabled'), base.videoEnabled);
+    var chat = base.chatEnabled, voice = base.voiceEnabled;
+    if (enabled) {
+      chat = toBool(pickKey(raw, 'chat_enabled', 'hall_chat_enabled'), base.chatEnabled);
+      voice = toBool(pickKey(raw, 'voice_enabled', 'hall_voice_enabled'), base.voiceEnabled);
+    }
+    var sp = toInt(pickKey(raw, 'max_speakers', 'hall_max_speakers'), base.maxSpeakers);
+    var cam = toInt(pickKey(raw, 'max_cameras', 'hall_max_cameras'), base.maxCameras);
+    return { enabled: enabled, videoEnabled: video, chatEnabled: chat, voiceEnabled: voice, maxSpeakers: clamp(sp, 1, 20), maxCameras: clamp(cam, 0, 6) };
+  }
+
+  // ====== [123] 客服可控的大厅开关 → 访客窗口界面 ======
+  var CHAT_PAUSED_TEXT = '大厅文字聊天已暂停';
+  var VOICE_PAUSED_TEXT = '大厅语音已暂停';
+  // 开关状态 → 界面（纯映射，hall.js 只负责写入 DOM）：
+  //   tabs：是否显示「大厅」页签；chatInput：输入框、附件与发送按钮；micButton / camButton：开麦 / 摄像头按钮；
+  //   chatPaused / voicePaused：暂停提示文案（空串表示不显示）。视频与文字、语音开关相互独立。
+  function switchView(s) {
+    s = s && typeof s === 'object' ? s : {};
+    var hall = s.enabled !== false;
+    var chat = hall && s.chatEnabled !== false;
+    var voice = hall && s.voiceEnabled !== false;
+    return {
+      tabs: hall,
+      chatInput: chat,
+      chatPaused: hall && !chat ? CHAT_PAUSED_TEXT : '',
+      micButton: voice,
+      voicePaused: hall && !voice ? VOICE_PAUSED_TEXT : '',
+      camButton: hall && s.videoEnabled === true
+    };
+  }
+  // 前后两次设置之间各开关的变化：'on' | 'off' | ''（未变化）
+  function switchChanges(prev, next) {
+    prev = prev && typeof prev === 'object' ? prev : {};
+    next = next && typeof next === 'object' ? next : {};
+    function d(k) { var a = prev[k] === true, b = next[k] === true; return a === b ? '' : (b ? 'on' : 'off'); }
+    return { hall: d('enabled'), chat: d('chatEnabled'), voice: d('voiceEnabled'), video: d('videoEnabled') };
+  }
+  // 客服切换开关后（WS 广播）给访客的一次性提示；总开关的变化由页签收起 / 恢复体现，不另外提示。
+  // ctx.micStopped / ctx.camStopped：本次切换是否关掉了访客正在发布的麦克风 / 摄像头
+  function switchToastText(ch, ctx) {
+    if (!ch || typeof ch !== 'object' || ch.hall) return '';
+    ctx = ctx || {};
+    var parts = [];
+    if (ch.chat === 'off') parts.push('客服已暂停大厅文字聊天');
+    else if (ch.chat === 'on') parts.push('大厅文字聊天已恢复');
+    if (ch.voice === 'off') parts.push('客服已暂停大厅语音' + (ctx.micStopped ? '，您的麦克风已关闭' : ''));
+    else if (ch.voice === 'on') parts.push('大厅语音已恢复，您可以开麦');
+    if (ch.video === 'off') parts.push('客服已关闭大厅视频' + (ctx.camStopped ? '，您的摄像头已关闭' : ''));
+    else if (ch.video === 'on') parts.push('客服已开启大厅视频，您可以打开摄像头');
+    return parts.join('；');
+  }
+  // 服务端以 error「大厅聊天已关闭」拒绝 hall_chat（契约 10.1）：据此把界面切到文字聊天暂停状态
+  function isChatClosedError(content) { return str(content).indexOf('大厅聊天已关闭') >= 0; }
+  // 总开关重新打开后停留在哪个页签：只有关闭前正停留在大厅页、且关闭期间没有私聊往来时才切回大厅；
+  // 关闭前就在私聊页、页面加载时大厅已关闭、或关闭期间收发过私聊消息时都留在私聊页，不强制切走
+  function tabAfterReopen(closedFrom, privateActivity) { return closedFrom === 'hall' && !privateActivity ? 'hall' : 'private'; }
+  // 总开关重新打开时所有在线访客同时收到广播：入厅前随机错开 0.3–3 秒，避免同一瞬间集中请求后端与媒体服务
+  var REOPEN_MIN_MS = 300, REOPEN_MAX_MS = 3000;
+  function reopenJoinDelay(random) {
+    var rnd = typeof random === 'function' ? random : Math.random;
+    var r = clamp(Number(rnd()) || 0, 0, 1);
+    return Math.round(REOPEN_MIN_MS + r * (REOPEN_MAX_MS - REOPEN_MIN_MS));
+  }
+  // 运行中得知的开关 → /api/visitor/settings 同名键（chat.js 据此刷新本标签页的设置缓存；总开关关闭时两项为 false，与契约 10.3 一致）
+  function publicSettingsPatch(s) {
+    s = s && typeof s === 'object' ? s : {};
+    var hall = s.enabled !== false;
+    return { hall_enabled: hall, hall_video_enabled: s.videoEnabled === true, hall_chat_enabled: hall && s.chatEnabled !== false, hall_voice_enabled: hall && s.voiceEnabled !== false };
   }
 
   // ====== join 返回值校验 ======
@@ -351,7 +435,8 @@
       return u.protocol === 'ws:' && pageProtocol === 'http:';
     } catch (e) { return false; }
   }
-  function validateJoinData(data, pageProtocol) {
+  // prevSettings：调用时的当前设置（入场返回缺少的开关沿用它，而不是退回默认值）
+  function validateJoinData(data, pageProtocol, prevSettings) {
     if (!data || typeof data !== 'object') return null;
     if (!validLiveKitURL(data.url, pageProtocol)) return null;
     if (typeof data.token !== 'string' || !data.token || data.token.length > 8192 || /\s/.test(data.token)) return null;
@@ -363,7 +448,10 @@
       room: clampText(data.room, 64),
       identity: identity,
       name: clampText(data.name, NAME_MAX),
-      settings: normalizeSettings({ video_enabled: data.video_enabled, max_speakers: data.max_speakers, max_cameras: data.max_cameras }),
+      settings: normalizeSettings({
+        video_enabled: data.video_enabled, max_speakers: data.max_speakers, max_cameras: data.max_cameras,
+        chat_enabled: data.chat_enabled, voice_enabled: data.voice_enabled
+      }, prevSettings),
       iceServers: sanitizeIceServers(data.ice_servers),
       history: Array.isArray(data.history) ? data.history.slice(-HISTORY_LIMIT) : []
     };
@@ -530,6 +618,15 @@
     moderationText: moderationText,
     minutesFromSeconds: minutesFromSeconds,
     normalizeSettings: normalizeSettings,
+    CHAT_PAUSED_TEXT: CHAT_PAUSED_TEXT,
+    VOICE_PAUSED_TEXT: VOICE_PAUSED_TEXT,
+    switchView: switchView,
+    switchChanges: switchChanges,
+    switchToastText: switchToastText,
+    isChatClosedError: isChatClosedError,
+    tabAfterReopen: tabAfterReopen,
+    reopenJoinDelay: reopenJoinDelay,
+    publicSettingsPatch: publicSettingsPatch,
     sanitizeIceServers: sanitizeIceServers,
     validLiveKitURL: validLiveKitURL,
     validateJoinData: validateJoinData,

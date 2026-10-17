@@ -23,6 +23,8 @@ type JoinResult struct {
 	Identity     string       `json:"identity"`
 	Name         string       `json:"name"`
 	VideoEnabled bool         `json:"video_enabled"`
+	ChatEnabled  bool         `json:"chat_enabled"`
+	VoiceEnabled bool         `json:"voice_enabled"`
 	MaxSpeakers  int          `json:"max_speakers"`
 	MaxCameras   int          `json:"max_cameras"`
 	ICEServers   []ICEServer  `json:"ice_servers"`
@@ -109,7 +111,9 @@ func (s *Service) Join(ctx context.Context, a Actor) (*JoinResult, error) {
 		if err := s.state.setAgentMuted(ctx, identity, false); err != nil {
 			return nil, s.internal("hall_join_unmute_failed", err)
 		}
-		sources = []string{livekit.GrantSourceMicrophone}
+		if st.VoiceEnabled {
+			sources = []string{livekit.GrantSourceMicrophone}
+		}
 		if st.VideoEnabled {
 			if held, err := s.state.holdsSlot(ctx, slotCamera, identity); err == nil && held {
 				sources = append(sources, livekit.GrantSourceCamera)
@@ -134,7 +138,7 @@ func (s *Service) Join(ctx context.Context, a Actor) (*JoinResult, error) {
 		zap.String("vid", a.VisitorID), zap.Int64("aid", a.AgentID), zap.Int("history", len(history)))
 	return &JoinResult{
 		URL: s.publicURL, Token: token, Room: s.room, Identity: identity, Name: name,
-		VideoEnabled: st.VideoEnabled, MaxSpeakers: st.MaxSpeakers, MaxCameras: st.MaxCameras,
+		VideoEnabled: st.VideoEnabled, ChatEnabled: st.ChatEnabled, VoiceEnabled: st.VoiceEnabled, MaxSpeakers: st.MaxSpeakers, MaxCameras: st.MaxCameras,
 		ICEServers: s.ice(identity), History: history,
 	}, nil
 }
@@ -143,7 +147,9 @@ func (s *Service) Join(ctx context.Context, a Actor) (*JoinResult, error) {
 // 访客：持有开麦名额才有麦克风；任何人：视频开启且持有摄像头名额才有摄像头；客服：默认有麦克风（被管理员静音除外）。
 func (s *Service) desiredSources(ctx context.Context, identity string, st Settings) ([]string, error) {
 	var sources []string
-	if isAgentIdentity(identity) {
+	if !st.VoiceEnabled {
+		// [123] 语音关闭：任何人都没有麦克风权限
+	} else if isAgentIdentity(identity) {
 		muted, err := s.state.agentMuted(ctx, identity)
 		if err != nil {
 			return nil, err
@@ -227,6 +233,8 @@ func (s *Service) setMedia(ctx context.Context, a Actor, kind slotKind, on bool)
 		if on && !st.VideoEnabled {
 			return nil, errVideoDisabled
 		}
+	} else if on && !st.VoiceEnabled {
+		return nil, errVoiceDisabled
 	}
 	if on {
 		if remain, err := s.state.banRemaining(ctx, identity); err != nil {

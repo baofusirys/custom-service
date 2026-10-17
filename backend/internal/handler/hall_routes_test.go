@@ -452,3 +452,28 @@ func TestHallFilterRoutesAuthorization(t *testing.T) {
 		t.Fatalf("通用设置接口不得写入敏感词/邮件键：%d %v", st, m)
 	}
 }
+
+// [123] 大厅开关接口：任何客服可用，访客令牌 401；非法请求体 400。
+func TestHallSwitchesRoutes(t *testing.T) {
+	env := newRouteEnv(t)
+	vt := visitorTok(t, rtSecret)
+	at := agentTok(t, 2, "agent", 0)
+	if st, _ := env.do("GET", "/api/agent/hall/switches", "", nil, nil); st != 401 {
+		t.Fatal("无令牌应 401")
+	}
+	if st, _ := env.do("POST", "/api/agent/hall/switches", vt, map[string]bool{"chat_enabled": false}, nil); st != 401 {
+		t.Fatal("访客令牌应 401")
+	}
+	if st, m := env.do("GET", "/api/agent/hall/switches", at, nil, nil); st != 200 || code(m) != 0 {
+		t.Fatalf("普通客服读取应成功：%d %v", st, m)
+	}
+	if st, m := env.do("POST", "/api/agent/hall/switches", at, map[string]string{"chat_enabled": "false"}, nil); st != 400 || code(m) != 40060 {
+		t.Fatalf("非布尔值应 400：%d %v", st, m)
+	}
+	if st, m := env.do("POST", "/api/agent/hall/switches", at, map[string]any{}, nil); st != 400 || code(m) != 40060 {
+		t.Fatalf("空请求应 400：%d %v", st, m)
+	}
+	if st, m := env.do("POST", "/api/agent/hall/switches", at, map[string]bool{"chat_enabled": false}, nil); st != 200 || code(m) != 0 {
+		t.Fatalf("普通客服切换应成功：%d %v", st, m)
+	}
+}

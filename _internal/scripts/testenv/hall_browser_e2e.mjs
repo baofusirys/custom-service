@@ -6,6 +6,10 @@
 // 覆盖：两个访客自动入厅、默认关麦、A 开麦后 B 收到音频轨道且 inbound-rtp 字节持续增长（音量只作信息项）、开麦名额满提示、
 //       视频开关切换后摄像头按钮出现/消失、文字与图片在另一访客处出现、刷新后看到最近 50 条、被移出提示、
 //       点击收听提示（大厅里没人说话时靠入厅后的主动探测）；附加：多标签页接管、宿主页大厅状态胶囊。
+// [123] 客服可控的大厅开关（POST /api/agent/hall/switches，契约第 10 节）：文字聊天关 → 输入框/附件/发送隐藏并提示、历史照常、
+//       客服 hall_chat 被拒「大厅聊天已关闭」；语音关 → 开麦按钮隐藏、正在开麦的立即停止且不再调用 /hall/mic；
+//       总开关关 → 无大厅页签只剩私聊、LiveKit 断开且不重连、宿主页胶囊隐藏、新打开的页面不加载 LiveKit，
+//       不刷新重新打开后页签恢复并自动入厅。脚本开始时记录四个开关原值，结束时恢复。
 // 可选：HALL_E2E_TONE 指定假麦克风输入的测试音文件（默认 $HOME/cs-testenv/e2e/tone440.wav，不存在时退回 Chrome 默认假设备）。
 import { chromium } from 'playwright-core';
 import { randomUUID } from 'node:crypto';
@@ -39,6 +43,15 @@ const saved = {};
 for (const k of HALL_KEYS) if (original && original.data && original.data[k] !== undefined && original.data[k] !== '') saved[k] = original.data[k];
 const st0 = await setSettings({ hall_enabled: 'true', hall_video_enabled: 'false', hall_max_speakers: '6', hall_max_cameras: '2' });
 check('测试前设置大厅开启、视频关闭、开麦上限 6', st0.code === 0, st0);
+// [123] 大厅开关（任何启用中的客服账号可调用）：记录原值，测试前打开文字聊天与语音，结束时恢复
+const setSwitches = (kv) => api('POST', '/api/agent/hall/switches', kv);
+const swGet = await api('GET', '/api/agent/hall/switches');
+const savedSwitches = swGet && swGet.code === 0 && swGet.data
+  ? { enabled: swGet.data.enabled === true, chat_enabled: swGet.data.chat_enabled === true, voice_enabled: swGet.data.voice_enabled === true, video_enabled: swGet.data.video_enabled === true }
+  : null;
+check('读取大厅开关原值（GET /api/agent/hall/switches）', !!savedSwitches, swGet);
+const sw0 = await setSwitches({ chat_enabled: true, voice_enabled: true });
+check('测试前打开大厅文字聊天与语音开关', sw0.code === 0 && sw0.data && sw0.data.chat_enabled === true && sw0.data.voice_enabled === true, sw0);
 
 // ---------- 浏览器：假麦克风/摄像头；主浏览器允许无手势播放，另起一个“需要手势”的浏览器测点击收听 ----------
 // Chrome 默认假麦克风接近静音，服务端检测不到“正在说话”；有 440Hz 测试音文件（10 秒，脚本外提供）时用它作为假麦克风输入
@@ -72,7 +85,12 @@ const inboundAudioBytes = (page) => page.evaluate(async () => {
   }
   return total;
 });
+// [123] 记录每个页面发出的大厅访客接口请求（只记路径、方法与请求体前 200 字，不含令牌），用于验证「不再调用 /hall/mic」「不再重连」
+const hallReqs = {};
+const hallReqCount = (tag, part) => (hallReqs[tag] || []).filter((x) => x.url.includes(part)).length;
 const watch = (page, tag) => {
+  hallReqs[tag] = [];
+  page.on('request', (r) => { if (r.url().includes('/api/visitor/hall/')) hallReqs[tag].push({ url: r.url().replace(/\?.*$/, ''), method: r.method(), body: (r.postData() || '').slice(0, 200) }); });
   page.on('pageerror', (e) => problems.push(tag + ' pageerror: ' + e.message));
   page.on('response', (r) => { if (r.url().includes('/api/') && r.status() >= 500) problems.push(tag + ' http ' + r.status() + ' ' + r.url()); });
   return page;
@@ -228,6 +246,120 @@ try {
   check('客服消息带「客服」标识', after.badge >= 1, after);
   await shot(pageB, 'h06-recent-50');
 
+  // 7.5) [123] 客服可控的大厅开关（POST /api/agent/hall/switches）
+  const shown = (page, id) => page.evaluate((i) => {
+    const e = document.getElementById(i);
+    return !!e && !e.hidden && getComputedStyle(e).display !== 'none' && e.getClientRects().length > 0;
+  }, id);
+  // 7.5.1 文字聊天：关闭 → 输入框、附件、发送隐藏并提示，历史照常；客服 hall_chat 被拒；打开 → 恢复
+  const histB = await pageB.evaluate(() => document.querySelectorAll('#hallMsgs .hm').length);
+  let swr = await setSwitches({ chat_enabled: false });
+  check('客服关闭大厅文字聊天（switches 接口）', swr.code === 0 && swr.data && swr.data.chat_enabled === false, swr);
+  const chatOffA = await until(pageA, () => {
+    const p = document.getElementById('hallChatPaused');
+    return !!p && !p.hidden && document.getElementById('hallInputWrap').hidden && document.getElementById('hallFileBtn').hidden && document.getElementById('hallSendBtn').hidden;
+  }, null, 10000);
+  check('文字聊天关闭后 A 的输入框、附件、发送按钮隐藏', chatOffA, await text(pageA, '#hallPane footer'));
+  check('A 显示「大厅文字聊天已暂停」', (await shown(pageA, 'hallChatPaused')) && (await text(pageA, '#hallChatPaused')).includes('大厅文字聊天已暂停'));
+  check('文字聊天关闭后输入框在页面上不可见', !(await shown(pageA, 'hallInput')) && !(await shown(pageA, 'hallFileBtn')));
+  const chatOffB = await until(pageB, () => !document.getElementById('hallChatPaused').hidden && document.getElementById('hallInputWrap').hidden, null, 10000);
+  check('B 同样切换为文字聊天暂停', chatOffB);
+  const histB2 = await pageB.evaluate(() => document.querySelectorAll('#hallMsgs .hm').length);
+  check('文字聊天关闭时历史消息照常显示', histB > 0 && histB2 === histB, { before: histB, after: histB2 });
+  check('文字聊天关闭时开麦按钮仍在（语音不受影响）', await shown(pageA, 'hallMicBtn'));
+  const rejId = randomUUID();
+  agentWS.send(JSON.stringify({ type: 'hall_chat', id: rejId, content: '关闭时发送 ' + marker }));
+  let rej = null;
+  for (let t = 0; t < 20 && !rej; t++) { rej = agentEvents.find((e) => e.id === rejId && (e.type === 'error' || e.type === 'hall_ack')) || null; if (!rej) await sleep(250); }
+  check('聊天关闭时客服 hall_chat 被拒（error「大厅聊天已关闭」）', !!rej && rej.type === 'error' && String(rej.content || '').includes('大厅聊天已关闭'), rej);
+  await shot(pageA, 'h11-chat-paused');
+  swr = await setSwitches({ chat_enabled: true });
+  check('客服重新打开大厅文字聊天', swr.code === 0 && swr.data && swr.data.chat_enabled === true, swr);
+  const chatBackA = await until(pageA, () => document.getElementById('hallChatPaused').hidden && !document.getElementById('hallInputWrap').hidden && !document.getElementById('hallSendBtn').hidden && !document.getElementById('hallFileBtn').hidden, null, 10000);
+  check('文字聊天恢复后 A 的输入框与附件按钮恢复', chatBackA);
+  await pageA.fill('#hallInput', '恢复后发言 ' + marker);
+  await pageA.press('#hallInput', 'Enter');
+  check('文字聊天恢复后 A 发的文字出现在 B 的大厅', await until(pageB, (m) => document.getElementById('hallMsgs').innerText.includes('恢复后发言 ' + m), marker, 10000));
+
+  // 7.5.2 语音：A 正在开麦时关闭 → 立即停止、开麦按钮隐藏、提示暂停、不再调用 /hall/mic；打开 → 恢复开麦按钮
+  await pageA.click('#hallMicBtn');
+  const aMic2 = await until(pageA, () => document.getElementById('hallMicBtn').getAttribute('aria-pressed') === 'true', null, 15000);
+  check('语音开关测试前 A 开麦', aMic2, await text(pageA, '#hallToast'));
+  await until(pageB, () => document.querySelectorAll('#hallPeople .hp.is-mic-on').length >= 1, null, 8000);
+  const micReqs0 = hallReqCount('A', '/hall/mic');
+  swr = await setSwitches({ voice_enabled: false });
+  check('客服关闭大厅语音', swr.code === 0 && swr.data && swr.data.voice_enabled === false, swr);
+  const voiceOffA = await until(pageA, () => {
+    const b = document.getElementById('hallMicBtn'), p = document.getElementById('hallVoicePaused');
+    return b.hidden && b.getAttribute('aria-pressed') === 'false' && !!p && !p.hidden;
+  }, null, 10000);
+  check('语音关闭后 A 的开麦按钮隐藏、麦克风立即停止', voiceOffA, await text(pageA, '#hallPane footer'));
+  check('A 显示「大厅语音已暂停」', (await shown(pageA, 'hallVoicePaused')) && (await text(pageA, '#hallVoicePaused')).includes('大厅语音已暂停'));
+  check('B 的开麦按钮同样隐藏', await until(pageB, () => document.getElementById('hallMicBtn').hidden && !document.getElementById('hallVoicePaused').hidden, null, 10000));
+  check('B 的参与者条不再显示 A 开麦', await until(pageB, () => document.querySelectorAll('#hallPeople .hp.is-mic-on').length === 0, null, 10000));
+  await sleep(2500);
+  const micReqsAfter = (hallReqs.A || []).filter((x) => x.url.includes('/hall/mic')).slice(micReqs0);
+  check('语音关闭后 A 不再调用 /hall/mic', micReqsAfter.length === 0, micReqsAfter);
+  check('语音关闭后 A、B 仍在大厅（收听不受影响）', /人在线/.test(await text(pageA, '#hallStatusText')) && /人在线/.test(await text(pageB, '#hallStatusText')));
+  check('语音关闭时文字聊天不受影响', await shown(pageA, 'hallInput'));
+  await shot(pageA, 'h12-voice-paused');
+  swr = await setSwitches({ voice_enabled: true });
+  check('客服重新打开大厅语音', swr.code === 0 && swr.data && swr.data.voice_enabled === true, swr);
+  const voiceBack = (await until(pageA, () => !document.getElementById('hallMicBtn').hidden && document.getElementById('hallVoicePaused').hidden, null, 10000)) &&
+    (await until(pageB, () => !document.getElementById('hallMicBtn').hidden && document.getElementById('hallVoicePaused').hidden, null, 10000));
+  check('语音恢复后 A、B 的开麦按钮恢复', voiceBack);
+
+  // 7.5.3 总开关：关闭 → 无大厅页签只剩私聊、LiveKit 断开且不重连、宿主页胶囊隐藏、新页面不加载 LiveKit；
+  //       不刷新页面重新打开 → 页签恢复并自动入厅
+  const ctxH = await newContext(browser, { ...ctxOpts, viewport: { width: 1280, height: 800 } });
+  const pageH = watch(await ctxH.newPage(), 'H');
+  await pageH.goto(BASE + '/widget/demo.html');
+  const chipShown = () => until(pageH, () => { const c = document.getElementById('__cs_widget_hall__'); return !!c && c.style.display === 'flex'; }, null, 25000);
+  check('总开关测试前宿主页显示大厅状态胶囊', await chipShown());
+  await pageA.evaluate(() => { window.__csNoReload = 'A'; });
+  await pageB.evaluate(() => { window.__csNoReload = 'B'; });
+  swr = await setSwitches({ enabled: false });
+  check('客服关闭大厅总开关', swr.code === 0 && swr.data && swr.data.enabled === false, swr);
+  const onlyPrivate = (page) => until(page, () => document.getElementById('tabs').hidden && document.getElementById('hallPane').hidden && !document.getElementById('privatePane').hidden, null, 10000);
+  const closedA = await onlyPrivate(pageA);
+  const closedB = await onlyPrivate(pageB);
+  check('总开关关闭后 A、B 没有大厅页签、只显示私聊', closedA && closedB);
+  check('总开关关闭后宿主页大厅状态胶囊隐藏', await until(pageH, () => { const c = document.getElementById('__cs_widget_hall__'); return !c || c.style.display === 'none'; }, null, 10000));
+  const pcsClosed = await until(pageA, () => (window.__pcs || []).every((pc) => pc.connectionState === 'closed' || pc.connectionState === 'failed'), null, 10000);
+  check('总开关关闭后 A 的 LiveKit 媒体连接断开', pcsClosed, await pageA.evaluate(() => (window.__pcs || []).map((pc) => pc.connectionState)));
+  const joinsA0 = hallReqCount('A', '/hall/join'), joinsB0 = hallReqCount('B', '/hall/join');
+  await sleep(6000);
+  check('总开关关闭后 A、B 不再重连（6 秒内无入场请求）', hallReqCount('A', '/hall/join') === joinsA0 && hallReqCount('B', '/hall/join') === joinsB0,
+    { a: hallReqCount('A', '/hall/join') - joinsA0, b: hallReqCount('B', '/hall/join') - joinsB0 });
+  await shot(pageA, 'h13-hall-off');
+  // 关闭期间新访客打开页面：与上线前一致，没有大厅页签、不请求入场、不加载 LiveKit 组件
+  const ctxE = await newContext(browser);
+  const pageE = watch(await ctxE.newPage(), 'E');
+  await pageE.goto(CHAT);
+  await until(pageE, () => !document.getElementById('privatePane').hidden && (document.getElementById('status').textContent || '') !== '连接中…', null, 15000);
+  await sleep(3000);
+  const eOff = await pageE.evaluate(() => ({ tabsHidden: document.getElementById('tabs').hidden, privateShown: !document.getElementById('privatePane').hidden, lkScripts: document.querySelectorAll('script[src*="livekit-client"]').length, lkGlobal: typeof window.LivekitClient }));
+  check('总开关关闭时新打开的页面没有大厅页签、不加载 LiveKit 组件', eOff.tabsHidden && eOff.privateShown && eOff.lkScripts === 0 && eOff.lkGlobal === 'undefined', eOff);
+  check('总开关关闭时新打开的页面不请求入场', hallReqCount('E', '/hall/join') === 0, hallReqs.E);
+  await pageE.evaluate(() => { window.__csNoReload = 'E'; });
+  swr = await setSwitches({ enabled: true });
+  check('客服重新打开大厅总开关', swr.code === 0 && swr.data && swr.data.enabled === true, swr);
+  const tabsBack = async (page) => until(page, () => !document.getElementById('tabs').hidden, null, 10000);
+  const backA = await tabsBack(pageA), backB = await tabsBack(pageB), backE = await tabsBack(pageE);
+  check('不刷新页面：A、B、E 的大厅页签恢复', backA && backB && backE);
+  const [liveA2, liveB2, liveE2] = await Promise.all([live(pageA, 30000), live(pageB, 30000), live(pageE, 30000)]);
+  check('总开关恢复后 A、B、E 自动入厅', liveA2 && liveB2 && liveE2, { a: await text(pageA, '#hallStatusText'), b: await text(pageB, '#hallStatusText'), e: await text(pageE, '#hallStatusText') });
+  const marks = await Promise.all([pageA, pageB, pageE].map((p) => p.evaluate(() => window.__csNoReload || '')));
+  check('总开关关闭与恢复过程中页面没有刷新', marks.join(',') === 'A,B,E', marks);
+  check('关闭前停留在大厅页的 A 恢复后回到大厅页', await pageA.evaluate(() => !document.getElementById('hallPane').hidden && document.getElementById('privatePane').hidden));
+  const eOn = await pageE.evaluate(() => ({ privateShown: !document.getElementById('privatePane').hidden, lkScripts: document.querySelectorAll('script[src*="livekit-client"]').length }));
+  check('E（打开时只有私聊）恢复后留在私聊页，LiveKit 组件只加载一次', eOn.privateShown && eOn.lkScripts === 1, eOn);
+  check('E 只入厅一次（无重复初始化）', hallReqCount('E', '/hall/join') === 1, hallReqs.E);
+  check('总开关恢复后宿主页大厅状态胶囊重新出现', await chipShown());
+  await shot(pageA, 'h14-hall-back');
+  await ctxE.close();
+  await ctxH.close();
+
   // 8) 点击收听提示（需要用户手势的浏览器）：此时大厅里没有人开麦，靠入厅后的主动探测显示提示
   // 新访客首次来访：没有授予麦克风/摄像头权限（已授权采集的站点 Chrome 会放行自动播放，不代表真实首访）
   const { permissions: _granted, ...firstVisitOpts } = ctxOpts;
@@ -305,6 +437,10 @@ try {
   const restore = { hall_enabled: 'true', hall_video_enabled: 'false', hall_max_speakers: '6', hall_max_cameras: '2', ...saved };
   const rs = await setSettings(restore).catch((e) => ({ code: -1, msg: String(e) }));
   check('恢复测试前的大厅设置', rs.code === 0, rs);
+  if (savedSwitches) {
+    const rsw = await setSwitches(savedSwitches).catch((e) => ({ code: -1, msg: String(e) }));
+    check('恢复测试前的大厅开关（总开关 / 文字聊天 / 语音 / 视频）', rsw.code === 0, rsw);
+  }
   check('无页面脚本错误与接口 5xx', problems.length === 0, problems.join(' | '));
   await browser.close().catch(() => {});
   await gestureBrowser.close().catch(() => {});

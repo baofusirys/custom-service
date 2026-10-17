@@ -144,3 +144,34 @@
 - 生产默认：发件 kelili 邮箱（与主站发货邮件同一 163 账号，compose 直接引用主站 `SMTP_*` 变量），收件 `baofusir@gmail.com`；均可在后台修改。
 ### 9.4 错误码补充
 40062 敏感词设置不合法 · 40063 邮件设置不合法 · 50271 测试邮件发送失败
+
+
+## 10. 客服可控的大厅开关（[123]，北京时间 2026-10-18）
+> 需求：爷爷不在电脑前时关掉、回来再打开；**所有客服账号**（不只管理员）都能控制。
+### 10.1 四个开关（settings 表，均为 `true`/`false`，默认全部 `true`，视频默认 `false`）
+| 键 | 含义 | 关闭后的效果 |
+| --- | --- | --- |
+| `hall_enabled` | 大厅总开关 | 与上线前一样：访客窗口不显示大厅页签、只有私聊；入场 40371；已在大厅的人全部移出 |
+| `hall_chat_enabled`（新） | 大厅文字/图片/文件聊天 | 任何人（访客与客服）发 hall_chat 都被拒（error「大厅聊天已关闭」），`scope=hall` 上传 403 `40378`；历史消息仍可查看 |
+| `hall_voice_enabled`（新） | 大厅语音 | 访客开麦 403 `40377`；收回所有人（含客服）的麦克风发布权限并清空开麦名额；客服入场令牌不再带麦克风权限 |
+| `hall_video_enabled` | 大厅视频（摄像头） | 同原规则：开摄像头 403 `40375`，收回全部摄像头 |
+- 只有 `hall_enabled` 为 `true` 时其余三个才有意义；总开关关闭时其余开关的值保留不变，再打开即恢复。
+- 上限类设置（开麦人数、摄像头人数、大厅人数）仍只有管理员可改（`/api/admin/settings`），管理员设置页同样能改这四个开关。
+
+### 10.2 接口（客服已登录即可，`ag` 组；任何启用中的客服账号）
+- `GET /api/agent/hall/switches` → `data:{enabled, chat_enabled, voice_enabled, video_enabled, updated_by, updated_at}`（`updated_by` 为最后修改人显示名「客服·昵称」，`updated_at` 为 +08:00 时间；从未修改过为空串）。
+- `POST /api/agent/hall/switches` `{enabled?, chat_enabled?, voice_enabled?, video_enabled?}`：只改传入的项（至少一项，布尔）；返回同 GET。每个客服 30 次/分钟（42910）。参数错误 400 `40060`。全部写审计（操作者、改前改后）。
+- 修改后服务端立即广播 `hall_settings`，并在后台执行：关总开关 → 移出全部；关语音 → 收回全部麦克风；关视频 → 收回全部摄像头。
+
+### 10.3 下发与广播字段补充
+- `hall_settings` 广播 `extra` 增加 `chat_enabled`、`voice_enabled`（原有 `enabled、video_enabled、max_speakers、max_cameras` 不变）。
+- `GET /api/visitor/settings` 增加 `hall_chat_enabled`、`hall_voice_enabled`（布尔；总开关关闭时两者也为 `false`）。
+- 入场返回（访客与客服 `/hall/join`）增加 `chat_enabled`、`voice_enabled`。
+- `GET /api/agent/hall/state` 的 `settings` 增加 `chat_enabled`、`voice_enabled`。
+
+### 10.4 客户端表现
+- 访客窗口：总开关关 → 收起大厅页签、断开大厅、只显示私聊（与上线前一致）；再打开 → 恢复大厅页签并自动入厅（不用刷新）。聊天关 → 输入框、附件按钮隐藏并提示「大厅文字聊天已暂停」，历史仍显示；语音关 → 隐藏开麦按钮、正在开麦的立即停止，提示「大厅语音已暂停」。
+- 网页后台「多人大厅」页与 App「大厅」页：所有客服可见「大厅开关」面板（总开关、文字聊天、语音、视频 4 个开关 + 最后修改人与时间），未进入大厅时也能操作；关总开关前二次确认。聊天关时输入区禁用，语音关时麦克风禁用。
+
+### 10.5 错误码补充
+40377 大厅语音已关闭 · 40378 大厅聊天已关闭

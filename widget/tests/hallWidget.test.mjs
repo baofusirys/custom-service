@@ -247,9 +247,9 @@ test('hall_settings：视频开启后显示摄像头按钮、关闭后隐藏；�
   assert.ok(h.ws.sent.some(e => e.type === 'hall_unsubscribe'))
   await h.step(500)
   assert.equal(h.env.posted.filter(m => m.type === 'hall_status').at(-1).state, 'off')
-  // 重新开启后自动入厅
+  // 重新开启后自动入厅（[123] 入厅前随机错开 0.3–3 秒，再加空闲回调兜底 0.8 秒）
   h.ws.receive({ type: 'hall_settings', extra: { enabled: true, video_enabled: false, max_speakers: 6, max_cameras: 2 } })
-  await h.step(1000)
+  await h.step(4000)
   assert.equal(h.calls.join.length, 2)
   assert.equal(h.id('tabs').hidden, false)
 })
@@ -645,3 +645,306 @@ test('主动探测自动播放：已有交互、AudioContext 直接 running 且�
   assert.equal(muted.contexts.length, 0)
   assert.equal(env.byId('hallNotice').hidden, true)
 })
+
+// ====================== [123] 客服可控的大厅开关（契约第 10 节） ======================
+const SW = { enabled: true, video_enabled: false, chat_enabled: true, voice_enabled: true, max_speakers: 6, max_cameras: 2 }
+const sw = (o = {}) => ({ type: 'hall_settings', extra: { ...SW, ...o } })
+const lastStatus = (env) => env.posted.filter(m => m.type === 'hall_status').at(-1)
+const allNodes = (root) => { const out = []; const walk = (n) => { for (const c of n.childNodes) { out.push(c); walk(c) } }; walk(root); return out }
+const CACHE_KEY = 'cs_visitor_default_settings'
+
+test('[123] 总开关：加载时关闭 → 无大厅页签、不请求入场、不加载 LiveKit 脚本；运行中打开 → 不刷新恢复页签并自动入厅（脚本只加载一次、重复广播不重复入厅），访客留在私聊页', async () => {
+  const { LK, ctl } = createFakeLivekit()
+  let joins = 0
+  const env = await bootWidget({ hall: true, settings: { hall_enabled: false, hall_video_enabled: false, hall_chat_enabled: false, hall_voice_enabled: false },
+    routes: async (url, opts, respond) => (url.includes('/api/visitor/hall/join') ? (joins++, respond({ code: 0, data: JOIN })) : null) })
+  const ws = env.ws()
+  ws.open()
+  const step = async (ms) => { env.clock.tick(ms); await env.flush() }
+  const scripts = () => allNodes(env.doc.body).filter(n => n.tagName === 'SCRIPT')
+  await step(5000)
+  assert.equal(env.byId('tabs').hidden, true, '与上线前一致：没有大厅页签')
+  assert.equal(env.byId('privatePane').hidden, false)
+  assert.equal(env.byId('hallPane').hidden, true)
+  assert.equal(joins, 0)
+  assert.equal(scripts().length, 0, '不加载 LiveKit 组件')
+  assert.equal(ws.sent.filter(e => e.type === 'hall_subscribe').length, 0)
+  assert.equal(lastStatus(env).state, 'off', '宿主页状态胶囊隐藏')
+  // 打开（同一广播重复到达两次）
+  ws.receive(sw())
+  ws.receive(sw())
+  assert.equal(env.byId('tabs').hidden, false, '立即恢复大厅页签')
+  assert.equal(env.byId('privatePane').hidden, false, '访客正在私聊页：不强制切走')
+  assert.equal(env.byId('hallPane').hidden, true)
+  await step(4000)
+  assert.equal(joins, 1, '错峰后只入厅一次')
+  assert.equal(scripts().length, 1, '按需加载 vendor 脚本一次')
+  const s = scripts()[0]
+  assert.equal(s.src, 'vendor/livekit-client-2.23.0.umd.js')
+  assert.match(s.integrity, /^sha384-/)
+  env.sandbox.LivekitClient = LK
+  s.onload()
+  await env.flush()
+  assert.equal(ctl.rooms.length, 1)
+  assert.ok(ctl.rooms[0].connected)
+  assert.equal(ws.sent.filter(e => e.type === 'hall_subscribe').length, 1)
+  assert.equal(env.byId('hallInputWrap').hidden, false, '入场后文字聊天按广播的开关恢复')
+  assert.equal(env.byId('hallMicBtn').hidden, false)
+  // 运行中再次收到相同广播：不重复入厅、不重复连接、不重复加载脚本
+  ws.receive(sw())
+  await step(6000)
+  assert.equal(joins, 1)
+  assert.equal(ctl.rooms.length, 1)
+  assert.equal(scripts().length, 1)
+  assert.equal(lastStatus(env).state, 'live')
+})
+
+test('[123] 总开关：运行中关闭 → 收起页签切到私聊、断开 LiveKit、停止重连（含退避中的重试）；重新打开回到关闭前的大厅页，关闭期间有私聊往来或关闭前在私聊页则留在私聊页', async () => {
+  const h = await bootHall()
+  const onHall = () => h.id('hallPane').hidden === false && h.id('privatePane').hidden === true
+  // 媒体断开进入退避重连，此时关闭大厅
+  h.ctl.failConnect = true
+  h.room().emit('disconnected', 3)
+  await h.step(300)
+  const joins = h.calls.join.length
+  h.ws.receive(sw({ enabled: false }))
+  assert.equal(h.id('tabs').hidden, true)
+  assert.equal(h.id('privatePane').hidden, false)
+  assert.equal(h.id('hallPane').hidden, true)
+  assert.ok(h.ws.sent.some(e => e.type === 'hall_unsubscribe'))
+  await h.step(300000)
+  assert.equal(h.calls.join.length, joins, '关闭后停止重连')
+  assert.equal(lastStatus(h.env).state, 'off')
+  // 重新打开：关闭前在大厅页 → 回到大厅
+  h.ctl.failConnect = false
+  h.ws.receive(sw())
+  assert.ok(onHall(), '关闭前停留在大厅页：恢复后回到大厅')
+  await h.step(4000)
+  assert.equal(h.calls.join.length, joins + 1)
+  assert.ok(h.room().connected)
+  const liveRoom = h.room()
+  // 第二轮：关闭期间收到客服私聊 → 留在私聊页
+  h.ws.receive(sw({ enabled: false }))
+  assert.equal(liveRoom.connected, false, '断开 LiveKit')
+  h.ws.receive({ type: 'chat', from: 'agent:7', id: 'm9-p1', conv: 'conv-1', content: '私聊回复', ts: Date.now() })
+  h.ws.receive(sw())
+  assert.equal(h.id('tabs').hidden, false)
+  assert.equal(h.id('privatePane').hidden, false, '关闭期间有私聊往来：不切走')
+  await h.step(4000)
+  assert.equal(h.calls.join.length, joins + 2)
+  // 第三轮：回到大厅页后关闭，访客在私聊页发出消息 → 留在私聊页
+  h.id('tabHall').click()
+  h.ws.receive(sw({ enabled: false }))
+  h.env.input.value = '请问发货了吗'
+  h.id('sendBtn').click()
+  assert.ok(h.ws.sent.some(e => e.type === 'chat' && e.content === '请问发货了吗'), '私聊照常')
+  h.ws.receive(sw())
+  assert.equal(h.id('privatePane').hidden, false)
+  await h.step(4000)
+  // 第四轮：关闭前就在私聊页 → 留在私聊页
+  h.id('tabPrivate').click()
+  h.ws.receive(sw({ enabled: false }))
+  h.ws.receive(sw())
+  assert.equal(h.id('privatePane').hidden, false)
+  assert.equal(h.id('hallPane').hidden, true)
+  await h.step(4000)
+  assert.equal(h.calls.join.length, joins + 4)
+})
+
+test('[123] 总开关：关闭前已由其他页面收听的页面，重新打开后仍显示「在此页面收听」，不自动抢回', async () => {
+  const h = await bootHall()
+  h.room().emit('disconnected', 2)
+  const n = h.calls.join.length
+  h.ws.receive(sw({ enabled: false }))
+  h.ws.receive(sw())
+  await h.step(10000)
+  assert.equal(h.calls.join.length, n)
+  assert.equal(h.id('tabs').hidden, false)
+  assert.equal(h.id('hallNoticeText').textContent, '您已在其他页面收听大厅')
+  h.id('hallNoticeBtn').click()
+  await h.step(1000)
+  assert.equal(h.calls.join.length, n + 1, '点击后照常接管')
+})
+
+test('[123] 文字聊天开关：初始值来自访客公开设置与入场返回；关闭 → 隐藏输入框 / 附件 / 发送并提示，历史照常显示；开启 → 恢复', async () => {
+  const h = await bootHall({ settings: { hall_enabled: true, hall_video_enabled: false, hall_chat_enabled: false, hall_voice_enabled: true } })
+  const paused = () => h.id('hallChatPaused').hidden === false
+  assert.equal(paused(), true, '入场返回没有 chat_enabled（旧后端）时沿用公开设置')
+  assert.equal(h.id('hallChatPausedText').textContent, '大厅文字聊天已暂停')
+  assert.equal(h.id('hallInputWrap').hidden, true)
+  assert.equal(h.id('hallFileBtn').hidden, true)
+  assert.equal(h.id('hallSendBtn').hidden, true)
+  assert.equal(h.hallMsgs().length, 2, '历史消息照常显示')
+  assert.equal(h.id('hallMicBtn').hidden, false, '语音不受影响')
+  assert.equal(h.id('hallVoicePaused').hidden, true)
+  h.id('hallInput').value = '暂停时发送'
+  h.id('hallSendBtn').click()
+  assert.equal(h.ws.sent.filter(e => e.type === 'hall_chat').length, 0, '暂停时不发送')
+  assert.equal(h.id('hallToast').textContent, '大厅文字聊天已暂停')
+  h.ws.receive(sw())
+  assert.equal(paused(), false)
+  assert.equal(h.id('hallInputWrap').hidden, false)
+  assert.equal(h.id('hallFileBtn').hidden, false)
+  assert.equal(h.id('hallSendBtn').hidden, false)
+  assert.equal(h.id('hallToast').textContent, '大厅文字聊天已恢复')
+  h.id('hallSendBtn').click()
+  assert.equal(h.ws.sent.filter(e => e.type === 'hall_chat').length, 1, '恢复后保留已输入的内容并可发送')
+  h.ws.receive(sw({ chat_enabled: false }))
+  assert.equal(paused(), true)
+  assert.equal(h.id('hallToast').textContent, '客服已暂停大厅文字聊天')
+  assert.equal(h.hallMsgs().length, 3)
+  assert.equal(JSON.parse(h.env.sessionStorage.getItem(CACHE_KEY)).hall_chat_enabled, false, '同步本标签页的设置缓存')
+  // 入场返回 chat_enabled=false 优先于（可能过期的）公开设置
+  const j = await bootHall({ join: (respond) => respond({ code: 0, data: { ...JOIN, chat_enabled: false, voice_enabled: true } }) })
+  assert.equal(j.id('hallChatPaused').hidden, false)
+  assert.equal(j.id('hallInputWrap').hidden, true)
+})
+
+test('[123] 文字聊天被服务端拒绝：hall_chat 回 error「大厅聊天已关闭」或上传 403 40378 时切换为暂停状态', async () => {
+  const h = await bootHall()
+  h.id('hallInput').value = '你好'
+  h.id('hallSendBtn').click()
+  const sent = h.ws.sent.filter(e => e.type === 'hall_chat').at(-1)
+  h.ws.receive({ type: 'error', id: sent.id, content: '大厅聊天已关闭' })
+  assert.equal(h.id('hallChatPaused').hidden, false)
+  assert.equal(h.id('hallInputWrap').hidden, true)
+  assert.match(h.hallText(), /未发送：大厅聊天已关闭/)
+  assert.doesNotMatch(h.env.list.textContent, /大厅聊天已关闭/, '大厅错误不进入私聊区')
+  h.env.doc.body.querySelectorAll('.hm-resend')[0].click()
+  assert.equal(h.id('hallToast').textContent, '大厅文字聊天已暂停')
+  assert.equal(h.ws.sent.filter(e => e.type === 'hall_chat').length, 1, '暂停时重发不发送')
+  // 上传 403 40378：切换为暂停，剩余文件不再上传
+  const u = await bootHall({ upload: (respond) => respond({ code: 40378, msg: '大厅聊天已关闭' }, 403) })
+  u.id('hallFileInput').onchange({ target: { files: [{ name: 'a.pdf', size: 10 }, { name: 'b.pdf', size: 10 }], value: 'x' } })
+  u.id('hallSendBtn').click()
+  await u.env.flush()
+  assert.equal(u.calls.upload.length, 1)
+  assert.equal(u.id('hallToast').textContent, '大厅聊天已关闭')
+  assert.equal(u.id('hallChatPaused').hidden, false)
+  assert.equal(u.ws.sent.filter(e => e.type === 'hall_chat').length, 0)
+})
+
+test('[123] 语音开关：关闭 → 隐藏开麦按钮、正在发布的麦克风立即停止且不调用 /hall/mic、提示暂停，仍可收听；开启 → 恢复开麦按钮', async () => {
+  const h = await bootHall()
+  const room = h.room()
+  const p = room.addRemote('a_7', '客服·小王', 'agent')
+  const pub = [...p.audioTrackPublications.values()][0]
+  h.id('hallMicBtn').click()
+  await h.env.flush()
+  room.localParticipant.grant([2])
+  await h.env.flush()
+  assert.equal(h.id('hallMicBtn').getAttribute('aria-pressed'), 'true')
+  assert.deepEqual(h.calls.mic, [{ on: true }])
+  h.ws.receive(sw({ voice_enabled: false }))
+  await h.env.flush()
+  assert.equal(h.id('hallMicBtn').hidden, true)
+  assert.equal(h.id('hallMicBtn').getAttribute('aria-pressed'), 'false')
+  assert.equal(h.id('hallVoicePaused').hidden, false)
+  assert.equal(h.id('hallVoicePausedText').textContent, '大厅语音已暂停')
+  assert.deepEqual(room.localParticipant.calls.at(-1), ['unpublish', 'audio'], '立即停止发布麦克风')
+  assert.deepEqual(h.calls.mic, [{ on: true }], '不再调用 /hall/mic')
+  assert.equal(h.id('hallToast').textContent, '客服已暂停大厅语音，您的麦克风已关闭')
+  assert.deepEqual(pub.subscribeCalls, [true], '仍可收听（不影响订阅）')
+  assert.equal(h.id('hallAudioSink').children.length, 1)
+  assert.equal(h.id('hallInputWrap').hidden, false, '文字聊天不受影响')
+  await h.step(500)
+  assert.equal(lastStatus(h.env).state, 'live')
+  h.ws.receive(sw({ voice_enabled: true }))
+  assert.equal(h.id('hallMicBtn').hidden, false)
+  assert.equal(h.id('hallVoicePaused').hidden, true)
+  assert.equal(h.id('hallToast').textContent, '大厅语音已恢复，您可以开麦')
+  assert.deepEqual(h.calls.mic, [{ on: true }])
+})
+
+test('[123] 开麦被拒 40377 提示「大厅语音已关闭」并隐藏开麦按钮；开麦等待发布权限期间语音被关闭则放弃发布', async () => {
+  const h = await bootHall({ mic: (respond, body) => (body.on ? respond({ code: 40377, msg: '大厅语音已关闭' }, 403) : respond({ code: 0, data: { on: false } })) })
+  h.id('hallMicBtn').click()
+  await h.env.flush()
+  assert.equal(h.id('hallToast').textContent, '大厅语音已关闭')
+  assert.equal(h.id('hallMicBtn').hidden, true)
+  assert.equal(h.id('hallVoicePaused').hidden, false)
+  assert.equal(h.room().localParticipant.calls.length, 0)
+  assert.equal(JSON.parse(h.env.sessionStorage.getItem(CACHE_KEY)).hall_voice_enabled, false)
+  const g = await bootHall()
+  g.id('hallMicBtn').click()
+  await g.env.flush()
+  assert.deepEqual(g.calls.mic, [{ on: true }])
+  g.ws.receive(sw({ voice_enabled: false }))
+  g.room().localParticipant.grant([2])   // 权限下发晚于开关广播
+  await g.step(6000)
+  assert.equal(g.room().localParticipant.calls.filter(c => c[0] === 'mic').length, 0, '放弃发布')
+  assert.equal(g.id('hallMicBtn').getAttribute('aria-pressed'), 'false')
+  assert.deepEqual(g.calls.mic, [{ on: true }], '不再调用 /hall/mic')
+})
+
+test('[123] 视频与新开关组合：文字、语音都关闭时摄像头按钮仍按视频开关显示；关闭视频收回摄像头；40375 同步隐藏摄像头按钮', async () => {
+  const h = await bootHall()
+  h.ws.receive(sw({ chat_enabled: false, voice_enabled: false, video_enabled: true }))
+  assert.equal(h.id('hallCamBtn').hidden, false)
+  assert.equal(h.id('hallMicBtn').hidden, true)
+  assert.equal(h.id('hallInputWrap').hidden, true)
+  assert.equal(h.id('hallChatPaused').hidden, false)
+  assert.equal(h.id('hallVoicePaused').hidden, false)
+  assert.equal(h.id('hallToast').textContent, '客服已暂停大厅文字聊天；客服已暂停大厅语音；客服已开启大厅视频，您可以打开摄像头')
+  h.id('hallCamBtn').click()
+  await h.env.flush()
+  h.room().localParticipant.grant([1])
+  await h.env.flush()
+  assert.equal(h.id('hallCamBtn').getAttribute('aria-pressed'), 'true')
+  h.ws.receive(sw({ chat_enabled: false, voice_enabled: false, video_enabled: false }))
+  await h.env.flush()
+  assert.equal(h.id('hallCamBtn').hidden, true)
+  assert.equal(h.id('hallCamBtn').getAttribute('aria-pressed'), 'false')
+  assert.equal(h.id('hallToast').textContent, '客服已关闭大厅视频，您的摄像头已关闭')
+  h.ws.receive(sw())
+  assert.equal(h.id('hallMicBtn').hidden, false)
+  assert.equal(h.id('hallInputWrap').hidden, false)
+  assert.equal(h.id('hallChatPaused').hidden, true)
+  assert.equal(h.id('hallVoicePaused').hidden, true)
+  assert.equal(h.id('hallCamBtn').hidden, true)
+  // 摄像头接口 40375（广播丢失时的兜底）：隐藏摄像头按钮
+  const c = await bootHall({ join: (respond) => respond({ code: 0, data: { ...JOIN, video_enabled: true } }), camera: (respond, body) => (body.on ? respond({ code: 40375, msg: 'video off' }, 403) : respond({ code: 0, data: { on: false } })) })
+  assert.equal(c.id('hallCamBtn').hidden, false)
+  c.id('hallCamBtn').click()
+  await c.env.flush()
+  assert.equal(c.id('hallToast').textContent, '大厅暂未开启视频，暂时不能开摄像头')
+  assert.equal(c.id('hallCamBtn').hidden, true)
+})
+
+test('[123] 公开设置缓存：开关变化同步到本标签页缓存；缓存显示大厅关闭时本页向服务端确认一次，服务端不可用时退回缓存', async () => {
+  const h = await bootHall()
+  const cache = () => JSON.parse(h.env.sessionStorage.getItem(CACHE_KEY))
+  assert.equal(cache().hall_enabled, true)
+  h.ws.receive(sw({ enabled: false }))
+  assert.equal(cache().hall_enabled, false)
+  assert.equal(cache().hall_chat_enabled, false)
+  const now = Date.parse('2026-10-14T12:00:00Z')
+  const offCache = { [CACHE_KEY]: JSON.stringify({ hall_enabled: false, hall_video_enabled: false, hall_chat_enabled: false, hall_voice_enabled: false }), [CACHE_KEY + '_at']: String(now - 60000) }
+  const settingsCalls = (env) => env.fetchCalls.filter(c => c.url.includes('/api/visitor/settings')).length
+  const boot = async (sessionStore, routes) => {
+    const { LK } = createFakeLivekit()
+    let joins = 0
+    const env = await bootWidget({ hall: true, now, sessionStore, settings: { hall_enabled: true, hall_chat_enabled: true, hall_voice_enabled: true }, globals: { LivekitClient: LK },
+      routes: async (url, opts, respond) => (url.includes('/api/visitor/hall/join') ? (joins++, respond({ code: 0, data: JOIN })) : (routes ? routes(url, respond) : null)) })
+    env.ws().open()
+    env.clock.tick(1000)
+    await env.flush()
+    return { env, joins: () => joins }
+  }
+  // 缓存（未过期）显示关闭、服务端已重新打开：向服务端确认后显示大厅并入厅
+  const a = await boot(offCache)
+  assert.equal(settingsCalls(a.env), 1)
+  assert.equal(a.env.byId('tabs').hidden, false)
+  assert.equal(a.joins(), 1)
+  assert.equal(JSON.parse(a.env.sessionStorage.getItem(CACHE_KEY)).hall_enabled, true, '缓存刷新为服务端最新值')
+  // 缓存显示开启：照常使用缓存，不请求
+  const b = await boot({ [CACHE_KEY]: JSON.stringify({ hall_enabled: true }), [CACHE_KEY + '_at']: String(now - 60000) })
+  assert.equal(settingsCalls(b.env), 0)
+  assert.equal(b.joins(), 1)
+  // 服务端不可用：退回缓存（大厅关闭），不入厅
+  const c = await boot(offCache, (url, respond) => (url.includes('/api/visitor/settings') ? respond({ code: 50050, msg: '服务器繁忙' }, 500) : null))
+  assert.equal(settingsCalls(c.env), 1)
+  assert.equal(c.env.byId('tabs').hidden, true)
+  assert.equal(c.joins(), 0)
+})
+

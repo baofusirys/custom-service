@@ -17,9 +17,9 @@ import {
   HALL_SERVER_BANDWIDTH_MBPS,
   HALL_SETTING_DEFAULTS,
   HALL_SETTING_LIMITS,
+  buildHallSettingsSavePayload,
   estimateHallBandwidth,
   parseHallSettings,
-  validateHallSettings,
 } from '../modules/hallSettings'
 
 const session = useSession()
@@ -30,6 +30,8 @@ const HallFilterSettings = defineAsyncComponent(() => import('../components/hall
 
 const loading = ref(false)
 const saving = ref(false)
+// [123] 载入时的大厅设置快照：保存时只提交管理员改动过的四个开关，避免覆盖其他客服在「多人大厅」页刚做的切换
+const hallLoaded = ref(null)
 const form = ref({
   agent_notify_sound: 'agent1',
   visitor_notify_sound: 'visitor1',
@@ -92,7 +94,9 @@ async function load() {
     const autoClean = parseAutoCleanDays(d.auto_clean_days)
     form.value.auto_clean_enabled = autoClean.enabled
     form.value.auto_clean_days = autoClean.days
-    Object.assign(form.value, parseHallSettings(d))
+    const hall = parseHallSettings(d)
+    Object.assign(form.value, hall)
+    hallLoaded.value = hall
   } finally {
     loading.value = false
   }
@@ -104,7 +108,7 @@ async function save() {
     ElMessage.warning(autoClean.error)
     return
   }
-  const hall = validateHallSettings(form.value)
+  const hall = buildHallSettingsSavePayload(form.value, hallLoaded.value)
   if (isAdmin.value && !hall.ok) {
     ElMessage.warning(hall.error)
     return
@@ -133,6 +137,8 @@ async function save() {
   } finally {
     saving.value = false
   }
+  // [123] 保存成功后重新载入：未改动的开关显示服务端当前值（可能已被其他客服切换），并刷新快照
+  if (isAdmin.value) await load()
 }
 
 function preview(name) {
@@ -213,9 +219,29 @@ onMounted(load)
       <template v-if="isAdmin">
         <el-divider content-position="left">多人大厅</el-divider>
 
+        <!-- [123] 契约第 10 节：总开关、文字聊天、语音、视频四个开关所有客服都可在「多人大厅」页切换 -->
+        <el-form-item label="开关说明">
+          <el-alert
+            type="info"
+            :closable="false"
+            show-icon
+            title="这四个开关所有客服都可在『多人大厅』页切换"
+            description="大厅总开关、文字聊天、语音、视频；这里保存时只提交你改动过的开关，不会覆盖其他客服刚刚做的切换。下方人数上限仅管理员可改。" />
+        </el-form-item>
+
         <el-form-item label="启用大厅">
           <el-switch v-model="form.hall_enabled" active-text="开启" inactive-text="关闭" />
-          <div class="form-tip">关闭后不再允许进入大厅，已在大厅里的访客和客服会被移出；私聊不受影响。</div>
+          <div class="form-tip">大厅总开关：关闭后访客窗口不再显示大厅、只保留私聊，已在大厅里的访客和客服会被移出；下面三个开关的值保留，重新打开即恢复。</div>
+        </el-form-item>
+
+        <el-form-item label="大厅文字聊天">
+          <el-switch v-model="form.hall_chat_enabled" active-text="开启" inactive-text="关闭" />
+          <div class="form-tip">关闭后访客和客服都不能在大厅发送文字、图片、文件，历史消息仍可查看。</div>
+        </el-form-item>
+
+        <el-form-item label="大厅语音">
+          <el-switch v-model="form.hall_voice_enabled" active-text="开启" inactive-text="关闭" />
+          <div class="form-tip">关闭后访客不能开麦，所有人（含客服）的麦克风立即被关闭，客服进入大厅时也不再带麦克风权限。</div>
         </el-form-item>
 
         <el-form-item label="允许视频">

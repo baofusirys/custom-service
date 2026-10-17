@@ -555,6 +555,16 @@
   .hall-media-btn.is-busy, .hall-media-btn:disabled { opacity: .55; cursor: not-allowed; }
   .send-btn:disabled, .icon-btn:disabled { opacity: .55; cursor: not-allowed; }
   textarea:disabled { cursor: not-allowed; }
+  /* [123] 客服暂停大厅文字聊天 / 语音时的提示（分别占据输入框 / 开麦按钮的位置） */
+  .hall-paused {
+    display: flex; align-items: center; gap: 6px; min-height: 38px; padding: 8px 10px;
+    border-radius: 10px; background: #f3f4f6; color: #6b7280; font-size: 13px; line-height: 1.5;
+  }
+  .hall-paused-chip {
+    height: 32px; padding: 0 10px 0 8px; border-radius: 16px; background: #f3f4f6; color: #9ca3af;
+    display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; white-space: nowrap;
+  }
+  .hall-paused svg, .hall-paused-chip svg { flex-shrink: 0; }
 
   /* 窄屏 / 矮屏适配 */
   @media (max-width: 360px) {
@@ -621,7 +631,11 @@
       <button class="hall-new" id="hallNewBtn" type="button" hidden></button>
       <div class="hall-toast" id="hallToast" role="alert" hidden></div>
       <footer>
-        <div class="input-wrap">
+        <div class="hall-paused" id="hallChatPaused" role="status" hidden>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><line x1="10" y1="7" x2="10" y2="12"/><line x1="14" y1="7" x2="14" y2="12"/></svg>
+          <span id="hallChatPausedText">大厅文字聊天已暂停</span>
+        </div>
+        <div class="input-wrap" id="hallInputWrap">
           <div id="hallPendingList" class="pending-list"></div>
           <textarea id="hallInput" maxlength="1000" placeholder="在大厅发言，所有人可见；回车发送"></textarea>
         </div>
@@ -632,6 +646,7 @@
             </button>
             <input type="file" id="hallFileInput" multiple hidden>
             <button class="hall-media-btn" id="hallMicBtn" type="button" aria-pressed="false" disabled><span class="hall-btn-ico"></span><span class="hall-media-label" id="hallMicLabel">开麦</span></button>
+            <span class="hall-paused-chip" id="hallVoicePaused" role="status" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="2" y1="2" x2="22" y2="22"/><path d="M18.89 13.23A7 7 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" y1="19" x2="12" y2="22"/></svg><span id="hallVoicePausedText">大厅语音已暂停</span></span>
             <button class="hall-media-btn" id="hallCamBtn" type="button" aria-pressed="false" hidden disabled><span class="hall-btn-ico"></span><span class="hall-media-label" id="hallCamLabel">摄像头</span></button>
           </div>
           <button class="send-btn" id="hallSendBtn" type="button">发送</button>

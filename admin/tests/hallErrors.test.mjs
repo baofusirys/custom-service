@@ -36,6 +36,16 @@ test('契约第 8 节全部错误码都有中文提示', () => {
   }
 })
 
+test('[123] 契约第 10.5 节错误码（40377/40378）有中文提示', () => {
+  assert.equal(HALL_ERROR_CODES.VOICE_DISABLED, 40377)
+  assert.equal(HALL_ERROR_CODES.CHAT_DISABLED, 40378)
+  assert.match(hallErrorMessage(axiosErr(403, { code: 40377, msg: 'voice disabled' })), /大厅语音已暂停/)
+  assert.match(hallErrorMessage(axiosErr(403, { code: 40378, msg: 'chat disabled' })), /大厅文字聊天已暂停/)
+  // http 拦截器 reject 的业务体形态
+  assert.match(hallErrorMessage({ code: 40378, msg: '大厅聊天已关闭' }), /大厅文字聊天已暂停/)
+  assert.equal(hallErrorCode({ code: 40377 }), 40377)
+})
+
 test('契约补充错误码（40059/40060/40376/40477/50370/50050）有中文提示', () => {
   assert.equal(hallErrorMessage(axiosErr(403, { code: 40376, msg: 'x' })), '不能对该对象执行此操作')
   assert.equal(hallErrorMessage(axiosErr(404, { code: 40477, msg: 'x' })), '该大厅消息不存在或已被删除')

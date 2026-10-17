@@ -66,6 +66,13 @@ test('join 响应校验', () => {
   assert.equal(fallback.value.maxCameras, 2)
   assert.deepEqual(fallback.value.history, [])
   assert.match(normalizeJoinResponse(join({ url: 'ws://a.com' })).error, /[\u4e00-\u9fa5]/)
+  // [123] 入场返回的文字聊天 / 语音开关：只采纳布尔，缺失或非法为 undefined
+  const sw = normalizeJoinResponse(join({ chat_enabled: false, voice_enabled: true }))
+  assert.equal(sw.value.chatEnabled, false)
+  assert.equal(sw.value.voiceEnabled, true)
+  const legacy = normalizeJoinResponse(join({ chat_enabled: 'off' }))
+  assert.equal(legacy.value.chatEnabled, undefined)
+  assert.equal(legacy.value.voiceEnabled, undefined)
 })
 
 test('state 响应容错', () => {

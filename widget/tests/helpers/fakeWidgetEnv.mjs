@@ -163,7 +163,8 @@ class FakeClock {
 //   routes(url, opts, respond) 返回响应即覆盖默认的假接口
 //   globals 合并进沙箱全局（如假 LivekitClient、BroadcastChannel）
 //   settings 为 /api/visitor/settings 的 data
-export async function bootWidget({ storage = {}, session = {}, now = Date.parse('2026-10-14T12:00:00Z'), hall = false, routes = null, globals = {}, settings = {} } = {}) {
+//   sessionStore（[123]）为 sessionStorage 初始内容（如上一页留下的公开设置缓存）
+export async function bootWidget({ storage = {}, session = {}, now = Date.parse('2026-10-14T12:00:00Z'), hall = false, routes = null, globals = {}, settings = {}, sessionStore = {} } = {}) {
   const clock = new FakeClock(now)
   const doc = new FakeDocument()
   const el = (tag, id) => { const e = doc.createElement(tag); if (id) { e.id = id; doc.byId[id] = e } return e }
@@ -206,11 +207,17 @@ export async function bootWidget({ storage = {}, session = {}, now = Date.parse(
     const more = el('button', 'hallMore'); more.hidden = true; scroll.appendChild(more)
     scroll.appendChild(el('div', 'hallMsgs'))
     for (const id of ['hallNewBtn', 'hallToast']) { const e = el('div', id); e.hidden = true; pane.appendChild(e) }
-    pane.appendChild(el('div', 'hallPendingList'))
-    pane.appendChild(el('textarea', 'hallInput'))
+    // [123] 文字聊天暂停提示 + 输入区容器（待发送附件与输入框）
+    const chatPaused = el('div', 'hallChatPaused'); chatPaused.hidden = true; pane.appendChild(chatPaused)
+    chatPaused.appendChild(el('span', 'hallChatPausedText'))
+    const inputWrap = el('div', 'hallInputWrap'); pane.appendChild(inputWrap)
+    inputWrap.appendChild(el('div', 'hallPendingList'))
+    inputWrap.appendChild(el('textarea', 'hallInput'))
     pane.appendChild(el('button', 'hallFileBtn'))
     pane.appendChild(el('input', 'hallFileInput'))
     pane.appendChild(withIcon('hallMicBtn', 'hallMicLabel'))
+    const voicePaused = el('span', 'hallVoicePaused'); voicePaused.hidden = true; pane.appendChild(voicePaused)
+    voicePaused.appendChild(el('span', 'hallVoicePausedText'))
     const cam = withIcon('hallCamBtn', 'hallCamLabel'); cam.hidden = true; pane.appendChild(cam)
     pane.appendChild(el('button', 'hallSendBtn'))
     pane.appendChild(el('div', 'hallAudioSink'))
@@ -232,7 +239,7 @@ export async function bootWidget({ storage = {}, session = {}, now = Date.parse(
   const posted = []
   const parentWindow = { postMessage: (msg) => posted.push(msg), location: { href: 'https://host.example/page' }, document: { title: '宿主页' } }
   const localStorage = new FakeStorage(storage)
-  const sessionStorage = new FakeStorage()
+  const sessionStorage = new FakeStorage(sessionStore)
   const fetchCalls = []
   const respond = (body, status = 200) => ({ status, ok: status < 400, headers: { get: () => null }, json: async () => JSON.parse(JSON.stringify(body)) })
   async function fetch(url, opts) {
@@ -297,6 +304,7 @@ export async function bootWidget({ storage = {}, session = {}, now = Date.parse(
     input,
     posted,
     localStorage,
+    sessionStorage,
     fetchCalls,
     flush,
     ws: () => sockets[sockets.length - 1],

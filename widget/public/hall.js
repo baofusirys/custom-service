@@ -5,7 +5,7 @@
  * 依赖：hall-core.js（纯逻辑）、vendor/livekit-client-2.23.0.umd.js（空闲时异步加载，Apache-2.0）。
  * 与 chat.js 的关系：chat.js 负责私聊与访客 WS 连接，加载完成后调用 CSHall.attach(bridge) 把
  *   令牌、WS 发送、上传、大图查看、时间格式化等公共能力借给本模块；本模块不另建 WS 连接。
- * 契约：_internal/reports/hall-contract.md
+ * 契约：_internal/reports/hall-contract.md（[123] 第 10 节：客服可控的总开关 / 文字聊天 / 语音 / 视频开关）
  */
 (function () {
   'use strict';
@@ -108,7 +108,12 @@
     channel: null,
     hostOrigin: '',
     noMoreHistory: false,
-    loadingMore: false
+    loadingMore: false,
+    // [123] 总开关：关闭时访客所在页签、关闭前的阶段、关闭期间是否有私聊往来（决定重新打开后的页签与是否自动入厅）
+    closedFromTab: '',
+    phaseBeforeClose: '',
+    privateActivity: false,
+    settingsSeq: 0            // 已处理的 hall_settings 广播数：入场请求期间收到过广播时以广播为准
   };
 
   function $(id) { return document.getElementById(id); }
@@ -148,6 +153,8 @@
       scroll: $('hallScroll'), goPrivate: $('hallGoPrivate'), more: $('hallMore'), msgs: $('hallMsgs'), newBtn: $('hallNewBtn'),
       toast: $('hallToast'),
       pendingList: $('hallPendingList'), input: $('hallInput'), fileBtn: $('hallFileBtn'), fileInput: $('hallFileInput'),
+      inputWrap: $('hallInputWrap'), chatPaused: $('hallChatPaused'), chatPausedText: $('hallChatPausedText'),
+      voicePaused: $('hallVoicePaused'), voicePausedText: $('hallVoicePausedText'),
       micBtn: $('hallMicBtn'), micLabel: $('hallMicLabel'), camBtn: $('hallCamBtn'), camLabel: $('hallCamLabel'),
       sendBtn: $('hallSendBtn'), audioSink: $('hallAudioSink')
     };
@@ -255,37 +262,74 @@
   // 访客公开设置（chat.js 拉取 /api/visitor/settings 后转交）
   function onSettings(data) {
     if (!data || typeof data !== 'object') return;
-    if (data.hall_enabled === undefined && data.hall_video_enabled === undefined) return;
+    if (data.hall_enabled === undefined && data.hall_video_enabled === undefined &&
+        data.hall_chat_enabled === undefined && data.hall_voice_enabled === undefined) return;
     applySettings(Core.normalizeSettings(data, S.settings), 'public');
   }
+  // source：public（/api/visitor/settings）| ws（hall_settings 广播）| join（入场返回 / 入场错误码）| local（开麦、上传等接口错误码推断）
   function applySettings(next, source) {
     var prev = S.settings;
     S.settings = next;
+    if (source !== 'public') syncPublicCache();
     if (!next.enabled) {
       if (S.phase !== 'closed') disableHall();
+      else { renderControls(); postStatus(); }
       return;
     }
+    var ch = Core.switchChanges(prev, next);
     if (S.phase === 'closed') {
-      S.phase = 'idle';
-      if (S.sessionReady) { showTabs(true); S.attempt = 0; scheduleJoin(0); }
+      reopenHall(source);
     } else if (!S.tabsShown && (S.sessionReady || source === 'public')) {
       showTabs(true);
       selectTab('hall');
     }
-    if (prev.videoEnabled && !next.videoEnabled) {
-      if (S.camOn) disableCam({ release: false });
-      if (source === 'ws') toast('管理员已关闭大厅视频');
-    } else if (!prev.videoEnabled && next.videoEnabled && source === 'ws') {
-      toast('管理员已开启大厅视频，您可以打开摄像头');
+    var stopped = { micStopped: false, camStopped: false };
+    if (ch.voice === 'off') {
+      failPermWaiters('microphone');
+      stopped.micStopped = stopMicBySwitch();
+    }
+    if (ch.video === 'off') {
+      failPermWaiters('camera');
+      if (S.camOn) { disableCam({ release: false }); stopped.camStopped = true; }
+    }
+    if (source === 'ws') {
+      var t = Core.switchToastText(ch, stopped);
+      if (t) toast(t);
     }
     renderControls();
     reconcileVideo();
     postStatus();
   }
+  // 运行中得知的开关同步到本标签页的公开设置缓存（下次打开页面时不沿用旧开关）
+  function syncPublicCache() {
+    if (host && typeof host.updatePublicSettings === 'function') host.updatePublicSettings(Core.publicSettingsPatch(S.settings));
+  }
+  // 总开关关闭：与上线前一致，只保留私聊。作废进行中的入厅与重连、断开 LiveKit、退订大厅广播、宿主页胶囊隐藏（状态 off）
   function disableHall() {
+    S.closedFromTab = S.tabsShown ? S.tab : '';
+    S.phaseBeforeClose = S.phase;
+    S.privateActivity = false;
     leave('closed');
+    clearPendingFiles();
     showTabs(false);
+    renderControls();
     postStatus();
+  }
+  // 总开关重新打开：不刷新页面恢复页签并自动入厅（入厅流程同首次加载：按需加载 LiveKit、单次入厅锁防重复连接）
+  function reopenHall(source) {
+    var wasElsewhere = S.phaseBeforeClose === 'elsewhere';
+    var tab = Core.tabAfterReopen(S.closedFromTab, S.privateActivity);
+    S.closedFromTab = '';
+    S.phaseBeforeClose = '';
+    S.privateActivity = false;
+    if (!S.sessionReady) { S.phase = 'idle'; return; }   // 会话就绪后由 onSessionReady 显示页签并入厅
+    showTabs(true);
+    if (els.tabHallDot) els.tabHallDot.hidden = true;
+    if (tab === 'hall') selectTab('hall');
+    if (wasElsewhere) { setPhase('elsewhere'); return; }   // 关闭前已由其他页面收听：仍由那个页面入厅，本页不抢
+    S.attempt = 0;
+    setPhase('idle');
+    scheduleJoin(source === 'ws' ? Core.reopenJoinDelay() : 0);
   }
 
   // ====== 会话就绪 → 空闲时入厅 ======
@@ -369,6 +413,7 @@
     if (!host || !S.sessionReady || !S.settings.enabled || S.joinInFlight) return;
     if (!host.getToken()) return;
     var seq = ++S.joinSeq;
+    var settingsSeq = S.settingsSeq;
     var startedAt = now();
     S.joinInFlight = true;
     announceTakeover();
@@ -381,12 +426,12 @@
       if (seq !== S.joinSeq) return;
       var LK = res[0], resp = res[1];
       if (!resp.ok) { handleJoinError(resp); return; }
-      var info = Core.validateJoinData(resp.data, location.protocol);
+      var info = Core.validateJoinData(resp.data, location.protocol, S.settings);
       if (!info) { setPhase('error', '大厅服务返回的数据异常，稍后自动重试'); scheduleRetry(); return; }
       S.me = { identity: info.identity, name: info.name };
-      S.settings = Object.assign({}, S.settings, {
-        videoEnabled: info.settings.videoEnabled, maxSpeakers: info.settings.maxSpeakers, maxCameras: info.settings.maxCameras
-      });
+      // 入场返回的视频 / 文字 / 语音开关与上限是服务端当时的状态；请求期间已收到 hall_settings 广播时以广播为准
+      if (settingsSeq === S.settingsSeq) applySettings(info.settings, 'join');
+      if (seq !== S.joinSeq) return;
       ingestBatch(info.history, { initial: true, since: startedAt });
       S.lastHistoryAt = now();
       renderControls();
@@ -857,6 +902,10 @@
     clearTimeout(w.timer);
     w.resolve(ok);
   }
+  // 开关关闭时立即结束对应来源的等待（不再等满 PERMISSION_WAIT_MS）
+  function failPermWaiters(source) {
+    S.permWaiters.slice().forEach(function (w) { if (w.source === source) finishWaiter(w, false); });
+  }
   function resolvePermWaiters(fail) {
     S.permWaiters.slice().forEach(function (w) {
       if (fail) finishWaiter(w, false);
@@ -892,6 +941,7 @@
   // ====== 麦克风 ======
   async function enableMic() {
     if (S.micBusy || S.micOn) return;
+    if (!S.settings.voiceEnabled) { toast(Core.errorText(40377)); renderControls(); return; }
     var room = S.room;
     if (S.phase !== 'live' || !room) { toast('大厅语音尚未连接，暂时无法开麦'); return; }
     if (S.voiceBusy) { toast('正在与客服语音通话，通话结束后才能在大厅开麦'); return; }
@@ -902,10 +952,14 @@
       if (!resp.ok) { onActionError(resp, 'mic'); return; }
       S.micQuota = resp.data && typeof resp.data === 'object' ? resp.data : null;
       if (room !== S.room) { releaseQuota('mic'); return; }
+      // 等待期间客服关闭了语音：服务端已收回权限并清空名额，放弃发布（不再调用 /hall/mic）
+      if (!S.settings.voiceEnabled) return;
       await waitForPublishPermission(room, 'microphone');
       if (room !== S.room) { releaseQuota('mic'); return; }
+      if (!S.settings.voiceEnabled) return;
       try {
         await room.localParticipant.setMicrophoneEnabled(true);
+        if (!S.settings.voiceEnabled || room !== S.room) { await stopLocal(room, 'microphone'); return; }
         S.micOn = true;
       } catch (e) {
         toast(Core.mediaErrorText(e, 'mic'));
@@ -931,10 +985,23 @@
       schedulePeople();
     }
   }
-  // 开麦 / 开摄像头接口失败：大厅已关闭（40371）时按关闭处理（只保留私聊），其余给出中文提示
+  // 开麦 / 开摄像头接口失败：大厅已关闭（40371）时按关闭处理（只保留私聊）；语音已关闭（40377）/ 视频未开启（40375）
+  // 时同步对应开关（隐藏按钮并提示）；其余给出中文提示
   function onActionError(resp, action) {
-    if (resp.code === 40371) { applySettings(Object.assign({}, S.settings, { enabled: false }), 'join'); return; }
+    if (resp.code === 40371) { applySettings(Object.assign({}, S.settings, { enabled: false }), 'local'); return; }
+    if (resp.code === 40377) { applySettings(Object.assign({}, S.settings, { voiceEnabled: false }), 'local'); toast(Core.errorText(40377)); return; }
+    if (resp.code === 40375) { applySettings(Object.assign({}, S.settings, { videoEnabled: false }), 'local'); toast(Core.errorText(40375)); return; }
     toast(Core.errorText(resp.code, { action: action, data: resp.data, msg: resp.msg }));
+  }
+  // 语音开关关闭：正在发布的麦克风立即停止（服务端已收回权限并清空名额，不再调用 /hall/mic）。
+  // 开麦流程进行中（micBusy）时由 enableMic 的后续检查放弃发布。返回是否关掉了正在发布的麦克风
+  function stopMicBySwitch() {
+    if (!S.micOn) return false;
+    var room = S.room;
+    S.micOn = false;
+    stopLocal(room, 'microphone').then(null, logErr);
+    schedulePeople();
+    return true;
   }
   function releaseQuota(kind) {
     return requestJSON('POST', kind === 'camera' ? '/api/visitor/hall/camera' : '/api/visitor/hall/mic', { on: false }).catch(function () {});
@@ -952,10 +1019,13 @@
       var resp = await requestJSON('POST', '/api/visitor/hall/camera', { on: true });
       if (!resp.ok) { onActionError(resp, 'camera'); return; }
       if (room !== S.room) { releaseQuota('camera'); return; }
+      if (!S.settings.videoEnabled) return;   // 等待期间视频被关闭：服务端已收回全部摄像头
       await waitForPublishPermission(room, 'camera');
       if (room !== S.room) { releaseQuota('camera'); return; }
+      if (!S.settings.videoEnabled) return;
       try {
         await room.localParticipant.setCameraEnabled(true);
+        if (!S.settings.videoEnabled || room !== S.room) { await stopLocal(room, 'camera'); return; }
         S.camOn = true;
       } catch (e) {
         toast(Core.mediaErrorText(e, 'camera'));
@@ -1092,7 +1162,7 @@
       case 'hall_subscribed': if (env.id && env.id === S.subscribeId) S.subscribeAttempt = 0; break;
       case 'hall_unsubscribed': break;
       case 'hall_deleted': if (Core.validId(env.id)) removeMessage(env.id); break;
-      case 'hall_settings': applySettings(Core.normalizeSettings(env.extra, S.settings), 'ws'); break;
+      case 'hall_settings': S.settingsSeq++; applySettings(Core.normalizeSettings(env.extra, S.settings), 'ws'); break;
       case 'hall_moderation': onModeration(env.extra || {}); break;
       case 'error': onError(env); break;
     }
@@ -1119,6 +1189,8 @@
       return;
     }
     if (S.pending[env.id]) markFailed(env.id, text);
+    // 客服已关闭大厅文字聊天（广播可能晚于发送）：切换为暂停状态
+    if (Core.isChatClosedError(text) && S.settings.chatEnabled) applySettings(Object.assign({}, S.settings, { chatEnabled: false }), 'local');
   }
   function onModeration(extra) {
     var action = extra.action;
@@ -1301,8 +1373,9 @@
   }
 
   // ====== 发送 ======
-  function canChat() { return S.subscribed && !!host && host.isWSOpen(); }
+  function canChat() { return S.settings.chatEnabled && S.subscribed && !!host && host.isWSOpen(); }
   function chatBlockedText() {
+    if (!S.settings.chatEnabled) return Core.CHAT_PAUSED_TEXT;
     if (S.phase === 'kicked') return S.notice || Core.errorText(40372);
     if (S.phase === 'elsewhere') return '已在其他页面收听大厅，请在当前页面点击“在此页面收听”';
     if (S.phase === 'full') return Core.errorText(40977);
@@ -1410,6 +1483,7 @@
     if (item.chip.parentNode) item.chip.parentNode.removeChild(item.chip);
     if (!S.pendingFiles.length && els.pendingList) els.pendingList.classList.remove('is-show');
   }
+  function clearPendingFiles() { S.pendingFiles.slice().forEach(removePendingFile); }
   async function sendFiles() {
     var items = S.pendingFiles.slice();
     items.forEach(removePendingFile);
@@ -1422,7 +1496,13 @@
       try {
         data = await host.upload(file, { scope: 'hall' });
       } catch (e) {
-        if (e && e.code === 40371) { applySettings(Object.assign({}, S.settings, { enabled: false }), 'join'); return; }
+        if (e && e.code === 40371) { applySettings(Object.assign({}, S.settings, { enabled: false }), 'local'); return; }
+        if (e && e.code === 40378) {
+          // 客服已关闭大厅文字聊天：切换为暂停状态，剩余文件不再发送
+          applySettings(Object.assign({}, S.settings, { chatEnabled: false }), 'local');
+          toast(Core.errorText(40378));
+          return;
+        }
         toast(Core.errorText(e && e.code, { action: 'upload', data: e && e.data, msg: e && e.message }));
         continue;
       }
@@ -1552,7 +1632,9 @@
   }
   function renderControls() {
     var live = S.phase === 'live' && !!S.room;
+    var view = Core.switchView(S.settings);
     if (els.micBtn) {
+      els.micBtn.hidden = !view.micButton;
       els.micBtn.disabled = S.micBusy || (!live && !S.micOn);
       els.micBtn.setAttribute('aria-pressed', S.micOn ? 'true' : 'false');
       els.micBtn.classList.toggle('is-on', S.micOn);
@@ -1563,7 +1645,7 @@
       els.micBtn.title = S.micOn ? '关闭麦克风' : '打开麦克风（大厅所有人都能听到）';
     }
     if (els.camBtn) {
-      els.camBtn.hidden = !S.settings.videoEnabled;
+      els.camBtn.hidden = !view.camButton;
       els.camBtn.disabled = S.camBusy || (!live && !S.camOn);
       els.camBtn.setAttribute('aria-pressed', S.camOn ? 'true' : 'false');
       els.camBtn.classList.toggle('is-on', S.camOn);
@@ -1579,10 +1661,21 @@
       if (els.muteLabel) els.muteLabel.textContent = S.muted ? '已静音' : '静音大厅';
       els.muteBtn.title = S.muted ? '恢复播放大厅声音' : '静音大厅（只影响本机播放）';
     }
+    if (els.voicePaused) {
+      els.voicePaused.hidden = !view.voicePaused;
+      if (els.voicePausedText) els.voicePausedText.textContent = view.voicePaused;
+    }
+    // 文字聊天暂停：隐藏输入框（含待发送附件）、附件与发送按钮，显示暂停提示；历史消息照常显示
     var chatOk = S.phase !== 'elsewhere' && S.phase !== 'kicked' && S.phase !== 'closed';
-    if (els.sendBtn) els.sendBtn.disabled = !chatOk;
-    if (els.input) els.input.disabled = !chatOk;
-    if (els.fileBtn) els.fileBtn.disabled = !chatOk;
+    if (els.inputWrap) els.inputWrap.hidden = !view.chatInput;
+    else if (els.input) els.input.hidden = !view.chatInput;   // 旧版页面结构兜底
+    if (els.sendBtn) { els.sendBtn.hidden = !view.chatInput; els.sendBtn.disabled = !chatOk; }
+    if (els.input) els.input.disabled = !chatOk || !view.chatInput;
+    if (els.fileBtn) { els.fileBtn.hidden = !view.chatInput; els.fileBtn.disabled = !chatOk; }
+    if (els.chatPaused) {
+      els.chatPaused.hidden = !view.chatPaused;
+      if (els.chatPausedText) els.chatPausedText.textContent = view.chatPaused;
+    }
   }
 
   // ====== 提示条 ======
@@ -1641,7 +1734,12 @@
     reconcileVideo();
   }
   function onPrivateIncoming() {
+    if (S.phase === 'closed') S.privateActivity = true;
     if (!isPrivateVisible() && els.tabPrivateDot) els.tabPrivateDot.hidden = false;
+  }
+  // 访客在私聊页发出消息（chat.js 调用）：大厅关闭期间有私聊往来时，重新打开后不把访客切离私聊页
+  function onPrivateActivity() {
+    if (S.phase === 'closed') S.privateActivity = true;
   }
   function isPrivateVisible() { return !S.tabsShown || S.tab === 'private'; }
 
@@ -1655,6 +1753,7 @@
     onWSClose: safe(onWSClose),
     onWidgetState: safe(onWidgetState),
     onPrivateIncoming: safe(onPrivateIncoming),
+    onPrivateActivity: safe(onPrivateActivity),
     isPrivateVisible: isPrivateVisible,
     onVoiceState: safe(onVoiceState),
     onHostCommand: safe(onHostCommand)

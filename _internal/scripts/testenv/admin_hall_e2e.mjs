@@ -5,7 +5,7 @@
 // 访客由真实 widget 页面（/widget/chat.html）扮演：打开即自动进入大厅（契约第 1 节）。
 // 运行（Mac 测试环境）：ADMIN_BOOTSTRAP_PASSWORD=... node _internal/scripts/testenv/admin_hall_e2e.mjs
 // 可选环境变量：QA_ADMIN_USER（默认 qa_admin）、CS_E2E_BASE（默认 http://127.0.0.1:18090）、CS_E2E_API（默认 http://127.0.0.1:18080）、CHROME_PATH。
-// 结束时把 5 项大厅设置恢复为运行前的值；被移出的测试访客 10 分钟后自动解除。
+// 结束时把 7 项大厅设置恢复为运行前的值；被移出的测试访客 10 分钟后自动解除。
 import { chromium } from 'playwright-core';
 import { mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -16,7 +16,8 @@ const USER = process.env.QA_ADMIN_USER || 'qa_admin';
 const PASS = process.env.ADMIN_BOOTSTRAP_PASSWORD;
 const CHROME = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const SHOTS = (process.env.HOME || '.') + '/cs-testenv/shots/admin-hall-e2e';
-const HALL_KEYS = ['hall_enabled', 'hall_video_enabled', 'hall_max_speakers', 'hall_max_cameras', 'hall_max_participants'];
+// [123] 含所有客服可切换的文字聊天 / 语音开关，保证基线一致并在结束时一并恢复
+const HALL_KEYS = ['hall_enabled', 'hall_chat_enabled', 'hall_voice_enabled', 'hall_video_enabled', 'hall_max_speakers', 'hall_max_cameras', 'hall_max_participants'];
 // Chromium 假媒体参数：自动同意授权、用合成音视频代替真实设备、允许无手势自动播放
 const FAKE_MEDIA_ARGS = ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'];
 
@@ -47,8 +48,8 @@ const api = async (method, path, body) => (await fetch(API + path, { method, hea
 const original = (await api('GET', '/api/admin/settings')).data || {};
 const restore = Object.fromEntries(HALL_KEYS.filter((k) => typeof original[k] === 'string').map((k) => [k, original[k]]));
 const setHall = (kv) => api('POST', '/api/admin/settings', kv);
-const r0 = await setHall({ hall_enabled: 'true', hall_video_enabled: 'false', hall_max_speakers: '6', hall_max_cameras: '2', hall_max_participants: '100' });
-check('测试前置：大厅设置可保存（5 个键在设置白名单内）', r0 && r0.code === 0, JSON.stringify(r0));
+const r0 = await setHall({ hall_enabled: 'true', hall_chat_enabled: 'true', hall_voice_enabled: 'true', hall_video_enabled: 'false', hall_max_speakers: '6', hall_max_cameras: '2', hall_max_participants: '100' });
+check('测试前置：大厅设置可保存（7 个键在设置白名单内）', r0 && r0.code === 0, JSON.stringify(r0));
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: FAKE_MEDIA_ARGS });
 const ctxOpts = { locale: 'zh-CN', timezoneId: 'America/New_York', permissions: ['microphone', 'camera'] };

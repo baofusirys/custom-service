@@ -140,8 +140,10 @@ func (s *Service) DeleteMessage(ctx context.Context, op Actor, id string) error 
 
 // AuthorizeUpload 大厅附件上传前置校验（scope=hall）：大厅开启；访客不在禁入期（被拉黑允许，静默）。
 func (s *Service) AuthorizeUpload(ctx context.Context, a Actor) error {
-	if !s.Settings(ctx).Enabled {
+	if st := s.Settings(ctx); !st.Enabled {
 		return errHallClosed
+	} else if !st.ChatEnabled {
+		return errChatDisabled
 	}
 	identity, _ := s.identityOf(a)
 	remain, err := s.state.banRemaining(ctx, identity)
@@ -304,8 +306,12 @@ func (s *Service) processChat(ctx context.Context, p Peer, a Actor, e *ws.Envelo
 		frameError(p, "", "消息标识无效，请重试")
 		return
 	}
-	if !s.Settings(ctx).Enabled {
+	if st := s.Settings(ctx); !st.Enabled {
 		frameError(p, e.ID, "大厅已关闭")
+		return
+	} else if !st.ChatEnabled {
+		// [123] 大厅文字/图片/文件聊天已被客服关闭（对访客与客服都生效）
+		frameError(p, e.ID, "大厅聊天已关闭")
 		return
 	}
 	if !s.hub.Subscribed(p) {

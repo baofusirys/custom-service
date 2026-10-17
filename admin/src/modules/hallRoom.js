@@ -239,6 +239,14 @@ export class HallRoomClient {
     await lp.setMicrophoneEnabled(!!on)
   }
 
+  // [123] 大厅语音被暂停：取消发布麦克风轨道并停止采集（释放设备、浏览器麦克风指示灯熄灭），
+  // 而不是仅静音；语音恢复后再次开麦会重新采集并发布。
+  async stopMicrophone() {
+    const lp = this.room.localParticipant
+    const pub = lp?.getTrackPublication(Track.Source.Microphone)
+    if (pub?.track) await lp.unpublishTrack(pub.track, true)
+  }
+
   async setCamera(on) {
     const lp = this.room.localParticipant
     if (on) {

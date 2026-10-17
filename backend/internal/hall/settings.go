@@ -14,10 +14,13 @@ const (
 	KeyMaxSpeakers     = "hall_max_speakers"
 	KeyMaxCameras      = "hall_max_cameras"
 	KeyMaxParticipants = "hall_max_participants"
+	// [123] 所有客服可切换的开关
+	KeyChatEnabled  = "hall_chat_enabled"
+	KeyVoiceEnabled = "hall_voice_enabled"
 )
 
 // SettingKeys 全部大厅设置键（管理接口白名单用）。
-var SettingKeys = []string{KeyEnabled, KeyVideoEnabled, KeyMaxSpeakers, KeyMaxCameras, KeyMaxParticipants}
+var SettingKeys = []string{KeyEnabled, KeyVideoEnabled, KeyMaxSpeakers, KeyMaxCameras, KeyMaxParticipants, KeyChatEnabled, KeyVoiceEnabled}
 
 // Settings 生效中的大厅设置。
 type Settings struct {
@@ -26,10 +29,12 @@ type Settings struct {
 	MaxSpeakers     int
 	MaxCameras      int
 	MaxParticipants int
+	ChatEnabled     bool // [123] 大厅文字/图片/文件聊天
+	VoiceEnabled    bool // [123] 大厅语音
 }
 
 // DefaultSettings 契约第 3 节默认值。
-var DefaultSettings = Settings{Enabled: true, VideoEnabled: false, MaxSpeakers: 6, MaxCameras: 2, MaxParticipants: 100}
+var DefaultSettings = Settings{Enabled: true, VideoEnabled: false, MaxSpeakers: 6, MaxCameras: 2, MaxParticipants: 100, ChatEnabled: true, VoiceEnabled: true}
 
 type intRange struct{ min, max int }
 
@@ -45,6 +50,8 @@ var settingLabels = map[string]string{
 	KeyMaxSpeakers:     "同时开麦访客上限",
 	KeyMaxCameras:      "同时开摄像头上限",
 	KeyMaxParticipants: "大厅人数上限",
+	KeyChatEnabled:     "大厅文字聊天开关",
+	KeyVoiceEnabled:    "大厅语音开关",
 }
 
 // decimalPattern 只接受不带符号、不带前导零的十进制整数（最多 4 位），拒绝 "6.5"、"+6"、"06"、"0x6"。
@@ -64,7 +71,7 @@ func ValidateSettingValue(key, raw string) (string, error) {
 	}
 	v := strings.TrimSpace(raw)
 	switch key {
-	case KeyEnabled, KeyVideoEnabled:
+	case KeyEnabled, KeyVideoEnabled, KeyChatEnabled, KeyVoiceEnabled:
 		if v != "true" && v != "false" {
 			return "", errors.New(label + "只能是 true 或 false")
 		}
@@ -90,6 +97,12 @@ func ParseSettings(m map[string]string) Settings {
 	if v, err := ValidateSettingValue(KeyVideoEnabled, m[KeyVideoEnabled]); err == nil {
 		s.VideoEnabled = v == "true"
 	}
+	if v, err := ValidateSettingValue(KeyChatEnabled, m[KeyChatEnabled]); err == nil {
+		s.ChatEnabled = v == "true"
+	}
+	if v, err := ValidateSettingValue(KeyVoiceEnabled, m[KeyVoiceEnabled]); err == nil {
+		s.VoiceEnabled = v == "true"
+	}
 	if v, err := ValidateSettingValue(KeyMaxSpeakers, m[KeyMaxSpeakers]); err == nil {
 		s.MaxSpeakers, _ = strconv.Atoi(v)
 	}
@@ -109,6 +122,8 @@ func (s Settings) BroadcastExtra() map[string]any {
 		"video_enabled": s.VideoEnabled,
 		"max_speakers":  s.MaxSpeakers,
 		"max_cameras":   s.MaxCameras,
+		"chat_enabled":  s.ChatEnabled,
+		"voice_enabled": s.VoiceEnabled,
 	}
 }
 
@@ -120,5 +135,7 @@ func (s Settings) StateView() map[string]any {
 		"max_speakers":     s.MaxSpeakers,
 		"max_cameras":      s.MaxCameras,
 		"max_participants": s.MaxParticipants,
+		"chat_enabled":     s.ChatEnabled,
+		"voice_enabled":    s.VoiceEnabled,
 	}
 }

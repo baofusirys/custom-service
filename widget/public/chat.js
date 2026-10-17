@@ -735,7 +735,7 @@
   function applySettings(data) {
     if (!data) return;
     lastPublicSettings = data;
-    hallCall('onSettings', data);   // [119] hall_enabled / hall_video_enabled
+    hallCall('onSettings', data);   // [119] hall_enabled / hall_video_enabled；[123] hall_chat_enabled / hall_voice_enabled
     notifySound = data.notify_sound || 'classic';
     if (data.widget_title) {
       var titleEl = document.querySelector('header .header-title');
@@ -749,27 +749,56 @@
     }
   }
 
+  // [123] 本页是否已从服务端拉到过一次公开设置（大厅总开关缓存为关闭时据此只向服务端确认一次）
+  var settingsFetchedFresh = false;
+
   async function loadPublicSettings() {
     // [058] 优先 sessionStorage 缓存（5min 内不再 fetch，省 /api/visitor/settings 请求）
+    var cachedData = null;
     try {
       var cached = sessionStorage.getItem(SETTINGS_CACHE_KEY);
       var cachedAt = sessionStorage.getItem(SETTINGS_CACHE_AT_KEY);
       if (cached && cachedAt && (Date.now() - parseInt(cachedAt, 10) < SETTINGS_CACHE_TTL)) {
-        applySettings(JSON.parse(cached));
-        return;
+        cachedData = JSON.parse(cached);
+        // [123] 大厅总开关可由客服随时重新打开：缓存显示「大厅关闭」时，本页先向服务端确认一次，
+        //       避免重新打开后 5 分钟内打开的页面仍按旧值不显示大厅；确认后（含 bootstrap 重试）照常使用缓存
+        if (!(cachedData && cachedData.hall_enabled === false && !settingsFetchedFresh)) {
+          applySettings(cachedData);
+          return;
+        }
       }
-    } catch (e) {}
+    } catch (e) { cachedData = null; }
     try {
       var r = await fetch(httpBase + '/api/visitor/settings');
       var data = await r.json();
       if (data.code === 0 && data.data) {
+        settingsFetchedFresh = true;
         applySettings(data.data);
         try {
           sessionStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(data.data));
           sessionStorage.setItem(SETTINGS_CACHE_AT_KEY, String(Date.now()));
         } catch (e) {}
+        return;
       }
     } catch {}
+    if (cachedData) applySettings(cachedData);   // 服务端暂不可用：退回未过期的缓存
+  }
+
+  // [123] 大厅模块在运行中得知开关变化（hall_settings 广播 / 接口错误码）后，同步本标签页的公开设置与缓存，
+  //       只接受 4 个大厅开关键的布尔值；缓存时间戳不变（仍按首次拉取计算 5 分钟有效期）
+  var HALL_PUBLIC_KEYS = ['hall_enabled', 'hall_video_enabled', 'hall_chat_enabled', 'hall_voice_enabled'];
+  function updatePublicHallSettings(patch) {
+    if (!patch || typeof patch !== 'object' || !lastPublicSettings || typeof lastPublicSettings !== 'object') return;
+    var next = Object.assign({}, lastPublicSettings);
+    var changed = false;
+    HALL_PUBLIC_KEYS.forEach(function (k) {
+      if (typeof patch[k] === 'boolean' && next[k] !== patch[k]) { next[k] = patch[k]; changed = true; }
+    });
+    if (!changed) return;
+    lastPublicSettings = next;
+    try {
+      if (sessionStorage.getItem(SETTINGS_CACHE_KEY)) sessionStorage.setItem(SETTINGS_CACHE_KEY, JSON.stringify(next));
+    } catch (e) {}
   }
 
   // [058] bootstrap 重写：跟 [054] connectWS 同模式防多实例并发死循环打爆 backend 限流
@@ -1287,6 +1316,7 @@
     var files = pendingFiles.map(function (it) { return it.file; });
     if (!text && files.length === 0) return;
     if (!alive) { setStatus('未连接', false); return; }
+    hallCall('onPrivateActivity');   // [123] 大厅关闭期间有私聊往来：重新打开后不把访客切离私聊页
     if (text) {
       var messageID = newMessageID();
       ws.send(JSON.stringify({ type: 'chat', conv: convID, id: messageID, content: text, ts: Date.now(), prio: 0 }));
@@ -1453,6 +1483,7 @@
         try { if (window.parent && window.parent !== window) window.parent.postMessage(msg, targetOrigin || '*'); } catch (e) {}
       },
       getPublicSettings: function () { return lastPublicSettings; },
+      updatePublicSettings: updatePublicHallSettings,
       // 直接打开 chat.html（不在 iframe 中）时视为一直展开
       isWidgetOpen: function () { return isWidgetOpen || window.parent === window; },
       // 切回私聊页：补发已读并滚到最新

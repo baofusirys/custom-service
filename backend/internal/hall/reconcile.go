@@ -147,6 +147,12 @@ func (s *Service) ReconcileOnce(ctx context.Context) ReconcileStats {
 		}
 		_ = s.state.clearSlots(ctx, slotCamera)
 	}
+	if !st.VoiceEnabled {
+		if members, err := s.state.slotMembers(ctx, slotSpeaker); err == nil {
+			stats.Released += len(members)
+		}
+		_ = s.state.clearSlots(ctx, slotSpeaker)
+	}
 	// 2) 逐个参与者：禁入移出 / 拉黑释放 / 续租 / 收回多余权限
 	for _, id := range ids {
 		p := inRoom[id]
@@ -230,14 +236,25 @@ func (s *Service) OnSettingsChanged(ctx context.Context, before Settings) Settin
 	s.biz.Info("hall_settings_changed", zap.String("event", "hall_settings_changed"),
 		zap.Bool("enabled_before", before.Enabled), zap.Bool("enabled", after.Enabled),
 		zap.Bool("video_before", before.VideoEnabled), zap.Bool("video", after.VideoEnabled),
+		zap.Bool("chat_before", before.ChatEnabled), zap.Bool("chat", after.ChatEnabled),
+		zap.Bool("voice_before", before.VoiceEnabled), zap.Bool("voice", after.VoiceEnabled),
 		zap.Int("max_speakers", after.MaxSpeakers), zap.Int("max_cameras", after.MaxCameras), zap.Int("max_participants", after.MaxParticipants))
 	if !s.media.Enabled() {
 		return after
 	}
 	if before.Enabled && !after.Enabled {
 		s.runBackground("hall_disable_remove_all", 2*time.Minute, func(bctx context.Context) { s.removeAll(bctx) })
-	} else if before.VideoEnabled && !after.VideoEnabled {
+		return after
+	}
+	if before.VideoEnabled && !after.VideoEnabled {
 		s.runBackground("hall_video_disable_revoke", time.Minute, func(bctx context.Context) { s.revokeAllCameras(bctx, after) })
+	}
+	if before.VoiceEnabled && !after.VoiceEnabled {
+		s.runBackground("hall_voice_disable_revoke", time.Minute, func(bctx context.Context) { s.revokeAllMics(bctx, after) })
+	}
+	if !before.VoiceEnabled && after.VoiceEnabled {
+		// [123] 语音重新打开：已在大厅的客服无需重进即可恢复麦克风权限（访客仍需按名额开麦）
+		s.runBackground("hall_voice_enable_grant", time.Minute, func(bctx context.Context) { s.regrantAgentMics(bctx, after) })
 	}
 	return after
 }
@@ -297,6 +314,54 @@ func (s *Service) revokeAllCameras(ctx context.Context, st Settings) {
 	}
 	s.biz.Info("hall_video_disabled_revoke", zap.String("event", "hall_video_disabled_revoke"), zap.Int("revoked", revoked), zap.Int("failed", failed), zap.Error(err))
 	s.auditSystem("hall_system_revoke_cameras", uuid.NewString(), zap.Int("revoked", revoked), zap.Int("failed", failed), zap.Bool("list_ok", err == nil))
+}
+
+// revokeAllMics [123] 大厅语音关闭：清空开麦名额并收回所有人（含客服）的麦克风权限。
+func (s *Service) revokeAllMics(ctx context.Context, st Settings) {
+	targets := map[string]bool{}
+	if members, err := s.state.slotMembers(ctx, slotSpeaker); err == nil {
+		for _, m := range members {
+			targets[m] = true
+		}
+	}
+	_ = s.state.clearSlots(ctx, slotSpeaker)
+	parts, err := s.media.ListParticipants(ctx, s.room)
+	for _, p := range parts {
+		if p.HasTrack(livekit.SourceMicrophone) || p.CanPublishSource(livekit.SourceMicrophone) {
+			targets[p.Identity] = true
+		}
+	}
+	revoked, failed := 0, 0
+	for _, id := range sortedKeys(targets) {
+		if !ValidIdentity(id) {
+			continue
+		}
+		if _, serr := s.syncPermission(ctx, id, st); serr == nil {
+			revoked++
+			s.notifyTarget(ctx, id, map[string]any{"action": "muted"})
+		} else {
+			failed++
+		}
+	}
+	s.biz.Info("hall_voice_disabled_revoke", zap.String("event", "hall_voice_disabled_revoke"), zap.Int("revoked", revoked), zap.Int("failed", failed), zap.Error(err))
+	s.auditSystem("hall_system_revoke_mics", uuid.NewString(), zap.Int("revoked", revoked), zap.Int("failed", failed), zap.Bool("list_ok", err == nil))
+}
+
+// regrantAgentMics [123] 语音重新打开：给房间内的客服恢复麦克风发布权限（被单独静音的客服除外，由 desiredSources 判定）。
+func (s *Service) regrantAgentMics(ctx context.Context, st Settings) {
+	parts, err := s.media.ListParticipants(ctx, s.room)
+	granted, failed := 0, 0
+	for _, p := range parts {
+		if !isAgentIdentity(p.Identity) || p.CanPublishSource(livekit.SourceMicrophone) {
+			continue
+		}
+		if _, serr := s.syncPermission(ctx, p.Identity, st); serr == nil {
+			granted++
+		} else {
+			failed++
+		}
+	}
+	s.biz.Info("hall_voice_enabled_regrant", zap.String("event", "hall_voice_enabled_regrant"), zap.Int("granted", granted), zap.Int("failed", failed), zap.Error(err))
 }
 
 // OnVisitorBlocked 拉黑生效：若该访客正占用开麦/摄像头名额，立即释放并收回权限（静默，不通知访客）。

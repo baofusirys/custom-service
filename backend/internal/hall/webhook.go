@@ -98,7 +98,10 @@ func (s *Service) processWebhook(ctx context.Context, ev *livekit.WebhookEvent) 
 			held, err := s.state.holdsSlot(ctx, slotCamera, identity)
 			revoke = !st.VideoEnabled || (err == nil && !held)
 		case livekit.SourceMicrophone:
-			if isVisitorIdentity(identity) {
+			if !st.VoiceEnabled {
+				revoke = true
+				_, _ = s.state.releaseSlot(ctx, slotSpeaker, identity)
+			} else if isVisitorIdentity(identity) {
 				held, err := s.state.holdsSlot(ctx, slotSpeaker, identity)
 				revoke = err == nil && !held
 			} else if muted, err := s.state.agentMuted(ctx, identity); err == nil && muted {

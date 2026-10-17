@@ -1287,6 +1287,8 @@ var allowedSettingKeys = map[string]bool{
 	hall.KeyMaxSpeakers:     true,
 	hall.KeyMaxCameras:      true,
 	hall.KeyMaxParticipants: true,
+	hall.KeyChatEnabled:     true, // [123]
+	hall.KeyVoiceEnabled:    true, // [123]
 }
 
 // GetSettings 拉所有可见 setting（仅管理员可读全部）
@@ -1380,9 +1382,9 @@ func (h *HTTP) VisitorPublicSettings(c *gin.Context) {
 		"visitor_notify_sound", "widget_title", "voice_call_hint",
 	})
 	// [119] 大厅公开开关（布尔；未配置 LiveKit 时恒为 false）
-	hallEnabled, hallVideo := false, false
+	hallEnabled, hallVideo, hallChat, hallVoice := false, false, false, false
 	if h.hall != nil {
-		hallEnabled, hallVideo = h.hall.PublicFlags(ctx)
+		hallEnabled, hallVideo, hallChat, hallVoice = h.hall.PublicSwitches(ctx)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
@@ -1392,6 +1394,8 @@ func (h *HTTP) VisitorPublicSettings(c *gin.Context) {
 			"voice_call_hint":    defaultIfEmpty(m["voice_call_hint"], "直接呼叫客服"),
 			"hall_enabled":       hallEnabled,
 			"hall_video_enabled": hallVideo,
+			"hall_chat_enabled":  hallChat,  // [123]
+			"hall_voice_enabled": hallVoice, // [123]
 		},
 	})
 }

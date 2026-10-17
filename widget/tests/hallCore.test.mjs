@@ -146,10 +146,94 @@ test('moderationText / mediaErrorText', () => {
 
 test('normalizeSettings：兼容布尔/字符串、取值范围收敛、缺省沿用旧值', () => {
   const d = Core.normalizeSettings(null)
-  assert.deepEqual(d, { enabled: true, videoEnabled: false, maxSpeakers: 6, maxCameras: 2 })
-  assert.deepEqual(Core.normalizeSettings({ hall_enabled: 'false', hall_video_enabled: 'true' }), { enabled: false, videoEnabled: true, maxSpeakers: 6, maxCameras: 2 })
-  assert.deepEqual(Core.normalizeSettings({ enabled: true, video_enabled: false, max_speakers: 99, max_cameras: -1 }), { enabled: true, videoEnabled: false, maxSpeakers: 20, maxCameras: 0 })
-  assert.deepEqual(Core.normalizeSettings({ video_enabled: 'yes' }, { enabled: false, videoEnabled: true, maxSpeakers: 3, maxCameras: 1 }), { enabled: false, videoEnabled: true, maxSpeakers: 3, maxCameras: 1 })
+  assert.deepEqual(d, { enabled: true, videoEnabled: false, chatEnabled: true, voiceEnabled: true, maxSpeakers: 6, maxCameras: 2 })
+  assert.deepEqual(Core.normalizeSettings({ hall_enabled: 'false', hall_video_enabled: 'true' }), { enabled: false, videoEnabled: true, chatEnabled: true, voiceEnabled: true, maxSpeakers: 6, maxCameras: 2 })
+  assert.deepEqual(Core.normalizeSettings({ enabled: true, video_enabled: false, max_speakers: 99, max_cameras: -1 }), { enabled: true, videoEnabled: false, chatEnabled: true, voiceEnabled: true, maxSpeakers: 20, maxCameras: 0 })
+  assert.deepEqual(Core.normalizeSettings({ video_enabled: 'yes' }, { enabled: false, videoEnabled: true, maxSpeakers: 3, maxCameras: 1 }), { enabled: false, videoEnabled: true, chatEnabled: true, voiceEnabled: true, maxSpeakers: 3, maxCameras: 1 })
+})
+
+test('[123] normalizeSettings：文字 / 语音开关三种来源键名、缺省沿用旧值、总开关关闭时不覆盖保留值', () => {
+  // 访客公开设置键名
+  assert.deepEqual(Core.normalizeSettings({ hall_enabled: true, hall_video_enabled: false, hall_chat_enabled: false, hall_voice_enabled: 'false' }),
+    { enabled: true, videoEnabled: false, chatEnabled: false, voiceEnabled: false, maxSpeakers: 6, maxCameras: 2 })
+  // hall_settings.extra / 入场返回键名
+  const ws = Core.normalizeSettings({ enabled: true, video_enabled: true, chat_enabled: true, voice_enabled: false, max_speakers: 4, max_cameras: 1 })
+  assert.deepEqual(ws, { enabled: true, videoEnabled: true, chatEnabled: true, voiceEnabled: false, maxSpeakers: 4, maxCameras: 1 })
+  // 旧后端没有新字段 / 取值不合法：沿用旧值
+  const prev = { enabled: true, videoEnabled: false, chatEnabled: false, voiceEnabled: true, maxSpeakers: 6, maxCameras: 2 }
+  assert.equal(Core.normalizeSettings({ enabled: true, video_enabled: false }, prev).chatEnabled, false)
+  assert.equal(Core.normalizeSettings({ enabled: true, chat_enabled: 'maybe', voice_enabled: null }, prev).chatEnabled, false)
+  assert.equal(Core.normalizeSettings({ enabled: true, chat_enabled: 'maybe', voice_enabled: null }, prev).voiceEnabled, true)
+  // 总开关关闭：服务端派生出的 false 不覆盖保留值；重新打开时以广播真实值为准
+  const off = Core.normalizeSettings({ hall_enabled: false, hall_chat_enabled: false, hall_voice_enabled: false }, { ...prev, chatEnabled: true })
+  assert.equal(off.enabled, false)
+  assert.equal(off.chatEnabled, true)
+  assert.equal(off.voiceEnabled, true)
+  const on = Core.normalizeSettings({ enabled: true, chat_enabled: false, voice_enabled: true }, off)
+  assert.deepEqual([on.enabled, on.chatEnabled, on.voiceEnabled], [true, false, true])
+  // prev 结构残缺时用默认值补齐
+  assert.deepEqual(Core.normalizeSettings({}, { enabled: 'x', chatEnabled: undefined }), Core.normalizeSettings(null))
+})
+
+test('[123] switchView：开关状态 → 界面（页签、输入区、开麦 / 摄像头按钮、暂停提示），视频独立于文字与语音', () => {
+  const all = Core.switchView({ enabled: true, chatEnabled: true, voiceEnabled: true, videoEnabled: false })
+  assert.deepEqual(all, { tabs: true, chatInput: true, chatPaused: '', micButton: true, voicePaused: '', camButton: false })
+  const chatOff = Core.switchView({ enabled: true, chatEnabled: false, voiceEnabled: true, videoEnabled: true })
+  assert.deepEqual(chatOff, { tabs: true, chatInput: false, chatPaused: '大厅文字聊天已暂停', micButton: true, voicePaused: '', camButton: true })
+  const voiceOff = Core.switchView({ enabled: true, chatEnabled: true, voiceEnabled: false, videoEnabled: true })
+  assert.deepEqual(voiceOff, { tabs: true, chatInput: true, chatPaused: '', micButton: false, voicePaused: '大厅语音已暂停', camButton: true })
+  const both = Core.switchView({ enabled: true, chatEnabled: false, voiceEnabled: false, videoEnabled: false })
+  assert.deepEqual(both, { tabs: true, chatInput: false, chatPaused: '大厅文字聊天已暂停', micButton: false, voicePaused: '大厅语音已暂停', camButton: false })
+  // 总开关关闭：大厅整体不显示，也不显示暂停提示（与上线前一致）
+  const hallOff = Core.switchView({ enabled: false, chatEnabled: false, voiceEnabled: false, videoEnabled: true })
+  assert.deepEqual(hallOff, { tabs: false, chatInput: false, chatPaused: '', micButton: false, voicePaused: '', camButton: false })
+  // 缺省（旧数据）按开启处理，视频缺省关闭
+  assert.deepEqual(Core.switchView(null), { tabs: true, chatInput: true, chatPaused: '', micButton: true, voicePaused: '', camButton: false })
+})
+
+test('[123] switchChanges / switchToastText：只对 WS 广播的变化给一次提示，总开关变化不提示', () => {
+  const base = { enabled: true, chatEnabled: true, voiceEnabled: true, videoEnabled: false }
+  assert.deepEqual(Core.switchChanges(base, base), { hall: '', chat: '', voice: '', video: '' })
+  const ch = Core.switchChanges(base, { ...base, chatEnabled: false, voiceEnabled: false, videoEnabled: true })
+  assert.deepEqual(ch, { hall: '', chat: 'off', voice: 'off', video: 'on' })
+  assert.equal(Core.switchToastText(ch, { micStopped: true }), '客服已暂停大厅文字聊天；客服已暂停大厅语音，您的麦克风已关闭；客服已开启大厅视频，您可以打开摄像头')
+  assert.equal(Core.switchToastText(Core.switchChanges({ ...base, chatEnabled: false, voiceEnabled: false }, base)), '大厅文字聊天已恢复；大厅语音已恢复，您可以开麦')
+  assert.equal(Core.switchToastText(Core.switchChanges({ ...base, videoEnabled: true }, base), { camStopped: true }), '客服已关闭大厅视频，您的摄像头已关闭')
+  assert.equal(Core.switchToastText(Core.switchChanges({ ...base, enabled: false }, { ...base, chatEnabled: false })), '', '总开关重新打开时不提示其余开关')
+  assert.equal(Core.switchToastText(Core.switchChanges(base, base)), '')
+  assert.equal(Core.switchToastText(null), '')
+})
+
+test('[123] 错误码 40377 / 40378、聊天关闭错误识别、重新打开后的页签、入厅错峰、公开设置缓存同步', () => {
+  assert.equal(Core.errorText(40377), '大厅语音已关闭')
+  assert.equal(Core.errorText(40377, { action: 'mic' }), '大厅语音已关闭')
+  assert.equal(Core.errorText(40378, { action: 'upload' }), '大厅聊天已关闭')
+  assert.equal(Core.isChatClosedError('大厅聊天已关闭'), true)
+  assert.equal(Core.isChatClosedError({ String: '大厅聊天已关闭', Valid: true }), true)
+  assert.equal(Core.isChatClosedError('发送过于频繁'), false)
+  assert.equal(Core.isChatClosedError(undefined), false)
+  assert.equal(Core.tabAfterReopen('hall', false), 'hall', '关闭前在大厅页、期间无私聊往来：回到大厅')
+  assert.equal(Core.tabAfterReopen('hall', true), 'private', '关闭期间有私聊往来：不切走')
+  assert.equal(Core.tabAfterReopen('private', false), 'private', '关闭前就在私聊页：不切走')
+  assert.equal(Core.tabAfterReopen('', false), 'private', '页面加载时大厅已关闭：不切走')
+  assert.equal(Core.reopenJoinDelay(() => 0), 300)
+  assert.equal(Core.reopenJoinDelay(() => 1), 3000)
+  assert.equal(Core.reopenJoinDelay(() => 0.5), 1650)
+  assert.equal(Core.reopenJoinDelay(() => NaN), 300)
+  for (let i = 0; i < 200; i++) { const v = Core.reopenJoinDelay(); assert.ok(v >= 300 && v <= 3000, String(v)) }
+  assert.deepEqual(Core.publicSettingsPatch({ enabled: true, chatEnabled: false, voiceEnabled: true, videoEnabled: true }),
+    { hall_enabled: true, hall_video_enabled: true, hall_chat_enabled: false, hall_voice_enabled: true })
+  assert.deepEqual(Core.publicSettingsPatch({ enabled: false, chatEnabled: true, voiceEnabled: true, videoEnabled: false }),
+    { hall_enabled: false, hall_video_enabled: false, hall_chat_enabled: false, hall_voice_enabled: false }, '总开关关闭时两项为 false（与契约 10.3 一致）')
+})
+
+test('[123] validateJoinData：入场返回的文字 / 语音开关；缺少时沿用调用方当前设置', () => {
+  const base = { url: 'wss://cs.example.com/lk', token: 'eyJ.a.b', room: 'hall_default', identity: 'v_abc', name: '访客 1234', video_enabled: false, max_speakers: 6, max_cameras: 2, ice_servers: [], history: [] }
+  const s = Core.validateJoinData({ ...base, chat_enabled: false, voice_enabled: true }, 'https:').settings
+  assert.deepEqual([s.chatEnabled, s.voiceEnabled], [false, true])
+  const prev = { enabled: true, videoEnabled: true, chatEnabled: false, voiceEnabled: false, maxSpeakers: 6, maxCameras: 2 }
+  const kept = Core.validateJoinData(base, 'https:', prev).settings
+  assert.deepEqual([kept.enabled, kept.chatEnabled, kept.voiceEnabled, kept.videoEnabled], [true, false, false, false], '旧后端缺少新字段：沿用当前设置；视频以入场返回为准')
 })
 
 test('validateJoinData：校验 LiveKit 地址协议、令牌与 ICE 服务器白名单', () => {

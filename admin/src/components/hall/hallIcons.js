@@ -27,6 +27,8 @@ export const HALL_ICON_PATHS = Object.freeze({
   chat: ['M21 12a8 8 0 0 1-11.7 7.1L4 20l1.1-4.6A8 8 0 1 1 21 12z'],
   speaking: ['M4 10v4', 'M8 7v10', 'M12 4v16', 'M16 7v10', 'M20 10v4'],
   volume: ['M4 9h3l5-4v14l-5-4H4z', 'M16 9a4 4 0 0 1 0 6', 'M19 6a8 8 0 0 1 0 12'],
+  // [123] 大厅开关面板
+  toggle: ['M8 6h8a6 6 0 0 1 0 12H8A6 6 0 0 1 8 6z', CIRCLE(16, 12, 3)],
 })
 
 function makeIcon(name, paths) {

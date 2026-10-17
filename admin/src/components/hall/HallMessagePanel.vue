@@ -1,7 +1,8 @@
 <script setup>
 // 大厅消息区：最近 50 条 + 实时、向上加载更早、删除（由大厅页二次确认）、发送文字 / 图片 / 文件。
 // 内容一律文本插值渲染（无 v-html），媒体地址已在 modules/hallMessages.js 中按白名单校验。
-import { nextTick, ref, watch } from 'vue'
+// [123] chatEnabled 为 false（「大厅开关」关闭了文字聊天）时输入区、上传与重发全部禁用并提示「大厅文字聊天已暂停」，历史仍可查看。
+import { computed, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   HALL_FILE_EXTENSIONS,
@@ -13,6 +14,7 @@ import {
   formatFileSize,
   hallSenderLabel,
 } from '../../modules/hallMessages'
+import { HALL_SWITCH_TEXT } from '../../modules/hallSwitches'
 import { formatMsgTime } from '../../modules/timeFormat'
 import { hallIcons } from './hallIcons'
 
@@ -25,11 +27,19 @@ const props = defineProps({
   loadingOlder: { type: Boolean, default: false },
   limitReached: { type: Boolean, default: false },
   uploading: { type: Boolean, default: false },
+  chatEnabled: { type: Boolean, default: true },
 })
 const draft = defineModel('draft', { type: String, default: '' })
 const emit = defineEmits(['load-older', 'delete', 'retry', 'send', 'upload'])
 
 const scrollRef = ref(null)
+// 能否发送：已进入大厅且文字聊天未暂停
+const canCompose = computed(() => props.connected && props.chatEnabled)
+const placeholder = computed(() => {
+  if (!props.connected) return '进入大厅后才能发送消息'
+  if (!props.chatEnabled) return HALL_SWITCH_TEXT.chatPaused
+  return '输入消息，回车发送，Shift+回车换行'
+})
 let nearBottom = true
 const imageAccept = HALL_IMAGE_EXTENSIONS.map(e => '.' + e).join(',')
 const fileAccept = [...HALL_IMAGE_EXTENSIONS, ...HALL_FILE_EXTENSIONS].map(e => '.' + e).join(',')
@@ -75,10 +85,11 @@ function onKeydown(e) {
   // 输入法组字过程中的回车不发送
   if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return
   e.preventDefault()
-  emit('send')
+  if (canCompose.value) emit('send')
 }
 
 function beforeUpload(file, kind) {
+  if (!canCompose.value) return false
   const check = checkHallUploadFile(file, kind)
   if (!check.ok) {
     ElMessage.warning(check.error)
@@ -126,7 +137,7 @@ defineExpose({ scrollToBottom })
               <el-tag v-else-if="m.status === 'failed'" size="small" type="danger" effect="plain">发送失败</el-tag>
             </el-space>
             <el-space :size="4">
-              <el-button v-if="m.status === 'failed'" link size="small" type="primary" :disabled="!connected" @click="emit('retry', m)">重发</el-button>
+              <el-button v-if="m.status === 'failed'" link size="small" type="primary" :disabled="!canCompose" @click="emit('retry', m)">重发</el-button>
               <el-button v-if="m.status === 'sent'" link size="small" type="danger" :icon="hallIcons.trash" @click="emit('delete', m)">删除</el-button>
             </el-space>
           </el-row>
@@ -149,6 +160,7 @@ defineExpose({ scrollToBottom })
     </el-scrollbar>
     <template #footer>
       <el-space direction="vertical" alignment="stretch" fill :size="8" style="width: 100%">
+        <el-alert v-if="!chatEnabled" type="warning" show-icon :closable="false" :title="HALL_SWITCH_TEXT.chatPaused" description="历史消息仍可查看；任一客服在上方「大厅开关」中打开文字聊天后即可继续发送。" />
         <el-input
           v-model="draft"
           type="textarea"
@@ -156,20 +168,20 @@ defineExpose({ scrollToBottom })
           resize="none"
           :maxlength="HALL_MESSAGE_MAX_CHARS"
           show-word-limit
-          :disabled="!connected"
-          :placeholder="connected ? '输入消息，回车发送，Shift+回车换行' : '进入大厅后才能发送消息'"
+          :disabled="!canCompose"
+          :placeholder="placeholder"
           @keydown="onKeydown" />
         <el-row justify="space-between" align="middle">
           <el-space :size="8">
-            <el-upload :show-file-list="false" :accept="imageAccept" :disabled="!connected || uploading" :before-upload="(f) => beforeUpload(f, 'image')" :http-request="uploadRequest('image')">
-              <el-button :icon="hallIcons.image" :disabled="!connected || uploading">图片</el-button>
+            <el-upload :show-file-list="false" :accept="imageAccept" :disabled="!canCompose || uploading" :before-upload="(f) => beforeUpload(f, 'image')" :http-request="uploadRequest('image')">
+              <el-button :icon="hallIcons.image" :disabled="!canCompose || uploading">图片</el-button>
             </el-upload>
-            <el-upload :show-file-list="false" :accept="fileAccept" :disabled="!connected || uploading" :before-upload="(f) => beforeUpload(f, 'file')" :http-request="uploadRequest('file')">
-              <el-button :icon="hallIcons.attach" :disabled="!connected || uploading">文件</el-button>
+            <el-upload :show-file-list="false" :accept="fileAccept" :disabled="!canCompose || uploading" :before-upload="(f) => beforeUpload(f, 'file')" :http-request="uploadRequest('file')">
+              <el-button :icon="hallIcons.attach" :disabled="!canCompose || uploading">文件</el-button>
             </el-upload>
             <el-text v-if="uploading" size="small" type="info">上传中…</el-text>
           </el-space>
-          <el-button type="primary" :icon="hallIcons.send" :disabled="!connected" @click="emit('send')">发送</el-button>
+          <el-button type="primary" :icon="hallIcons.send" :disabled="!canCompose" @click="emit('send')">发送</el-button>
         </el-row>
       </el-space>
     </template>

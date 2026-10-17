@@ -3,6 +3,8 @@
 // 契约：_internal/reports/hall-contract.md。媒体走自托管 LiveKit（livekit-client 2.23.0），
 // 实时事件复用现有 /ws/agent 连接的信封（hall_chat / hall_ack / hall_deleted / hall_settings / hall_moderation）。
 // 参与者状态以 LiveKit 房间事件为主，每 30 秒用 GET /api/agent/hall/state 校准。
+// [123] 顶部「大厅开关」面板（契约第 10 节）：所有客服可切换总开关 / 文字聊天 / 语音 / 视频；
+// 页面状态（settings）只采用服务端确认的值（开关接口返回、hall_settings 广播、state、join），面板另叠加提交中的乐观值。
 import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
@@ -13,10 +15,12 @@ import { useSession } from '../store/session'
 import {
   deleteHallMessage,
   getHallState,
+  getHallSwitches,
   joinHall,
   listHallMessages,
   moderateHall,
   setHallCamera,
+  updateHallSwitches,
   uploadHallFile,
 } from '../api/hall'
 import {
@@ -51,6 +55,19 @@ import {
 } from '../modules/hallMessages'
 import { kickMinutesLabel, normalizeHallState, normalizeJoinResponse } from '../modules/hallProtocol'
 import { normalizeHallSettingsEvent } from '../modules/hallSettings'
+import {
+  HALL_MASTER_OFF_CONFIRM,
+  HALL_SWITCH_FIELDS,
+  HALL_SWITCH_TEXT,
+  buildSwitchRequest,
+  displaySwitches,
+  effectiveSwitches,
+  needsSwitchConfirm,
+  normalizeSwitchesView,
+  pickSwitches,
+  switchToggleMessage,
+  switchTransitions,
+} from '../modules/hallSwitches'
 import { HALL_MAX_VIDEO_TILES, selectVideoTiles } from '../modules/hallVideo'
 import { HallTabCoordinator } from '../modules/hallTabCoordinator'
 import { registerHallLeaveHandler } from '../modules/hallSession'
@@ -61,19 +78,24 @@ import HallParticipantTable from '../components/hall/HallParticipantTable.vue'
 import HallMessagePanel from '../components/hall/HallMessagePanel.vue'
 import HallVideoTile from '../components/hall/HallVideoTile.vue'
 import HallKickDialog from '../components/hall/HallKickDialog.vue'
+import HallSwitchPanel from '../components/hall/HallSwitchPanel.vue'
 import BlockVisitorDialog from '../components/console/BlockVisitorDialog.vue'
 
 const CALIBRATE_INTERVAL_MS = 30 * 1000
 const MIN_CALIBRATE_GAP_MS = 5 * 1000
 const RENDER_THROTTLE_MS = 200
 const PRIVATE_NOTIFY_GAP_MS = 8 * 1000
+// 收到其他来源的开关变化后，合并 600ms 再读取一次开关接口（更新「最后修改人与时间」）
+const SWITCHES_RELOAD_DEBOUNCE_MS = 600
+// 语音刚恢复时服务端经信令补发麦克风权限，开麦前最多等待这么久
+const MIC_PERMISSION_WAIT_MS = 3000
 
 const session = useSession()
 const router = useRouter()
 
 // ---------- 页面状态 ----------
 const phase = ref('idle') // idle | joining | connected | reconnecting | leaving
-const settings = reactive({ enabled: true, videoEnabled: false, maxSpeakers: 6, maxCameras: 2, maxParticipants: 100 })
+const settings = reactive({ enabled: true, chatEnabled: true, voiceEnabled: true, videoEnabled: false, maxSpeakers: 6, maxCameras: 2, maxParticipants: 100 })
 const roster = new HallRoster()
 const rows = shallowRef([])
 const counts = shallowRef({ participants: 0, speakers: 0, visitorSpeakers: 0, cameras: 0 })
@@ -103,6 +125,18 @@ const blockTarget = ref(null)
 const degraded = ref(false)
 const hallSubscribed = ref(false)
 const isAdmin = computed(() => session.agent?.role === 'admin')
+
+// [123] 大厅开关面板
+const switchMeta = ref({ updatedBy: '', updatedAt: '' })
+const switchOverlay = reactive({}) // 提交中的乐观值：{ [field]: boolean }，失败时删除即回滚
+const switchBusy = reactive({}) // 提交中的开关：{ [field]: true }，期间禁用该开关防重复点击
+const switchesReady = ref(false)
+const switchesLoading = ref(false)
+const switchesError = ref('')
+const panelSwitches = computed(() => displaySwitches(settings, switchOverlay))
+const effective = computed(() => effectiveSwitches(settings))
+const chatActive = computed(() => effective.value.chat)
+const voiceActive = computed(() => effective.value.voice)
 
 const inHall = computed(() => phase.value !== 'idle')
 const isConnected = computed(() => phase.value === 'connected' || phase.value === 'reconnecting')
@@ -138,11 +172,15 @@ let selfInfo = { identity: '', name: '' }
 let agentSound = 'agent1'
 let lastPrivateNotifyAt = 0
 let subscribeId = ''
+let wsHelloSeen = false
+let switchesGetSeq = 0
+let switchesStamp = 0 // 每采用一次本页切换的返回结果就递增：比它早发出的读取结果作废
+let switchesReloadTimer = null
 const ackTimers = new Map()
 const limiter = new SlidingWindowLimiter()
 
-function setNotice(type, title, description = '') {
-  notice.value = { type, title, description }
+function setNotice(type, title, description = '', kind = '') {
+  notice.value = { type, title, description, kind }
 }
 
 // ---------- 渲染（合并高频 LiveKit 事件，最多每 200ms 刷新一次表格与视频区） ----------
@@ -183,24 +221,122 @@ function renderVideo() {
 }
 
 // ---------- 设置 ----------
-function applySettings(s) {
-  if (!s) return
-  const wasEnabled = settings.enabled
-  const wasVideo = settings.videoEnabled
-  if (s.enabled !== undefined) settings.enabled = s.enabled
-  if (s.videoEnabled !== undefined) settings.videoEnabled = s.videoEnabled
+// s：normalizeHallSettingsEvent / normalizeSwitchesView 的输出（只含已提供的字段）；
+// source：switches（开关接口）| ws（hall_settings 广播）| state（30 秒校准）| join（入场返回）| error（接口错误码推断）
+function applySettings(s, { source = 'state' } = {}) {
+  if (!s || unmounted) return
+  const prev = pickSwitches(settings)
+  for (const f of HALL_SWITCH_FIELDS) if (typeof s[f] === 'boolean') settings[f] = s[f]
   if (s.maxSpeakers !== undefined) settings.maxSpeakers = s.maxSpeakers
   if (s.maxCameras !== undefined) settings.maxCameras = s.maxCameras
   if (s.maxParticipants !== undefined) settings.maxParticipants = s.maxParticipants
-  if (wasEnabled && !settings.enabled && client) {
+  const t = switchTransitions(prev, settings)
+  // 开关被其他客服或 App 改动：再读一次开关接口，更新「最后修改人与时间」
+  if (t.changed && source !== 'switches') scheduleSwitchesReload()
+  if (t.hallClosed && client) {
     leaveHall('closed')
-    setNotice('warning', '大厅已被管理员关闭', '已自动退出大厅；管理员重新开启后可再次进入。')
+    setNotice('warning', HALL_SWITCH_TEXT.hallClosed, '已自动退出大厅：访客窗口只保留私聊。任一客服在上方「大厅开关」中重新打开总开关后，可再次进入。', 'closed')
   }
-  if (wasVideo && !settings.videoEnabled && client && cameraOn.value) {
-    client.setCamera(false).catch(() => {})
-    ElMessage.info('管理员已关闭视频功能，你的摄像头已关闭')
+  if (t.hallOpened) {
+    if (notice.value?.kind === 'closed') notice.value = null
+    if (source !== 'state') refreshState({ force: true })
+    loadLatestMessages()
+  }
+  if (t.voicePaused && client) {
+    // 服务端会收回麦克风权限；本端立即停止发布并释放设备（未开麦时为空操作）
+    const hadMic = micOn.value
+    const c = client
+    c.stopMicrophone().catch(() => c.setMicrophone(false)).catch(() => {}).finally(scheduleRender)
+    if (hadMic) ElMessage.warning(HALL_SWITCH_TEXT.voicePaused + '，你的麦克风已关闭')
+  }
+  if (t.videoOff && client && cameraOn.value) {
+    client.setCamera(false).catch(() => {}).finally(scheduleRender)
+    ElMessage.info(HALL_SWITCH_TEXT.videoOff + '，你的摄像头已关闭')
   }
   scheduleRender()
+}
+
+// ---------- 大厅开关（契约第 10 节） ----------
+function applySwitchView(v) {
+  applySettings(v, { source: 'switches' })
+  switchMeta.value = { updatedBy: v.updatedBy, updatedAt: v.updatedAt }
+  switchesReady.value = true
+  switchesError.value = ''
+}
+
+async function loadSwitches({ notify = false } = {}) {
+  if (unmounted) return
+  const seq = ++switchesGetSeq
+  const stamp = switchesStamp
+  switchesLoading.value = true
+  try {
+    const r = await getHallSwitches()
+    if (unmounted || seq !== switchesGetSeq) return
+    // 读取期间本页切换过开关：以切换返回的结果为准（随后的广播 / 读取会再次对齐）
+    if (stamp !== switchesStamp) return
+    const v = normalizeSwitchesView(r?.data)
+    if (!v.ok) throw { code: -1, msg: v.error }
+    applySwitchView(v.value)
+    if (notify) ElMessage.success('大厅开关已刷新')
+  } catch (e) {
+    if (unmounted || seq !== switchesGetSeq) return
+    switchesError.value = hallErrorMessage(e, '获取大厅开关失败，请稍后重试')
+    if (notify) ElMessage.error(switchesError.value)
+  } finally {
+    if (seq === switchesGetSeq) switchesLoading.value = false
+  }
+}
+
+function scheduleSwitchesReload() {
+  if (switchesReloadTimer || unmounted) return
+  switchesReloadTimer = setTimeout(() => {
+    switchesReloadTimer = null
+    loadSwitches()
+  }, SWITCHES_RELOAD_DEBOUNCE_MS)
+}
+
+async function changeSwitch(field, value) {
+  if (unmounted || switchBusy[field] || !switchesReady.value) return
+  const req = buildSwitchRequest(field, value)
+  if (!req.ok) {
+    ElMessage.error(req.error)
+    return
+  }
+  if (needsSwitchConfirm(field, value)) {
+    try {
+      await ElMessageBox.confirm(HALL_MASTER_OFF_CONFIRM.message, HALL_MASTER_OFF_CONFIRM.title, {
+        type: 'warning',
+        confirmButtonText: HALL_MASTER_OFF_CONFIRM.confirmButtonText,
+        cancelButtonText: HALL_MASTER_OFF_CONFIRM.cancelButtonText,
+      })
+    } catch {
+      return
+    }
+    if (unmounted || switchBusy[field]) return
+  }
+  switchBusy[field] = true
+  switchOverlay[field] = value
+  try {
+    const r = await updateHallSwitches(req.body)
+    if (unmounted) return
+    switchesStamp++
+    const v = normalizeSwitchesView(r?.data)
+    if (v.ok) {
+      applySwitchView(v.value)
+    } else {
+      // 已保存成功但返回体异常：先采用本次提交的值，再重新读取一次对齐
+      applySettings({ [field]: value }, { source: 'switches' })
+      loadSwitches()
+    }
+    ElMessage.success(switchToggleMessage(field, value))
+  } catch (e) {
+    if (unmounted) return
+    ElMessage.error(hallErrorMessage(e, '切换失败，请稍后重试'))
+  } finally {
+    // 去掉乐观值：成功时显示的已是服务端确认值；失败时即回滚到确认值（含期间收到的其他客服广播）
+    delete switchOverlay[field]
+    delete switchBusy[field]
+  }
 }
 
 // ---------- 服务端状态校准 ----------
@@ -220,7 +356,7 @@ async function refreshState({ force = false, notify = false } = {}) {
     lastStateAt = Date.now()
     render()
   } catch (e) {
-    if (hallErrorCode(e) === HALL_ERROR_CODES.HALL_CLOSED) settings.enabled = false
+    if (hallErrorCode(e) === HALL_ERROR_CODES.HALL_CLOSED) applySettings({ enabled: false }, { source: 'error' })
     if (notify) ElMessage.error(hallErrorMessage(e, '获取大厅状态失败，请稍后重试'))
   } finally {
     stateInflight = false
@@ -323,6 +459,10 @@ function sendDraft() {
     ElMessage.warning('请先进入大厅')
     return
   }
+  if (!chatActive.value) {
+    ElMessage.warning(HALL_SWITCH_TEXT.chatPaused)
+    return
+  }
   const v = validateOutgoingText(draft.value)
   if (!v.ok) {
     ElMessage.warning(v.error)
@@ -337,6 +477,10 @@ function sendDraft() {
 
 function retryMessage(m) {
   if (!m || m.status !== 'failed' || !isConnected.value) return
+  if (!chatActive.value) {
+    ElMessage.warning(HALL_SWITCH_TEXT.chatPaused)
+    return
+  }
   if (!limiter.tryAcquire()) {
     ElMessage.warning('发送过于频繁，请稍后再试')
     return
@@ -347,6 +491,10 @@ function retryMessage(m) {
 
 async function uploadAndSend(file, kind) {
   if (!isConnected.value || uploading.value) return
+  if (!chatActive.value) {
+    ElMessage.warning(HALL_SWITCH_TEXT.chatPaused)
+    return
+  }
   const check = checkHallUploadFile(file, kind)
   if (!check.ok) {
     ElMessage.warning(check.error)
@@ -364,9 +512,12 @@ async function uploadAndSend(file, kind) {
       ElMessage.error('上传结果无效，请重试')
       return
     }
-    if (!isConnected.value) return
+    if (!isConnected.value || !chatActive.value) return
     dispatchHallMessage({ media })
   } catch (e) {
+    const code = hallErrorCode(e)
+    if (code === HALL_ERROR_CODES.CHAT_DISABLED) applySettings({ chatEnabled: false }, { source: 'error' })
+    else if (code === HALL_ERROR_CODES.HALL_CLOSED) applySettings({ enabled: false }, { source: 'error' })
     ElMessage.error(hallErrorMessage(e, '文件上传失败，请重试'))
   } finally {
     uploading.value = false
@@ -424,6 +575,9 @@ function onWsMessage(env) {
     case 'hello':
       wsReady = true
       hallSubscribed.value = false
+      // 断线重连：补读断线期间可能错过的开关变化（首次连接时挂载阶段已读取）
+      if (wsHelloSeen) loadSwitches()
+      wsHelloSeen = true
       // 重连后重新订阅（订阅成功后再补齐断线期间的消息）
       if (client && isConnected.value) subscribeHall()
       return
@@ -453,7 +607,8 @@ function onWsMessage(env) {
       messages.value = removeHallMessage(messages.value, env.id)
       return
     case 'hall_settings':
-      applySettings(normalizeHallSettingsEvent(env.extra))
+      // [123] extra 含 enabled / chat_enabled / voice_enabled / video_enabled（其他客服或 App 改动也实时同步）
+      applySettings(normalizeHallSettingsEvent(env.extra), { source: 'ws' })
       return
     case 'hall_moderation':
       onModeration(env.extra)
@@ -577,7 +732,7 @@ async function enterHall() {
     const stillMine = client === c
     abandon()
     if (!stillMine || unmounted) return
-    if (hallErrorCode(e) === HALL_ERROR_CODES.HALL_CLOSED) settings.enabled = false
+    if (hallErrorCode(e) === HALL_ERROR_CODES.HALL_CLOSED) applySettings({ enabled: false }, { source: 'error' })
     ElMessage.error(hallErrorMessage(e, '进入大厅失败，请稍后重试'))
     return
   }
@@ -597,7 +752,7 @@ async function enterHall() {
   selfInfo = { identity: v.identity, name: v.name }
   roster.setConnected(true, v.identity)
   phase.value = 'connected'
-  applySettings({ videoEnabled: v.videoEnabled, maxSpeakers: v.maxSpeakers, maxCameras: v.maxCameras })
+  applySettings({ videoEnabled: v.videoEnabled, chatEnabled: v.chatEnabled, voiceEnabled: v.voiceEnabled, maxSpeakers: v.maxSpeakers, maxCameras: v.maxCameras }, { source: 'join' })
   messages.value = mergeHallMessages(messages.value, v.history)
   try {
     await c.startAudio()
@@ -678,8 +833,21 @@ async function toggleMic() {
   if (!client || !isConnected.value || micBusy.value) return
   const c = client
   const target = !micOn.value
+  if (target && !voiceActive.value) {
+    ElMessage.warning(HALL_SWITCH_TEXT.voicePaused)
+    return
+  }
   micBusy.value = true
   try {
+    if (target && !c.hasPublishPermission('microphone')) {
+      // 语音刚恢复时服务端经信令补发麦克风权限，稍等片刻
+      const permitted = await c.waitForPublishPermission('microphone', MIC_PERMISSION_WAIT_MS)
+      if (client !== c) return
+      if (!permitted) {
+        ElMessage.warning('暂时没有麦克风权限：如果大厅语音刚刚恢复，请离开大厅后重新进入')
+        return
+      }
+    }
     await c.setMicrophone(target)
     if (client === c) micOn.value = target
   } catch (e) {
@@ -705,15 +873,15 @@ async function toggleCamera() {
       }
       return
     }
-    if (!settings.videoEnabled) {
-      ElMessage.warning('视频功能未开启')
+    if (!effective.value.video) {
+      ElMessage.warning(HALL_SWITCH_TEXT.videoOff)
       return
     }
     try {
       await setHallCamera(true) // 服务端占名额并授予摄像头发布权限
     } catch (e) {
       const code = hallErrorCode(e)
-      if (code === HALL_ERROR_CODES.VIDEO_DISABLED) settings.videoEnabled = false
+      if (code === HALL_ERROR_CODES.VIDEO_DISABLED) applySettings({ videoEnabled: false }, { source: 'error' })
       ElMessage.error(hallErrorMessage(e, '开启摄像头失败，请稍后重试'))
       return
     }
@@ -860,10 +1028,15 @@ onMounted(() => {
   }
   unregisterLeave = registerHallLeaveHandler((reason) => leaveHall(reason))
   startWS()
+  loadSwitches()
   refreshState({ force: true, notify: true })
   loadLatestMessages({ initial: true })
   loadSoundPref()
-  calibrateTimer = setInterval(() => refreshState(), CALIBRATE_INTERVAL_MS)
+  calibrateTimer = setInterval(() => {
+    refreshState()
+    // 开关读取失败过（例如网络抖动）时随校准一起重试，直到成功
+    if (!switchesReady.value || switchesError.value) loadSwitches()
+  }, CALIBRATE_INTERVAL_MS)
   document.addEventListener('visibilitychange', onVisibility)
 })
 
@@ -890,6 +1063,7 @@ onBeforeUnmount(() => {
   clearInterval(calibrateTimer)
   clearTimeout(calibrateDebounce)
   clearTimeout(renderTimer)
+  clearTimeout(switchesReloadTimer)
   for (const t of ackTimers.values()) clearTimeout(t)
   ackTimers.clear()
   document.removeEventListener('visibilitychange', onVisibility)
@@ -898,6 +1072,17 @@ onBeforeUnmount(() => {
 
 <template>
   <el-space direction="vertical" alignment="stretch" fill :size="16" style="width: 100%">
+    <HallSwitchPanel
+      :switches="panelSwitches"
+      :busy="switchBusy"
+      :updated-by="switchMeta.updatedBy"
+      :updated-at="switchMeta.updatedAt"
+      :ready="switchesReady"
+      :loading="switchesLoading"
+      :error="switchesError"
+      @change="changeSwitch"
+      @reload="loadSwitches({ notify: true })" />
+
     <el-card shadow="never">
       <template #header>
         <el-row justify="space-between" align="middle">
@@ -911,8 +1096,12 @@ onBeforeUnmount(() => {
           <el-space :size="8" wrap>
             <el-button v-if="!inHall || phase === 'joining'" type="primary" :icon="hallIcons.enter" :loading="phase === 'joining'" :disabled="!settings.enabled" @click="enterHall">进入大厅</el-button>
             <el-button v-else :icon="hallIcons.leave" :loading="phase === 'leaving'" @click="confirmLeave">离开大厅</el-button>
-            <el-button :type="micOn ? 'success' : 'default'" :icon="micOn ? hallIcons.mic : hallIcons.micOff" :disabled="!isConnected" :loading="micBusy" @click="toggleMic">{{ micOn ? '关闭麦克风' : '打开麦克风' }}</el-button>
-            <el-tooltip :disabled="settings.videoEnabled || cameraOn" content="管理员未开启视频功能" placement="bottom">
+            <el-tooltip :disabled="voiceActive || micOn" :content="HALL_SWITCH_TEXT.voicePaused" placement="bottom">
+              <span>
+                <el-button :type="micOn ? 'success' : 'default'" :icon="micOn ? hallIcons.mic : hallIcons.micOff" :disabled="!isConnected || (!voiceActive && !micOn)" :loading="micBusy" @click="toggleMic">{{ micOn ? '关闭麦克风' : '打开麦克风' }}</el-button>
+              </span>
+            </el-tooltip>
+            <el-tooltip :disabled="settings.videoEnabled || cameraOn" :content="HALL_SWITCH_TEXT.videoOff" placement="bottom">
               <span>
                 <el-button :type="cameraOn ? 'success' : 'default'" :icon="cameraOn ? hallIcons.camera : hallIcons.cameraOff" :disabled="!isConnected || (!settings.videoEnabled && !cameraOn)" :loading="cameraBusy" @click="toggleCamera">{{ cameraOn ? '关闭摄像头' : '打开摄像头' }}</el-button>
               </span>
@@ -942,8 +1131,9 @@ onBeforeUnmount(() => {
     </el-card>
 
     <el-alert v-if="notice" :type="notice.type" :title="notice.title" :description="notice.description" show-icon @close="notice = null" />
-    <el-alert v-if="!settings.enabled" type="error" show-icon :closable="false" title="大厅已关闭" description="管理员已在「系统设置」中关闭大厅：访客不会再进入，已在线的人已被移出。" />
+    <el-alert v-if="!settings.enabled" type="error" show-icon :closable="false" title="大厅已关闭" description="大厅总开关已关闭：访客窗口不显示大厅、只保留私聊，已在线的人已被移出。可在上方「大厅开关」中重新打开。" />
     <el-alert v-else-if="!inHall" type="info" show-icon :closable="false" title="你尚未进入大厅" description="下方名单与消息可直接查看和管理；点击「进入大厅」后可实时收听、发言、查看视频并实时接收大厅消息。" />
+    <el-alert v-if="settings.enabled && !settings.voiceEnabled" type="warning" show-icon :closable="false" :title="HALL_SWITCH_TEXT.voicePaused" description="所有人的麦克风已关闭，访客不能开麦；任一客服在上方「大厅开关」中打开语音后即可恢复。" />
     <el-alert v-if="degraded" type="warning" show-icon :closable="false" title="语音服务暂不可用" description="当前名单来自服务器缓存，麦克风与摄像头状态为推断值；服务恢复后会自动更新。" />
     <el-alert v-if="audioBlocked && isConnected" type="warning" show-icon :closable="false" title="浏览器阻止了自动播放，暂时听不到大厅声音">
       <el-button type="warning" size="small" :icon="hallIcons.volume" @click="unlockAudio">点击开启声音</el-button>
@@ -991,6 +1181,7 @@ onBeforeUnmount(() => {
           :loading-older="loadingOlder"
           :limit-reached="limitReached"
           :uploading="uploading"
+          :chat-enabled="settings.chatEnabled"
           @load-older="loadOlder"
           @delete="confirmDelete"
           @retry="retryMessage"

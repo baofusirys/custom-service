@@ -1,5 +1,7 @@
-// 多人大厅系统设置（契约第 3 节）：解析、校验、序列化与带宽估算（纯函数，可在 node 测试中直接运行）。
+// 多人大厅系统设置（契约第 3 节、第 10 节）：解析、校验、序列化与带宽估算（纯函数，可在 node 测试中直接运行）。
 // 现有 /api/admin/settings 的值统一是字符串（map[string]string），布尔用 'true'/'false'。
+// [123] 四个开关（总开关、文字聊天、语音、视频）所有客服都可在「多人大厅」页切换，开关的解析统一复用 hallSwitches.js。
+import { parseSwitchesPatch } from './hallSwitches.js'
 
 export const HALL_SETTING_LIMITS = Object.freeze({
   hall_max_speakers: Object.freeze({ min: 1, max: 20, def: 6, label: '同时开麦访客上限' }),
@@ -9,6 +11,8 @@ export const HALL_SETTING_LIMITS = Object.freeze({
 
 export const HALL_SETTING_DEFAULTS = Object.freeze({
   hall_enabled: true,
+  hall_chat_enabled: true,
+  hall_voice_enabled: true,
   hall_video_enabled: false,
   hall_max_speakers: 6,
   hall_max_cameras: 2,
@@ -16,6 +20,9 @@ export const HALL_SETTING_DEFAULTS = Object.freeze({
 })
 
 export const HALL_SETTING_KEYS = Object.freeze(Object.keys(HALL_SETTING_DEFAULTS))
+
+// [123] 所有客服都能切换的四个开关（设置页保存时只提交管理员改动过的开关，避免覆盖其他客服刚做的切换）
+export const HALL_SWITCH_SETTING_KEYS = Object.freeze(['hall_enabled', 'hall_chat_enabled', 'hall_voice_enabled', 'hall_video_enabled'])
 
 // 服务器公网带宽（与主站共用）及推荐摄像头路数，用于设置页提示
 export const HALL_SERVER_BANDWIDTH_MBPS = 7
@@ -38,6 +45,8 @@ export function parseHallSettings(raw) {
   const d = raw && typeof raw === 'object' ? raw : {}
   return {
     hall_enabled: parseBool(d.hall_enabled, HALL_SETTING_DEFAULTS.hall_enabled),
+    hall_chat_enabled: parseBool(d.hall_chat_enabled, HALL_SETTING_DEFAULTS.hall_chat_enabled),
+    hall_voice_enabled: parseBool(d.hall_voice_enabled, HALL_SETTING_DEFAULTS.hall_voice_enabled),
     hall_video_enabled: parseBool(d.hall_video_enabled, HALL_SETTING_DEFAULTS.hall_video_enabled),
     hall_max_speakers: parseIntIn(d.hall_max_speakers, HALL_SETTING_LIMITS.hall_max_speakers),
     hall_max_cameras: parseIntIn(d.hall_max_cameras, HALL_SETTING_LIMITS.hall_max_cameras),
@@ -48,13 +57,11 @@ export function parseHallSettings(raw) {
 // 保存前严格校验（不夹紧，越界直接提示），返回可直接合并进保存请求的字符串键值
 export function validateHallSettings(form) {
   const f = form && typeof form === 'object' ? form : {}
-  if (typeof f.hall_enabled !== 'boolean' || typeof f.hall_video_enabled !== 'boolean') {
+  if (HALL_SWITCH_SETTING_KEYS.some(k => typeof f[k] !== 'boolean')) {
     return { ok: false, error: '大厅开关取值无效，请刷新页面后重试' }
   }
-  const payload = {
-    hall_enabled: f.hall_enabled ? 'true' : 'false',
-    hall_video_enabled: f.hall_video_enabled ? 'true' : 'false',
-  }
+  const payload = {}
+  for (const k of HALL_SWITCH_SETTING_KEYS) payload[k] = f[k] ? 'true' : 'false'
   for (const [key, lim] of Object.entries(HALL_SETTING_LIMITS)) {
     const v = f[key]
     if (typeof v !== 'number' || !Number.isInteger(v) || v < lim.min || v > lim.max) {
@@ -65,15 +72,27 @@ export function validateHallSettings(form) {
   return { ok: true, payload }
 }
 
-// WS hall_settings 的 extra 或 /hall/state、/hall/join 中的设置 → 统一结构；无法识别返回 null
+// [123] 设置页保存：在 validateHallSettings 的基础上，去掉与载入时相同的四个开关
+// （其他客服可能在管理员打开设置页之后切换过开关，原样回写会把他们的切换悄悄改回去）。
+// loaded 为载入时 parseHallSettings 的结果；缺失时按全部提交处理（与原行为一致）。
+export function buildHallSettingsSavePayload(form, loaded) {
+  const v = validateHallSettings(form)
+  if (!v.ok) return v
+  const payload = { ...v.payload }
+  if (loaded && typeof loaded === 'object') {
+    for (const k of HALL_SWITCH_SETTING_KEYS) {
+      if (typeof loaded[k] === 'boolean' && loaded[k] === form[k]) delete payload[k]
+    }
+  }
+  return { ok: true, payload }
+}
+
+// WS hall_settings 的 extra 或 /hall/state、/hall/join 中的设置 → 统一结构；无法识别返回 null。
+// 四个开关只接受明确的布尔值（非法值视为未提供，不回落默认值，避免把开关显示错）。
 export function normalizeHallSettingsEvent(raw) {
   if (!raw || typeof raw !== 'object') return null
   const has = k => Object.prototype.hasOwnProperty.call(raw, k)
-  const out = {}
-  if (has('enabled') || has('hall_enabled')) out.enabled = parseBool(has('enabled') ? raw.enabled : raw.hall_enabled, true)
-  if (has('video_enabled') || has('hall_video_enabled')) {
-    out.videoEnabled = parseBool(has('video_enabled') ? raw.video_enabled : raw.hall_video_enabled, false)
-  }
+  const out = { ...(parseSwitchesPatch(raw) || {}) }
   const num = (a, b, lim) => {
     if (!has(a) && !has(b)) return undefined
     return parseIntIn(has(a) ? raw[a] : raw[b], lim)

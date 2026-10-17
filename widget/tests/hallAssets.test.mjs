@@ -31,6 +31,14 @@ test('chat.html：页签、大厅页与私聊页结构，隐私提示与默认�
   assert.match(html, /id="hallMicBtn"[^>]*aria-pressed="false"/)
   assert.match(html, /id="hallCamBtn"[^>]*hidden/)
   assert.match(html, /id="hallInput"[^>]*maxlength="1000"/)
+  // [123] 客服暂停文字聊天 / 语音时的提示：默认隐藏、文案固定、使用 SVG 图标；输入框与待发送附件在同一容器内
+  for (const id of ['hallInputWrap', 'hallChatPaused', 'hallChatPausedText', 'hallVoicePaused', 'hallVoicePausedText']) assert.match(html, new RegExp('id="' + id + '"'), id)
+  assert.match(html, /id="hallChatPaused"[^>]*hidden/)
+  assert.match(html, /id="hallVoicePaused"[^>]*hidden/)
+  assert.match(html, /id="hallChatPausedText">大厅文字聊天已暂停</)
+  assert.match(html, /id="hallVoicePausedText">大厅语音已暂停</)
+  const wrap = html.slice(html.indexOf('id="hallInputWrap"'))
+  assert.ok(wrap.indexOf('id="hallPendingList"') < wrap.indexOf('id="hallInput"') && wrap.indexOf('id="hallInput"') < wrap.indexOf('</div>', wrap.indexOf('id="hallInput"')))
   // 私聊原有节点仍在私聊页内
   const priv = html.slice(html.indexOf('id="privatePane"'))
   assert.ok(priv.indexOf('id="list"') > 0 && priv.indexOf('id="sendBtn"') > 0)

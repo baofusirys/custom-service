@@ -229,6 +229,8 @@ var (
 	errMediaForbidden  = newErr(http.StatusForbidden, 40374, "当前无法开麦或开摄像头")
 	errNotInHall       = newErr(http.StatusForbidden, 40374, "当前无法开麦或开摄像头：请先进入大厅")
 	errVideoDisabled   = newErr(http.StatusForbidden, 40375, "视频未开启")
+	errVoiceDisabled   = newErr(http.StatusForbidden, 40377, "大厅语音已关闭")
+	errChatDisabled    = newErr(http.StatusForbidden, 40378, "大厅聊天已关闭")
 	errSpeakersFull    = newErr(http.StatusConflict, 40973, "开麦人数已满，请稍后再试")
 	errCamerasFull     = newErr(http.StatusConflict, 40976, "摄像头人数已满，请稍后再试")
 	errHallFull        = newErr(http.StatusConflict, 40977, "大厅已满，可以先使用私聊客服")
@@ -316,6 +318,12 @@ func (s *Service) loadSettings(ctx context.Context) Settings {
 
 // InvalidateSettings 使本节点缓存失效（设置保存后调用）。
 func (s *Service) InvalidateSettings() { s.settings.Store(nil) }
+
+// PublicSwitches [123] 访客公开设置里的四项（总开关关闭时其余均为 false）。
+func (s *Service) PublicSwitches(ctx context.Context) (enabled, video, chat, voice bool) {
+	st := s.Settings(ctx)
+	return st.Enabled, st.Enabled && st.VideoEnabled, st.Enabled && st.ChatEnabled, st.Enabled && st.VoiceEnabled
+}
 
 // PublicFlags 访客公开设置里的两项。
 func (s *Service) PublicFlags(ctx context.Context) (enabled, video bool) {

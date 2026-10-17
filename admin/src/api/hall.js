@@ -3,6 +3,7 @@
 import http from './http'
 import { HALL_PAGE_SIZE, isValidHallMessageId } from '../modules/hallMessages'
 import { buildModerateRequest } from '../modules/hallProtocol'
+import { HALL_SWITCHES } from '../modules/hallSwitches'
 
 const seg = (value) => encodeURIComponent(String(value ?? ''))
 
@@ -16,6 +17,21 @@ export function setHallCamera(on) {
 
 export function getHallState() {
   return http.get('/agent/hall/state', { silent: true })
+}
+
+// [123] 大厅开关（契约第 10.2 节）：任何启用中的客服都可读取与切换
+export function getHallSwitches() {
+  return http.get('/agent/hall/switches', { silent: true })
+}
+
+// body 由 modules/hallSwitches.buildSwitchRequest 构造；这里再兜底一次：只允许四个开关键、值必须是布尔、至少一项
+export function updateHallSwitches(body) {
+  const allowed = new Set(HALL_SWITCHES.map(s => s.apiKey))
+  const keys = body && typeof body === 'object' && !Array.isArray(body) ? Object.keys(body) : []
+  if (!keys.length || keys.some(k => !allowed.has(k) || typeof body[k] !== 'boolean')) {
+    return Promise.reject({ code: -1, msg: '开关参数无效，请刷新页面后重试' })
+  }
+  return http.post('/agent/hall/switches', body, { silent: true })
 }
 
 export function moderateHall(params) {
