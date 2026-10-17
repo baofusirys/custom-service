@@ -105,6 +105,14 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
       LIVEKIT_INTERNAL_URL: ${LIVEKIT_INTERNAL_URL:-http://cs-livekit:7880}
       LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-}
+      # [122] 大厅敏感消息告警邮件默认值（后台「系统设置 → 多人大厅 → 敏感词屏蔽」可逐项覆盖；均可留空）
+      HALL_ALERT_SMTP_HOST: ${HALL_ALERT_SMTP_HOST:-}
+      HALL_ALERT_SMTP_PORT: ${HALL_ALERT_SMTP_PORT:-}
+      HALL_ALERT_SMTP_SECURITY: ${HALL_ALERT_SMTP_SECURITY:-}
+      HALL_ALERT_SMTP_USERNAME: ${HALL_ALERT_SMTP_USERNAME:-}
+      HALL_ALERT_SMTP_PASSWORD: ${HALL_ALERT_SMTP_PASSWORD:-}
+      HALL_ALERT_MAIL_FROM: ${HALL_ALERT_MAIL_FROM:-}
+      HALL_ALERT_MAIL_TO: ${HALL_ALERT_MAIL_TO:-}
     volumes:
       - ${HOST_DATA_DIR:-/srv/cs-data}/logs/backend:/app/logs
       - ${HOST_DATA_DIR:-/srv/cs-data}/uploads:/app/uploads

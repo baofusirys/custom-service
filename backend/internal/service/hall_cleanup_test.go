@@ -163,3 +163,8 @@ func TestPurgeHallBeforeHonorsCancel(t *testing.T) {
 		t.Fatalf("取消后不应继续删除：calls=%d", st.msgCalls)
 	}
 }
+
+// [122] 拦截记录清理（本测试替身无拦截记录）。
+func (f *fakeHallCleanupStore) PurgeHallFilterEventsBefore(_ context.Context, _ time.Time, _ int) (int, error) {
+	return 0, nil
+}

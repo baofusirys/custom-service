@@ -34,6 +34,9 @@ type fakeStore struct {
 	blocked  map[string]bool
 	settings map[string]string
 	agents   map[int64]*store.Agent
+	// [122] 拦截记录
+	fevents []store.HallFilterEvent
+	fnext   int64
 }
 
 func newFakeStore() *fakeStore {

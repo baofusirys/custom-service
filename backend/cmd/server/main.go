@@ -167,11 +167,20 @@ func main() {
 			return []hall.ICEServer{{URLs: cred.URLs, Username: cred.Username, Credential: cred.Credential}}
 		},
 		BizLog: bizLog, SecLog: secLog, AuditLog: auditLog,
+		// [122] 敏感词屏蔽：默认放行本站主域；告警邮件默认值来自环境变量（后台可覆盖）
+		PublicDomain: cfg.PublicDomain,
+		AlertDefaults: hall.AlertDefaults{
+			Host: cfg.HallAlert.Host, Port: cfg.HallAlert.Port, Security: cfg.HallAlert.Security, Username: cfg.HallAlert.Username,
+			Password: cfg.HallAlert.Password, From: cfg.HallAlert.From, To: cfg.HallAlert.To,
+		},
 	})
 	if err != nil {
 		log.Fatalf("[FATAL] 大厅服务初始化失败: %v", err)
 	}
 	hub.SetHallHandler(hallSvc)
+	bizLog.Info("hall_alert_mail_defaults", zap.String("event", "hall_config"), zap.Bool("smtp_host_set", cfg.HallAlert.Host != ""),
+		zap.Int("smtp_port", cfg.HallAlert.Port), zap.Bool("smtp_password_set", cfg.HallAlert.Password != ""), zap.String("from", cfg.HallAlert.From),
+		zap.Strings("to", cfg.HallAlert.To))
 
 	hubCtx, hubCancel := context.WithCancel(context.Background())
 	defer hubCancel()

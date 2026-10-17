@@ -1,5 +1,5 @@
 // 多人大厅错误码 / 媒体设备错误 / 断线原因 → 中文提示的唯一映射来源（纯函数，可在 node 测试中直接运行）。
-// 契约：_internal/reports/hall-contract.md 第 8 节。视图层只调用本模块，不在组件里散落提示文案。
+// 契约：_internal/reports/hall-contract.md 第 8 节与第 9.4 节。视图层只调用本模块，不在组件里散落提示文案。
 
 export const HALL_ERROR_CODES = Object.freeze({
   INVALID_TARGET: 40376,
@@ -13,6 +13,10 @@ export const HALL_ERROR_CODES = Object.freeze({
   CAMERAS_FULL: 40976,
   HALL_FULL: 40977,
   TOO_FREQUENT: 42910,
+  // 契约第 9.4 节（敏感词屏蔽与邮件告警）
+  FILTER_INVALID: 40062,
+  ALERT_MAIL_INVALID: 40063,
+  ALERT_MAIL_SEND_FAILED: 50271,
 })
 
 const CODE_MESSAGES = new Map([
@@ -32,6 +36,10 @@ const CODE_MESSAGES = new Map([
   [40477, '该大厅消息不存在或已被删除'],
   [50370, '语音服务暂不可用，请稍后重试'],
   [50050, '服务器错误，请稍后重试'],
+  // 契约第 9.4 节（敏感词屏蔽与邮件告警）
+  [40062, '敏感词设置不合法，请检查后重新保存'],
+  [40063, '邮件设置不合法，请检查后重新保存'],
+  [50271, '测试邮件发送失败，请检查邮件设置后重试'],
   // 复用的现有通用错误码
   [40101, '未登录或登录已失效，请重新登录'],
   [40102, '登录已过期，请重新登录'],
@@ -52,8 +60,22 @@ const STATUS_MESSAGES = new Map([
   [429, '操作过于频繁，请稍后再试'],
 ])
 
+// 这些错误码的服务端 msg 是具体原因（40062/40063 指明哪一项不合法，50271 为认证失败/连接失败等中文原因），
+// 合格时拼在固定前缀后展示，否则回落到 CODE_MESSAGES 的通用提示
+const DETAIL_PREFIX = new Map([
+  [40062, '敏感词设置不合法'],
+  [40063, '邮件设置不合法'],
+  [50271, '测试邮件发送失败'],
+])
+
 const CJK = /[\u4e00-\u9fa5]/
 const MAX_SERVER_MSG_CHARS = 200
+
+// 后端统一返回中文 msg；只采纳不超长且含中文的文本，防止把英文堆栈/内部信息直接展示给客服
+function acceptableServerMsg(msg) {
+  const text = typeof msg === 'string' ? msg.trim() : ''
+  return text && text.length <= MAX_SERVER_MSG_CHARS && CJK.test(text) ? text : ''
+}
 
 function toFiniteNumber(value) {
   const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value
@@ -101,6 +123,12 @@ export function hallErrorCode(err) {
 
 export function hallErrorMessage(err, fallback = '操作失败，请稍后重试') {
   const info = extractHallError(err)
+  if (info.code !== null && DETAIL_PREFIX.has(info.code)) {
+    const prefix = DETAIL_PREFIX.get(info.code)
+    const detail = acceptableServerMsg(info.msg)
+    if (!detail) return CODE_MESSAGES.get(info.code)
+    return detail.startsWith(prefix) ? detail : prefix + '：' + detail
+  }
   if (info.code !== null && CODE_MESSAGES.has(info.code)) {
     let text = CODE_MESSAGES.get(info.code)
     if (info.code === HALL_ERROR_CODES.KICKED) {
@@ -111,9 +139,8 @@ export function hallErrorMessage(err, fallback = '操作失败，请稍后重试
   }
   if (info.timeout) return '请求超时，请稍后重试'
   if (info.network) return '网络连接失败，请检查网络后重试'
-  // 后端统一返回中文 msg；只采纳不超长且含中文的文本，防止把英文堆栈/内部信息直接展示给客服
-  const serverMsg = typeof info.msg === 'string' ? info.msg.trim() : ''
-  if (serverMsg && serverMsg.length <= MAX_SERVER_MSG_CHARS && CJK.test(serverMsg)) return serverMsg
+  const serverMsg = acceptableServerMsg(info.msg)
+  if (serverMsg) return serverMsg
   if (info.status !== null) {
     if (STATUS_MESSAGES.has(info.status)) return STATUS_MESSAGES.get(info.status)
     if (info.status >= 500) return '服务器繁忙，请稍后重试'

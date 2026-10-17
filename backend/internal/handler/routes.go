@@ -93,6 +93,14 @@ func RegisterRoutes(r *gin.Engine, h *HTTP, st *store.Store) {
 			adm.GET("/recycle-bin", h.ListRecycleBin)
 			adm.POST("/recycle-bin/restore", h.RestoreRecycleBin)
 			adm.POST("/recycle-bin/purge", h.PurgeRecycleBin)
+			// [122] 多人大厅敏感词屏蔽与告警邮件
+			adm.GET("/hall/filter", h.HallFilterGet)
+			adm.POST("/hall/filter", h.HallFilterSave)
+			adm.POST("/hall/filter/test", h.HallFilterTest)
+			adm.GET("/hall/filter/events", h.HallFilterEvents)
+			adm.GET("/hall/alert-mail", h.HallAlertMailGet)
+			adm.POST("/hall/alert-mail", h.HallAlertMailSave)
+			adm.POST("/hall/alert-mail/test", h.HallAlertMailTest)
 		}
 
 		// 文件上传 / 下载

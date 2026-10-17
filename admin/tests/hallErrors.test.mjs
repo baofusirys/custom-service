@@ -46,6 +46,20 @@ test('契约补充错误码（40059/40060/40376/40477/50370/50050）有中文提
   assert.equal(HALL_ERROR_CODES.LIVEKIT_UNAVAILABLE, 50370)
 })
 
+test('契约第 9.4 节错误码（40062/40063/50271）：带上服务端具体原因，否则用通用中文提示', () => {
+  assert.equal(HALL_ERROR_CODES.FILTER_INVALID, 40062)
+  assert.equal(HALL_ERROR_CODES.ALERT_MAIL_INVALID, 40063)
+  assert.equal(HALL_ERROR_CODES.ALERT_MAIL_SEND_FAILED, 50271)
+  assert.equal(hallErrorMessage(axiosErr(400, { code: 40062, msg: '自定义屏蔽词第 3 条超过 32 个字' })), '敏感词设置不合法：自定义屏蔽词第 3 条超过 32 个字')
+  assert.equal(hallErrorMessage(axiosErr(400, { code: 40062 })), '敏感词设置不合法，请检查后重新保存')
+  assert.equal(hallErrorMessage(axiosErr(400, { code: 40063, msg: '邮件设置不合法：收件邮箱最多 5 个' })), '邮件设置不合法：收件邮箱最多 5 个')
+  assert.equal(hallErrorMessage(axiosErr(400, { code: 40063, msg: 'invalid smtp_port' })), '邮件设置不合法，请检查后重新保存')
+  assert.equal(hallErrorMessage(axiosErr(502, { code: 50271, msg: '认证失败' })), '测试邮件发送失败：认证失败')
+  assert.equal(hallErrorMessage(axiosErr(502, { code: 50271, msg: '535 Error: authentication failed' })), '测试邮件发送失败，请检查邮件设置后重试')
+  assert.equal(hallErrorMessage({ code: 50271, msg: '连接失败' }), '测试邮件发送失败：连接失败')
+  assert.equal(hallErrorMessage(axiosErr(502, { code: 50271, msg: '错'.repeat(300) })), '测试邮件发送失败，请检查邮件设置后重试')
+})
+
 test('40372 附带剩余禁入时长', () => {
   const msg = hallErrorMessage(axiosErr(403, { code: 40372, msg: 'x', data: { retry_after: 1800 } }))
   assert.equal(msg, '你已被移出大厅，暂时无法进入（约 30 分钟后可再进入）')

@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/custom-service/backend/internal/livekit"
+	"github.com/custom-service/backend/internal/mailer"
 	"github.com/custom-service/backend/internal/security"
 	"github.com/custom-service/backend/internal/store"
 	"github.com/custom-service/backend/internal/ws"
@@ -98,6 +99,11 @@ type Deps struct {
 	SecLog   *zap.Logger
 	AuditLog *zap.Logger
 	Now      func() time.Time
+	// [122] 敏感词屏蔽与告警邮件
+	PublicDomain  string        // 推出默认放行的本站主域
+	AlertDefaults AlertDefaults // 告警邮件环境变量默认值
+	FilterStore   FilterStore   // 为空时若 Store 实现了 FilterStore 则复用
+	SendMail      func(ctx context.Context, c mailer.Config, m mailer.Message) error
 }
 
 // Service 大厅服务。
@@ -116,10 +122,20 @@ type Service struct {
 	audit     *zap.Logger
 	now       func() time.Time
 
-	settings   atomic.Pointer[cachedSettings]
-	frameSlots chan struct{} // WS 帧有界工作池
-	bgSlots    chan struct{} // 回调与后台强制动作的有界工作池
-	bgWG       sync.WaitGroup
+	settings atomic.Pointer[cachedSettings]
+
+	// [122] 敏感词屏蔽
+	publicDomain  string
+	alertDefaults AlertDefaults
+	filterStore   FilterStore
+	sendMail      func(ctx context.Context, c mailer.Config, m mailer.Message) error
+	smtpCipher    *security.Cipher
+	origCipher    *security.Cipher
+	filterCache   atomic.Pointer[cachedFilter]
+	alertCache    atomic.Pointer[cachedAlert]
+	frameSlots    chan struct{} // WS 帧有界工作池
+	bgSlots       chan struct{} // 回调与后台强制动作的有界工作池
+	bgWG          sync.WaitGroup
 }
 
 type cachedSettings struct {
@@ -155,6 +171,22 @@ func New(d Deps) (*Service, error) {
 	if d.ICE == nil {
 		d.ICE = func(string) []ICEServer { return []ICEServer{} }
 	}
+	if d.FilterStore == nil {
+		if fs, ok := d.Store.(FilterStore); ok {
+			d.FilterStore = fs
+		}
+	}
+	if d.SendMail == nil {
+		d.SendMail = mailer.Send
+	}
+	smtpCipher, err := deriveCipher(d.DataKey, smtpKeyInfo)
+	if err != nil {
+		return nil, err
+	}
+	origCipher, err := deriveCipher(d.DataKey, originalKeyInfo)
+	if err != nil {
+		return nil, err
+	}
 	return &Service{
 		room: d.Room, store: d.Store, media: d.Media, hub: d.Hub, limiter: d.Limiter,
 		state:      &redisState{rdb: d.Redis, room: d.Room, lease: slotLease, now: d.Now},
@@ -167,6 +199,13 @@ func New(d Deps) (*Service, error) {
 		now:        d.Now,
 		frameSlots: make(chan struct{}, 256),
 		bgSlots:    make(chan struct{}, 32),
+
+		publicDomain:  d.PublicDomain,
+		alertDefaults: d.AlertDefaults,
+		filterStore:   d.FilterStore,
+		sendMail:      d.SendMail,
+		smtpCipher:    smtpCipher,
+		origCipher:    origCipher,
 	}, nil
 }
 

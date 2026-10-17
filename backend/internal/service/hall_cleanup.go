@@ -16,6 +16,7 @@ type hallCleanupStore interface {
 	PurgeHallMessagesBefore(ctx context.Context, before time.Time, limit int) (int, error)
 	HallFilesBefore(ctx context.Context, room string, before time.Time, limit int) ([]store.HallFileRef, error)
 	DeleteFileRecords(ctx context.Context, ids []string) (int, error)
+	PurgeHallFilterEventsBefore(ctx context.Context, before time.Time, limit int) (int, error) // [122] 拦截记录
 }
 
 const (
@@ -31,6 +32,7 @@ type hallCleanupResult struct {
 	Messages     int // 物理删除的大厅消息条数
 	FileRecords  int // 删除的大厅附件数据库记录数
 	FilesRemoved int // 实际删除的磁盘文件数（文件已不存在或路径被拒时不计）
+	FilterEvents int // [122] 删除的敏感词拦截记录条数
 }
 
 // purgeHallBefore 分批删除 room 中早于 cutoff 的大厅消息与大厅附件：
@@ -45,6 +47,19 @@ func (s *Service) purgeHallBefore(ctx context.Context, st hallCleanupStore, room
 			return res, err
 		}
 		res.Messages += n
+		if n == 0 {
+			break
+		}
+		if err := pauseCtx(ctx, hallCleanupPause); err != nil {
+			return res, err
+		}
+	}
+	for i := 0; i < maxDeleteAllLoops; i++ {
+		n, err := st.PurgeHallFilterEventsBefore(ctx, cutoff, hallPurgeMsgBatch)
+		if err != nil {
+			return res, err
+		}
+		res.FilterEvents += n
 		if n == 0 {
 			break
 		}

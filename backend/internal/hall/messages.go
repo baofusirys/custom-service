@@ -14,6 +14,7 @@ import (
 
 	"github.com/custom-service/backend/internal/security"
 	"github.com/custom-service/backend/internal/store"
+	"github.com/custom-service/backend/internal/textfilter"
 	"github.com/custom-service/backend/internal/ws"
 )
 
@@ -364,6 +365,18 @@ func (s *Service) processChat(ctx context.Context, p Peer, a Actor, e *ws.Envelo
 		}
 		msg.Sender, msg.SenderRef, msg.Name = "agent", itoa64(a.AgentID), agentDisplayName(agent)
 	}
+	// [122] 敏感词屏蔽：只处理访客文字；落库与广播的都是屏蔽后内容，原文进拦截记录（加密）并由告警邮件发给管理员
+	var filterRes textfilter.Result
+	original := ""
+	if a.Visitor && content != "" {
+		if f := s.textFilter(ctx); f != nil {
+			if filterRes = f.Check(content); filterRes.Filtered {
+				original = content
+				content = filterRes.Masked
+				msg.Content = content
+			}
+		}
+	}
 	if strings.TrimSpace(e.MediaURL) != "" {
 		u, kind, name, size, ok := s.resolveMedia(ctx, e.MediaURL, uploadBy, msg.SenderRef)
 		if !ok {
@@ -394,10 +407,18 @@ func (s *Service) processChat(ctx context.Context, p Peer, a Actor, e *ws.Envelo
 		frameError(p, e.ID, "消息保存失败，请重试")
 		return
 	}
-	p.Send(&ws.Envelope{Type: "hall_ack", ID: e.ID, TS: msg.CreatedAt.UnixMilli()})
+	ack := &ws.Envelope{Type: "hall_ack", ID: e.ID, TS: msg.CreatedAt.UnixMilli()}
+	if filterRes.Filtered {
+		ack.Content = msg.Content
+		ack.Extra = map[string]any{"filtered": true}
+	}
+	p.Send(ack)
 	if !inserted {
 		s.biz.Info("hall_chat_idempotent_retry", zap.String("msg_id", msg.ID), zap.String("identity", identity))
 		return
+	}
+	if filterRes.Filtered {
+		s.recordFilterEvent(ctx, msg, original, filterRes, silenced)
 	}
 	out := &ws.Envelope{
 		Type: ws.HallTypeChat, ID: e.ID, Content: msg.Content, TS: msg.CreatedAt.UnixMilli(),
@@ -411,6 +432,6 @@ func (s *Service) processChat(ctx context.Context, p Peer, a Actor, e *ws.Envelo
 		s.hub.Broadcast(ctx, out)
 	}
 	s.biz.Info("hall_chat_persisted", zap.String("event", "hall_chat"), zap.String("msg_id", msg.ID), zap.String("identity", identity),
-		zap.String("sender", msg.Sender), zap.Bool("has_media", msg.MediaURL.Valid), zap.Bool("silenced", silenced),
+		zap.String("sender", msg.Sender), zap.Bool("has_media", msg.MediaURL.Valid), zap.Bool("silenced", silenced), zap.Bool("filtered", filterRes.Filtered),
 		zap.Int("content_runes", utf8.RuneCountInString(msg.Content)), zap.Int64("latency_ms", s.now().Sub(start).Milliseconds()))
 }

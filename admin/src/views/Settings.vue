@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, onMounted } from 'vue'
+import { computed, defineAsyncComponent, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
 import { listSounds, playSound, unlockAudio } from '../api/sound'
@@ -24,6 +24,9 @@ import {
 
 const session = useSession()
 const isAdmin = computed(() => session.agent?.role === 'admin')
+
+// [122] 敏感词屏蔽卡片仅管理员可见：按需异步加载，普通客服打开设置页不下载这部分代码
+const HallFilterSettings = defineAsyncComponent(() => import('../components/hall/HallFilterSettings.vue'))
 
 const loading = ref(false)
 const saving = ref(false)
@@ -264,7 +267,13 @@ onMounted(load)
             :description="'按当前上限粗估（' + form.hall_max_participants + ' 人在线、2 人同时说话' + (form.hall_video_enabled ? '、每人观看 ' + Math.min(form.hall_max_cameras, 2) + ' 路低清视频' : '') + '），大厅峰值下行约 ' + hallBandwidth.downstream + 'Mbps（语音约 ' + hallBandwidth.audio + 'Mbps、视频约 ' + hallBandwidth.video + 'Mbps）。每路摄像头上行约 0.6Mbps（360p＋180p 联播），观看端默认只收低清层。超出服务器带宽时会卡顿，并影响主站访问。'" />
         </el-form-item>
       </template>
+    </el-form>
 
+    <!-- [122] 多人大厅 → 敏感词屏蔽：独立子卡片（自带加载与保存，不参与下方「保 存」按钮）；
+         放在两段表单之间，避免 el-form 嵌套。仅管理员可见 -->
+    <HallFilterSettings v-if="isAdmin" />
+
+    <el-form label-width="160px" label-position="left">
       <el-divider content-position="left">iPhone APNs 推送（可选）</el-divider>
 
       <el-form-item label="Push User ID">

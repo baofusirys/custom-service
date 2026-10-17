@@ -48,6 +48,20 @@ type Config struct {
 
 	// [119] 多人大厅：自托管 LiveKit 媒体服务（未配置 LIVEKIT_API_KEY 时大厅整体关闭）
 	LiveKit LiveKitConfig
+
+	// [122] 大厅敏感消息告警邮件的默认值（后台可逐项覆盖；均可为空，为空时需在后台填写）
+	HallAlert HallAlertConfig
+}
+
+// HallAlertConfig 告警邮件环境变量默认值。Password 只在内存中使用，任何日志都不得输出。
+type HallAlertConfig struct {
+	Host     string
+	Port     int
+	Security string
+	Username string
+	Password string
+	From     string
+	To       []string
 }
 
 // LiveKitConfig 大厅媒体服务配置。APISecret 只在内存中用于签发/校验 JWT，任何日志都不得输出。
@@ -102,6 +116,15 @@ func Load() (*Config, error) {
 			APISecret:   os.Getenv("LIVEKIT_API_SECRET"),
 			InternalURL: strings.TrimSpace(os.Getenv("LIVEKIT_INTERNAL_URL")),
 			PublicURL:   strings.TrimSpace(os.Getenv("LIVEKIT_PUBLIC_URL")),
+		},
+		HallAlert: HallAlertConfig{
+			Host:     strings.TrimSpace(os.Getenv("HALL_ALERT_SMTP_HOST")),
+			Port:     defaultInt(os.Getenv("HALL_ALERT_SMTP_PORT"), 0),
+			Security: strings.ToLower(strings.TrimSpace(os.Getenv("HALL_ALERT_SMTP_SECURITY"))),
+			Username: strings.TrimSpace(os.Getenv("HALL_ALERT_SMTP_USERNAME")),
+			Password: os.Getenv("HALL_ALERT_SMTP_PASSWORD"),
+			From:     strings.TrimSpace(os.Getenv("HALL_ALERT_MAIL_FROM")),
+			To:       splitCSV(os.Getenv("HALL_ALERT_MAIL_TO")),
 		},
 		MySQL: MySQLConfig{
 			Host:     defaultStr(os.Getenv("MYSQL_HOST"), "mysql"),

@@ -18,6 +18,7 @@ import (
 //
 // 多副本时借 Redis 计数键保证同一窗口只有一个节点执行。
 func (s *Service) Start(ctx context.Context) {
+	s.startAlertWorker(ctx) // [122] 敏感消息告警邮件发件箱
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {

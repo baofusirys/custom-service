@@ -341,7 +341,7 @@ func (s *Service) runHallCleanup(ctx context.Context) {
 	defer cancel()
 	res, jobErr := s.purgeHallBefore(jctx, s.store, store.HallDefaultRoom, time.Now().Add(-store.HallRetention))
 	messages, files, removed := res.Messages, res.FileRecords, res.FilesRemoved
-	fields := []zap.Field{zap.String("run_id", runID), zap.Int("messages", messages), zap.Int("file_records", files),
+	fields := []zap.Field{zap.String("run_id", runID), zap.Int("messages", messages), zap.Int("file_records", files), zap.Int("filter_events", res.FilterEvents),
 		zap.Int("files_removed", removed), zap.Int64("duration_ms", time.Since(start).Milliseconds())}
 	if jobErr != nil {
 		s.bizLog.Error("job_hall_cleanup_failed", append(fields, zap.Error(jobErr))...)
@@ -349,9 +349,9 @@ func (s *Service) runHallCleanup(ctx context.Context) {
 		s.bizLog.Info("job_hall_cleanup_done", fields...)
 	}
 	// 失败前已删除的部分同样留审计（数据已不可恢复，必须可追溯）
-	if messages > 0 || files > 0 {
+	if messages > 0 || files > 0 || res.FilterEvents > 0 {
 		s.store.AuditLog(context.Background(), "system", "hall_cleanup", "retention_days=30",
-			fmt.Sprintf(`{"messages":%d,"file_records":%d,"files_removed":%d}`, messages, files, removed), "")
+			fmt.Sprintf(`{"messages":%d,"file_records":%d,"files_removed":%d,"filter_events":%d}`, messages, files, removed, res.FilterEvents), "")
 	}
 }
 

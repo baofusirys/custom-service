@@ -400,3 +400,55 @@ func TestUploadAgentCookieAuthAfterFix(t *testing.T) {
 		t.Fatalf("非法 scope 应 400：%d", w.Code)
 	}
 }
+
+// [122] 敏感词与告警邮件管理接口：只允许管理员；访客令牌 401、普通客服 403；GET 不返回任何密码字段；SQL 注入式参数被拒。
+func TestHallFilterRoutesAuthorization(t *testing.T) {
+	env := newRouteEnv(t)
+	vt := visitorTok(t, rtSecret)
+	at := agentTok(t, 2, "agent", 0)
+	admin := agentTok(t, 1, "admin", 0)
+	paths := []struct{ m, p string }{
+		{"GET", "/api/admin/hall/filter"}, {"POST", "/api/admin/hall/filter"}, {"POST", "/api/admin/hall/filter/test"},
+		{"GET", "/api/admin/hall/filter/events"}, {"GET", "/api/admin/hall/alert-mail"}, {"POST", "/api/admin/hall/alert-mail"},
+		{"POST", "/api/admin/hall/alert-mail/test"},
+	}
+	for _, p := range paths {
+		if st, _ := env.do(p.m, p.p, "", map[string]any{}, nil); st != 401 {
+			t.Fatalf("%s %s 无令牌应 401：%d", p.m, p.p, st)
+		}
+		if st, _ := env.do(p.m, p.p, vt, map[string]any{}, nil); st != 401 {
+			t.Fatalf("%s %s 访客令牌应 401：%d", p.m, p.p, st)
+		}
+		if st, m := env.do(p.m, p.p, at, map[string]any{}, nil); st != 403 || code(m) != 40301 {
+			t.Fatalf("%s %s 普通客服应 403：%d %v", p.m, p.p, st, m)
+		}
+	}
+	st, m := env.do("GET", "/api/admin/hall/filter", admin, nil, nil)
+	if st != 200 || code(m) != 0 {
+		t.Fatalf("管理员读取敏感词设置应成功：%d %v", st, m)
+	}
+	st, m = env.do("GET", "/api/admin/hall/alert-mail", admin, nil, nil)
+	if st != 200 {
+		t.Fatalf("管理员读取邮件设置应成功：%d %v", st, m)
+	}
+	data, _ := m["data"].(map[string]any)
+	for k := range data {
+		if strings.Contains(strings.ToLower(k), "password") && k != "password_set" {
+			t.Fatalf("邮件设置不得返回密码字段：%s", k)
+		}
+	}
+	if st, m := env.do("POST", "/api/admin/hall/filter", admin, map[string]any{"enabled": true}, nil); st != 400 || code(m) != 40062 {
+		t.Fatalf("缺字段应 400/40062：%d %v", st, m)
+	}
+	if st, m := env.do("GET", "/api/admin/hall/filter/events?before=1%20OR%201=1", admin, nil, nil); st != 400 || code(m) != 40060 {
+		t.Fatalf("非法游标应 400：%d %v", st, m)
+	}
+	if st, m := env.do("POST", "/api/admin/hall/alert-mail", admin, map[string]any{"enabled": true, "to": []string{"a@b.cn"}, "from": "k@b.cn",
+		"smtp_host": "smtp.163.com", "smtp_port": 25, "smtp_security": "none", "smtp_username": "u"}, nil); st != 400 || code(m) != 40063 {
+		t.Fatalf("向外网明文发信应 400/40063：%d %v", st, m)
+	}
+	// 通用设置接口不能写入敏感词/邮件键（白名单外，静默忽略后无可更新字段）
+	if st, m := env.do("POST", "/api/admin/settings", admin, map[string]string{"hall_alert_smtp_password_enc": "x", "hall_filter_enabled": "false"}, nil); st != 400 || code(m) != 40031 {
+		t.Fatalf("通用设置接口不得写入敏感词/邮件键：%d %v", st, m)
+	}
+}

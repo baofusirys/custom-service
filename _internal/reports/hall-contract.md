@@ -119,3 +119,28 @@
 ## 8. 错误码
 40371 大厅已关闭 · 40372 已被移出 · 40374 当前无法开麦/开摄像头 · 40375 视频未开启 · 40973 开麦已满 · 40976 摄像头已满 · 40977 大厅已满 · 42910 过于频繁
 - 补充（后端实现）：40059 大厅设置不合法 · 40060 参数错误 · 40061 上传 scope 不合法 · 41302 回调请求体过大 · 40110 访客令牌缺失或无效 · 40120 回调签名无效 · 40376 不能对该对象执行此操作 · 40477 大厅消息不存在 · 50370 语音服务暂不可用 · 50050 服务器错误（沿用现有）。
+
+
+## 9. 敏感词屏蔽与邮件告警（[122]，北京时间 2026-10-18）
+### 9.1 规则
+- 只处理**访客**在大厅发的**文字**（hall_chat 的 content；图片、文件、文件名不处理；客服消息不处理）。
+- 命中后：落库与广播的都是屏蔽后的内容；方式 `mask`（默认，把每处命中替换为 `**`，相邻命中合并）或 `whole`（整条内容变为 `**`）。原文只进入「拦截记录」（AES-GCM 加密存储，30 天自动清理）并通过邮件发给管理员。
+- 类别：`ad` 广告、`link` 超链接/网址（含「点com」等变体，放行域名除外）、`porn` 色情、`gambling` 博彩、`contact` 联系方式（手机号、9 位以上数字、QQ/微信/Telegram 等关键词后跟账号、邮箱、`@用户名`）、`custom` 自定义词（始终生效）。
+- 匹配前统一：全角转半角、大小写不敏感、忽略字间空格/标点/零宽字符（如「百 家 乐」「v x」）；数字识别兼容中文与圈号数字。放行词所在范围内的命中不屏蔽。
+- 被拉黑（静默）访客：同样屏蔽，记录 `mail_status=silenced`，不发邮件。
+- 邮件：合并发送，每封最多 50 条、全局每 60 秒最多 1 封；失败按 1/5/15/60 分钟重试，共 5 次后记为 failed。邮件含北京时间、发送者显示名、identity、访客 vid（仅邮件与管理员接口可见）、命中类别、原文、屏蔽后内容。
+- WS：被屏蔽时 `hall_ack` 额外带 `content`（屏蔽后）与 `extra:{filtered:true}`；广播的 hall_chat 即屏蔽后内容，三端按 id 合并时以服务端为准。
+
+### 9.2 管理接口（仅管理员，`adm` 组；统一 `{code,msg,data}`）
+- `GET /api/admin/hall/filter` → `data:{enabled, mode, categories:[启用的类别], custom_words:[], allow_words:[], allow_domains:[], builtin:{ad:[],porn:[],gambling:[],contact_keywords:[]}, limits:{custom_words:500, allow_words:200, allow_domains:50, word_max_runes:32}}`
+- `POST /api/admin/hall/filter` `{enabled, mode, categories, custom_words, allow_words, allow_domains}`（全部必填）→ 返回同 GET；不合法 400 `40062`（msg 指明哪一项）。词去首尾空白、去重，空行忽略；域名转小写，中文域名转 punycode。
+- `POST /api/admin/hall/filter/test` `{content, config?}`（content 1–1000 字；config 可选，结构同 POST，用于保存前预览）→ `data:{filtered, masked, categories:[], hits:[{category, text}]}`；每管理员 30 次/分钟（42910）。
+- `GET /api/admin/hall/filter/events?before=<id>&limit=20`（limit ≤ 50，新到旧）→ `data:[{id, created_at(+08:00), sender, name, identity, vid, categories:[], original, masked, mail_status:"pending"|"sent"|"failed"|"disabled"|"silenced", mail_attempts, mail_error}]`
+- `GET /api/admin/hall/alert-mail` → `data:{enabled, to:[], from, smtp_host, smtp_port, smtp_security:"ssl"|"starttls"|"none", smtp_username, password_set, configured}`（**永不返回密码**）。
+- `POST /api/admin/hall/alert-mail` `{enabled, to:[0–5 个邮箱，开启时至少 1 个], from, smtp_host, smtp_port(1–65535), smtp_security, smtp_username(≤128), smtp_password?(≤256)}`（from 与 smtp_host 始终必填）：smtp_password 省略或空串 = 不修改；`none` 只允许本机地址（防止明文传密码）。不合法 400 `40063`。
+- `POST /api/admin/hall/alert-mail/test` → 用已保存配置立即发一封测试邮件；成功 `data:{to:[]}`；失败 502 `50271`（msg 为中文原因：认证失败/连接失败/TLS 失败/收件人被拒等，不含服务器原始响应）；每管理员 5 次/分钟。
+### 9.3 配置来源
+- 邮件配置逐项取值：后台保存值 → 环境变量默认值（`HALL_ALERT_SMTP_HOST/PORT/SECURITY/USERNAME/PASSWORD`、`HALL_ALERT_MAIL_FROM`、`HALL_ALERT_MAIL_TO`）→ 空。后台保存的 SMTP 密码用由 DATA_AES_KEY 派生的独立子密钥 AES-GCM 加密存入 settings 表，不在通用 `/api/admin/settings` 中出现。
+- 生产默认：发件 kelili 邮箱（与主站发货邮件同一 163 账号，compose 直接引用主站 `SMTP_*` 变量），收件 `baofusir@gmail.com`；均可在后台修改。
+### 9.4 错误码补充
+40062 敏感词设置不合法 · 40063 邮件设置不合法 · 50271 测试邮件发送失败
