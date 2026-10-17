@@ -4,6 +4,14 @@
 
 ---
 
+## [121] 2026-10-18 02:02 — 阿里云仓库 cs-livekit 改为公开，生产改用仓库镜像
+
+**起因 / 需求**：爷爷提供阿里云访问密钥，要求把 cs-livekit 镜像仓库改为公开，不再在服务器本机构建。
+**做了什么**：经阿里云容器镜像个人版接口把 `baofusir/cs-livekit` 改为公开（匿名拉取清单 401→200）；生产备份编排与两处 .env 后，拉取仓库镜像，compose 标签改回 `IMAGE_TAG`、删除 `pull_policy: never` 与 `CS_LIVEKIT_IMAGE_TAG`，只重建 cs-livekit；本地 fakami 项目再次逐字节同步（fakami 提交 [187]）。
+**验证**：cs-livekit 15 秒 healthy、运行镜像为仓库镜像（构建提交 dbf2d19、UID 10001）；大厅内客服 1.5 秒后自动重连；外网两人实连 udp 7882、音频字节持续增长；18 个服务 healthy；fakami 核对 IN_SYNC、部署前检查 0 失败。
+**注意**：阿里云与腾讯云 API 密钥都曾在对话中明文提供，建议用完后在控制台禁用；CI 以后新增的镜像仓库首次推送后默认私有，需改公开。
+**证据**：`_internal/verification/acr-public-livekit-20261018-0202.txt`（本地）。
+
 ## [120] 2026-10-18 01:58 — 放行 coturn 公网端口；同步爷爷本地 fakami 项目
 
 **起因 / 需求**：爷爷同意放行一对一语音 TURN 端口，并要求把客服 0.9.1 的编排与环境变化同步到本地 fakami 项目。

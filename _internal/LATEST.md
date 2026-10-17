@@ -15,9 +15,9 @@
   - 自动续签：App 仓库 `scripts/auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点，已改指向 Flutter 脚本），日志 Mac `~/Library/Logs/custom_service_app/auto_reinstall.log`（旧版历史在同目录 `auto_reinstall-swift-history.log`）；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
   - 待办：轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
 - **发布到生产/下游**：v0.9.1 已推送 GitHub（标签 v0.9.1）并于 2026-10-18 01:13 部署生产（只更新 8 个 cs 容器含新增 cs-livekit，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.9.1-20261018-005706.sql.gz`）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代，大厅信令 `/lk/rtc`）。生产实例为腾讯云轻量应用服务器 `lhins-rba8ijgo`（ap-beijing-6）。
-  - **cs-livekit 特殊点**：阿里云 ACR 仓库 `baofusir/cs-livekit` 为私有，镜像在服务器本机构建，编排用独立变量 `CS_LIVEKIT_IMAGE_TAG`（/fakami/.env）+ `pull_policy: never`；只升级 IMAGE_TAG 不影响它。详见 `_internal/reports/hall-deploy.md` 第 10 节。
+  - **cs-livekit**：阿里云 ACR 仓库 `baofusir/cs-livekit` 已改为公开（2026-10-18），与其它 cs-* 一样随 `IMAGE_TAG` 拉取；CI 首次推送的新仓库默认私有，需改公开。详见 `_internal/reports/hall-deploy.md` 第 10 节。
   - **媒体端口**：UDP 7882 / TCP 7881 已在轻量防火墙放行；宿主机 iptables `DOCKER-USER`（`/etc/iptables/rules.v4`）末尾 DROP 前有注释为 `cs-livekit-media`、`cs-coturn-media` 的放行规则（2026-10-18 起 coturn 3478/5349/49152-49200 也对公网可达）。turn 子域 TLS 证书已过期（TURNS 5349 不可用，待改 DNS 验证自动续签）。
-  - **本地 fakami 项目**：已于 2026-10-18 与服务器逐字节同步（fakami 提交 [186] 54cf7d2，部署前检查需 `-ExpectedRunningServices 18`）。以后客服再升级，仍需同步 fakami 的 `server/.env`（`IMAGE_TAG`）与 `/srv/cs-data/.env`。
+  - **本地 fakami 项目**：已于 2026-10-18 与服务器逐字节同步（fakami 提交 [186] 54cf7d2、[187] bcbbe9b，部署前检查需 `-ExpectedRunningServices 18`）。以后客服再升级，仍需同步 fakami 的 `server/.env`（`IMAGE_TAG`）与 `/srv/cs-data/.env`。
 - **待发布**：无。
 
 ## 当前部署坐标
