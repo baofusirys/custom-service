@@ -6,8 +6,13 @@ ARG VITE_WS_BASE=/ws
 ENV VITE_API_BASE=$VITE_API_BASE VITE_WS_BASE=$VITE_WS_BASE
 WORKDIR /src
 COPY package.json package-lock.json ./
+# 国内镜像源优先；镜像源尚未同步的新版本包（实测 livekit-client 2.23.0 在 npmmirror 404）回退官方源。
+# 包完整性由 package-lock.json 中的 sha512 校验，与下载源无关。
 RUN npm config set registry https://registry.npmmirror.com && \
-    npm ci --no-audit --no-fund
+    (npm ci --no-audit --no-fund || \
+     (echo "[admin build] 镜像源缺包，回退官方源 registry.npmjs.org" && \
+      npm config set registry https://registry.npmjs.org && \
+      npm ci --no-audit --no-fund))
 COPY . .
 RUN npm run build
 
