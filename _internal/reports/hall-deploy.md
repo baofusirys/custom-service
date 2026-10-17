@@ -105,7 +105,11 @@
 3. 再添加：来源 `0.0.0.0/0`，协议端口 `TCP:7881`，策略「允许」，备注「cs-livekit 媒体 TCP 兜底」。
 4. 出站规则保持默认全放通（若已收紧，需放行 UDP 出站，否则媒体回包不通）。
 
-> 宿主机若启用了 ufw/firewalld：Docker 端口映射走 iptables DNAT，不受 ufw 默认链约束；外层防线以腾讯云规则为准。放行后与 `docker compose ps` 的 ports 清单逐一核对：对公网的应只有 80/443、22、coturn 既有端口与新增的 7881/tcp、7882/udp。
+> **宿主机防火墙（生产实测必须做）**：生产机 iptables 的 `DOCKER-USER` 链由 fakami 加固（`/etc/iptables/rules.v4`，EdgeOne 规则由 `/fakami/ops/edgeone-firewall/firewall.py` 维护）以 `-j DROP` 结尾，所有 Docker 映射端口默认对公网丢弃。只放行腾讯云规则不够，还须在该链末尾 DROP 之前加入（实时 + 写入 rules.v4，`iptables-restore --test` 校验），详见第 10 节：
+> `-A DOCKER-USER -p udp -m conntrack --ctdir ORIGINAL --ctorigdstport 7882 -m comment --comment cs-livekit-media -j RETURN`
+> `-A DOCKER-USER -p tcp -m conntrack --ctdir ORIGINAL --ctorigdstport 7881 -m comment --comment cs-livekit-media -j RETURN`
+>
+> 宿主机若启用了 ufw/firewalld：Docker 端口映射走 iptables DNAT，不受 ufw 默认链约束。放行后与 `docker compose ps` 的 ports 清单逐一核对：对公网的应只有 80/443、22、coturn 既有端口与新增的 7881/tcp、7882/udp。
 
 ## 6. 部署步骤（沿用生产既有做法：只改 IMAGE_TAG、只更新 cs 服务）
 
@@ -159,3 +163,13 @@ docker compose logs --tail=200 cs-backend cs-nginx cs-livekit 2>&1 | grep -E 'FA
 - [ ] fakami-caddy 把客服域名全部路径转发给 cs-nginx，且未单独拦截 `/lk/`。
 - [ ] 带宽：公网 7Mbps 与主站共用，默认上限（访客同时开麦 6、摄像头 2、每人订阅 2 路视频、360p+180p 联播）不要随意调大。
 - [ ] 可选：LiveKit 日志若提示 UDP 接收缓冲区偏小（`net.core.rmem_max`），属于宿主机 sysctl 调优，需单独征得同意后作为一次性宿主机操作处理，不混入部署流程。
+
+## 10. 生产实际落地记录（北京时间 2026-10-18）
+
+- **版本**：v0.9.1（v0.9.0 的 cs-admin 构建因 npmmirror 缺 livekit-client 2.23.0 失败，改为失败回退官方源后发 0.9.1）。01:13 部署，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.9.1-20261018-005706.sql.gz`（5454660 字节，gzip -t 通过）及编排、.env 副本（600）。迁移 015 自动执行（迁移前自动备份成功）。
+- **cs-livekit 镜像**：CI 已推送到阿里云 ACR，但新仓库 `baofusir/cs-livekit` 默认私有，服务器匿名拉取被拒。现做法：在服务器上用本仓库 `livekit/`（提交 dbf2d19）`docker build` 出 `${REGISTRY_BASE}/cs-livekit:0.9.1`；`/fakami/docker-compose.yml` 的 cs-livekit 段标签改用独立变量 `CS_LIVEKIT_IMAGE_TAG`（/fakami/.env，当前 0.9.1）并加 `pull_policy: never`，因此以后只升级 `IMAGE_TAG` 不会因找不到 cs-livekit 新标签而失败。
+  - ACR 仓库改为「公开」后：删除 pull_policy 行、image 标签改回 `IMAGE_TAG`，与其它 cs-* 一致。
+  - 保持本机构建时，`livekit/` 有改动才需要：上传该目录到服务器临时目录 → `nice -n 10 docker build -t <REGISTRY_BASE>/cs-livekit:<新版本> .` → 改 `CS_LIVEKIT_IMAGE_TAG` → `docker compose up -d --no-deps cs-livekit`。
+- **端口**：轻量应用服务器 `lhins-rba8ijgo`（ap-beijing-6）防火墙已新增 UDP 7882、TCP 7881（来源 0.0.0.0/0，备注「客服多人大厅语音」）；宿主机 `DOCKER-USER` 已按上文加两条 RETURN 并写入 rules.v4（改前备份 `/srv/cs-backup/manual/host-iptables-*-before-livekit-20261018-012701*`）。服务器无公网 IPv6，rules.v6 未改。
+- **验收**：8 个 cs 容器 healthy、fakami 业务容器不受影响；外网（家中 Mac）TCP 7881 可连；用临时探测房间两人实连生产 LiveKit：发布方 ICE 选中 `udp 49.233.156.149:7882`，接收方 3 秒内音频字节持续增长；LiveKit 回调已到达后端并验签通过（探测房间按设计忽略）。
+- **既有问题（未处理，待爷爷决定）**：同一 `DOCKER-USER` DROP 也拦着 coturn 的 3478/5349/49152-49200，外网实测 TCP 3478 不通，一对一语音的 TURN 中继对公网实际不可用（与本次大厅无关，大厅走 LiveKit 自己的 7881/7882）。如需恢复，按同样方式为这些端口加 RETURN 规则。
