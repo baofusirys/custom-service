@@ -1,0 +1,25 @@
+# Mac 本机隔离测试环境专用 LiveKit 配置（只监听 127.0.0.1，与生产无关）。
+# 生产配置见仓库 livekit/ 目录；这里端口改为 1788x，避免与其它服务冲突。
+port: 17880
+bind_addresses:
+  - 127.0.0.1
+rtc:
+  tcp_port: 17881
+  udp_port: 17882
+  use_external_ip: false
+  node_ip: 127.0.0.1
+  enable_loopback_candidate: true
+room:
+  auto_create: true
+  empty_timeout: 300
+  departure_timeout: 20
+  max_participants: 200
+limit:
+  subscription_limit_video: 2
+webhook:
+  api_key: __API_KEY__
+  urls:
+    - http://127.0.0.1:18080/api/livekit/webhook
+logging:
+  level: info
+  json: true

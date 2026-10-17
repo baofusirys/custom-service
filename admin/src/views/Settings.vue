@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import http from '../api/http'
 import { listSounds, playSound, unlockAudio } from '../api/sound'
@@ -12,8 +12,18 @@ import {
   parseAutoCleanDays,
   serializeAutoCleanDays,
 } from '../modules/autoClean'
+import {
+  HALL_RECOMMENDED_MAX_CAMERAS,
+  HALL_SERVER_BANDWIDTH_MBPS,
+  HALL_SETTING_DEFAULTS,
+  HALL_SETTING_LIMITS,
+  estimateHallBandwidth,
+  parseHallSettings,
+  validateHallSettings,
+} from '../modules/hallSettings'
 
 const session = useSession()
+const isAdmin = computed(() => session.agent?.role === 'admin')
 
 const loading = ref(false)
 const saving = ref(false)
@@ -38,8 +48,17 @@ const form = ref({
   push_sound_call: '4',     // [043] 语音来电（系统通知栏）
   // [113] 自动清理：关闭 / 7-3650 天（存储为字符串 auto_clean_days，"0" 表示关闭）
   auto_clean_enabled: false,
-  auto_clean_days: AUTO_CLEAN_DEFAULT_DAYS
+  auto_clean_days: AUTO_CLEAN_DEFAULT_DAYS,
+  // [119] 多人大厅（契约第 3 节）；仅管理员可见可改
+  ...HALL_SETTING_DEFAULTS
 })
+
+// [119] 按当前上限粗估大厅峰值带宽（假设 2 人同时说话），超出服务器带宽时提示
+const hallBandwidth = computed(() => estimateHallBandwidth({
+  participants: form.value.hall_max_participants,
+  maxCameras: form.value.hall_max_cameras,
+  videoEnabled: form.value.hall_video_enabled,
+}))
 
 // luckfast 推送提示音：0-15 共 16 种（具体音色需要在 iPhone 上听）
 const pushSoundOptions = Array.from({ length: 16 }, (_, i) => ({
@@ -70,6 +89,7 @@ async function load() {
     const autoClean = parseAutoCleanDays(d.auto_clean_days)
     form.value.auto_clean_enabled = autoClean.enabled
     form.value.auto_clean_days = autoClean.days
+    Object.assign(form.value, parseHallSettings(d))
   } finally {
     loading.value = false
   }
@@ -79,6 +99,11 @@ async function save() {
   const autoClean = serializeAutoCleanDays(form.value.auto_clean_enabled, form.value.auto_clean_days)
   if (!autoClean.ok) {
     ElMessage.warning(autoClean.error)
+    return
+  }
+  const hall = validateHallSettings(form.value)
+  if (isAdmin.value && !hall.ok) {
+    ElMessage.warning(hall.error)
     return
   }
   saving.value = true
@@ -97,7 +122,8 @@ async function save() {
       push_sound_enter: form.value.push_sound_enter || '1',
       push_sound_message: form.value.push_sound_message || '9',
       push_sound_call: form.value.push_sound_call || '4',
-      auto_clean_days: autoClean.value
+      auto_clean_days: autoClean.value,
+      ...(isAdmin.value && hall.ok ? hall.payload : {})
     }
     await http.post('/admin/settings', payload)
     ElMessage.success('保存成功')
@@ -179,6 +205,65 @@ onMounted(load)
         <el-input v-model="form.voice_call_hint" maxlength="20" style="width:300px" placeholder="直接呼叫客服" />
         <div class="form-tip">访客端 widget 电话按钮旁边显示的小字（指引访客点击呼叫）</div>
       </el-form-item>
+
+      <!-- [119] 多人大厅：仅管理员可见 -->
+      <template v-if="isAdmin">
+        <el-divider content-position="left">多人大厅</el-divider>
+
+        <el-form-item label="启用大厅">
+          <el-switch v-model="form.hall_enabled" active-text="开启" inactive-text="关闭" />
+          <div class="form-tip">关闭后不再允许进入大厅，已在大厅里的访客和客服会被移出；私聊不受影响。</div>
+        </el-form-item>
+
+        <el-form-item label="允许视频">
+          <el-switch v-model="form.hall_video_enabled" active-text="开启" inactive-text="关闭" />
+          <div class="form-tip">开启后客服和访客都可以开摄像头（受下方上限约束）；关闭时立即收回所有人的摄像头权限。</div>
+        </el-form-item>
+
+        <el-form-item label="同时开麦访客上限">
+          <el-input-number
+            v-model="form.hall_max_speakers"
+            :min="HALL_SETTING_LIMITS.hall_max_speakers.min"
+            :max="HALL_SETTING_LIMITS.hall_max_speakers.max"
+            :step="1"
+            :precision="0"
+            step-strictly
+            controls-position="right" />
+          <div class="form-tip">范围 {{ HALL_SETTING_LIMITS.hall_max_speakers.min }}–{{ HALL_SETTING_LIMITS.hall_max_speakers.max }} 人，默认 {{ HALL_SETTING_DEFAULTS.hall_max_speakers }}；客服开麦不占名额。</div>
+        </el-form-item>
+
+        <el-form-item label="同时开摄像头上限">
+          <el-input-number
+            v-model="form.hall_max_cameras"
+            :min="HALL_SETTING_LIMITS.hall_max_cameras.min"
+            :max="HALL_SETTING_LIMITS.hall_max_cameras.max"
+            :step="1"
+            :precision="0"
+            step-strictly
+            controls-position="right" />
+          <div class="form-tip">范围 {{ HALL_SETTING_LIMITS.hall_max_cameras.min }}–{{ HALL_SETTING_LIMITS.hall_max_cameras.max }} 路（含客服），默认 {{ HALL_SETTING_DEFAULTS.hall_max_cameras }}。</div>
+        </el-form-item>
+
+        <el-form-item label="大厅人数上限">
+          <el-input-number
+            v-model="form.hall_max_participants"
+            :min="HALL_SETTING_LIMITS.hall_max_participants.min"
+            :max="HALL_SETTING_LIMITS.hall_max_participants.max"
+            :step="10"
+            :precision="0"
+            controls-position="right" />
+          <div class="form-tip">范围 {{ HALL_SETTING_LIMITS.hall_max_participants.min }}–{{ HALL_SETTING_LIMITS.hall_max_participants.max }} 人，默认 {{ HALL_SETTING_DEFAULTS.hall_max_participants }}；满员时新访客进不了大厅，但仍可使用私聊。</div>
+        </el-form-item>
+
+        <el-form-item label="带宽说明">
+          <el-alert
+            :type="hallBandwidth.downstream > HALL_SERVER_BANDWIDTH_MBPS || form.hall_max_cameras > HALL_RECOMMENDED_MAX_CAMERAS ? 'warning' : 'info'"
+            :closable="false"
+            show-icon
+            :title="'服务器公网带宽 ' + HALL_SERVER_BANDWIDTH_MBPS + 'Mbps，且与主站共用；摄像头建议不超过 ' + HALL_RECOMMENDED_MAX_CAMERAS + ' 路。'"
+            :description="'按当前上限粗估（' + form.hall_max_participants + ' 人在线、2 人同时说话' + (form.hall_video_enabled ? '、每人观看 ' + Math.min(form.hall_max_cameras, 2) + ' 路低清视频' : '') + '），大厅峰值下行约 ' + hallBandwidth.downstream + 'Mbps（语音约 ' + hallBandwidth.audio + 'Mbps、视频约 ' + hallBandwidth.video + 'Mbps）。每路摄像头上行约 0.6Mbps（360p＋180p 联播），观看端默认只收低清层。超出服务器带宽时会卡顿，并影响主站访问。'" />
+        </el-form-item>
+      </template>
 
       <el-divider content-position="left">iPhone APNs 推送（可选）</el-divider>
 

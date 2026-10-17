@@ -17,6 +17,8 @@ const post = async (path, body) => {
 // 清理历次 UI 测试创建的同名快捷回复
 const qr = await (await fetch(BASE + '/api/agent/quick-replies', { headers: { Authorization: 'Bearer ' + login.token } })).json();
 for (const q of (qr.data || []).filter((x) => x.scope === 'personal' && (x.title === '付款方式' || String(x.title || '').startsWith('F巡检')))) await post('/api/agent/quick-replies/' + q.id + '/delete', {});
+// 后台浏览器巡检需要至少一条团队话术（快捷回复面板点选填入）；不存在时补一条固定的
+if (!(qr.data || []).some((x) => x.scope === 'team' && x.title === '巡检团队话术')) await post('/api/agent/quick-replies', { scope: 'team', title: '巡检团队话术', content: '您好，这里是团队话术示例', sort_order: 99 });
 for (const [name, file] of Object.entries(names)) {
   const vf = HOME + '/cs-testenv/vids/' + file;
   if (existsSync(vf)) {

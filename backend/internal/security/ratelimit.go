@@ -204,15 +204,35 @@ func (r *RateLimiter) AllowVisitorMessage(ctx context.Context, visitorID string,
 	return r.allow(ctx, "rl:vmsg:"+visitorID, pm, time.Minute)
 }
 
-// 通用计数：Redis INCR + EXPIRE
+// fixedWindowScript 原子固定窗口计数（Lua 在 Redis 内单线程执行，INCR 与设置过期之间不会被打断）：
+//   - 只在本窗口第一次计数（INCR 结果为 1）时 PEXPIRE，后续请求不刷新过期时间，
+//     窗口从第一次请求起算，到期即整体清零（修复：原实现每次请求都 EXPIRE，持续的慢速请求永远解不开）；
+//   - 若计数键异常丢失过期（PTTL = -1，例如被人工 PERSIST / 旧版本遗留），补设过期，保证计数键一定会过期；
+//   - 只用 INCR / PEXPIRE / PTTL，不依赖 Redis 7 才有的 EXPIRE NX（生产 redis:7.2.5 也兼容更早版本）。
+//
+// KEYS[1] = 计数键；ARGV[1] = 窗口毫秒数（≥1）。返回本窗口内的计数值。
+var fixedWindowScript = redis.NewScript(`
+local n = redis.call('INCR', KEYS[1])
+if n == 1 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+elseif redis.call('PTTL', KEYS[1]) == -1 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+return n
+`)
+
+// allow 通用固定窗口计数：窗口内第 limit+1 次起拒绝，窗口到期后重置。
+// 脚本经 EVALSHA 执行（Redis 未缓存时 go-redis 自动回退 EVAL）；Redis 故障返回错误，由调用方拒绝（语义不变）。
 func (r *RateLimiter) allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
-	pipe := r.rdb.TxPipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, window)
-	if _, err := pipe.Exec(ctx); err != nil {
+	ms := window.Milliseconds()
+	if ms < 1 {
+		ms = 1 // 亚毫秒窗口按 1ms 处理，PEXPIRE 0 会报错，也绝不能写出永久键
+	}
+	n, err := fixedWindowScript.Run(ctx, r.rdb, []string{key}, ms).Int64()
+	if err != nil {
 		return false, err
 	}
-	return incr.Val() <= int64(limit), nil
+	return n <= int64(limit), nil
 }
 
 // RecordViolation 上报真实攻击行为（SQL 注入嫌疑、访客刷消息等）。

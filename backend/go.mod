@@ -3,6 +3,7 @@ module github.com/custom-service/backend
 go 1.26.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-gonic/gin v1.10.0
 	github.com/go-sql-driver/mysql v1.8.1
@@ -14,6 +15,7 @@ require (
 	github.com/redis/go-redis/v9 v9.6.3
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.57.0
+	golang.org/x/net v0.60.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
@@ -42,9 +44,9 @@ require (
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/arch v0.8.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/protobuf v1.34.1 // indirect

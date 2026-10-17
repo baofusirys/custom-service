@@ -10,6 +10,8 @@ const router = createRouter({
       redirect: '/console',
       children: [
         { path: 'console', component: () => import('../views/Console.vue') },
+        // [119] 多人大厅（按需加载：livekit-client 只在进入本页时下载）
+        { path: 'hall', component: () => import('../views/Hall.vue') },
         { path: 'history', component: () => import('../views/History.vue') },
         { path: 'agents', component: () => import('../views/Agents.vue') },
         { path: 'settings', component: () => import('../views/Settings.vue') },

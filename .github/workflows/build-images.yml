@@ -28,7 +28,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
-      # 一个 job 失败不影响其他 6 个
+      # 一个 job 失败不影响其他 7 个
       fail-fast: false
       matrix:
         include:
@@ -49,6 +49,9 @@ jobs:
             context: ./redis
           - name: cs-coturn
             context: ./turn
+          # [119] 多人大厅媒体服务（FROM livekit/livekit-server:v1.13.10 + 本项目配置与入口脚本）
+          - name: cs-livekit
+            context: ./livekit
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -138,7 +141,7 @@ jobs:
           echo "镜像（公开拉取，不需要 token）：" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           OWNER_LC=$(echo '${{ github.repository_owner }}' | tr 'A-Z' 'a-z')
-          for n in cs-backend cs-admin cs-widget cs-nginx cs-mysql cs-redis cs-coturn; do
+          for n in cs-backend cs-admin cs-widget cs-nginx cs-mysql cs-redis cs-coturn cs-livekit; do
             echo "- \`docker pull ghcr.io/$OWNER_LC/$n:<version>\`" >> $GITHUB_STEP_SUMMARY
           done
           echo "" >> $GITHUB_STEP_SUMMARY

@@ -130,6 +130,30 @@ func agentAuth(secret []byte, st *store.Store) gin.HandlerFunc {
 	}
 }
 
+// VisitorAuth [119] 访客接口鉴权：只认请求头 Authorization: Bearer <visitor_token>（/api/visitor/session 签发），
+// vid/site_id 一律从令牌取，绝不从 URL 或请求体读取（vid 等同凭证，不能进 URL）。
+func VisitorAuth(secret []byte) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		tok := strings.TrimSpace(c.GetHeader("Authorization"))
+		if !strings.HasPrefix(tok, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40110, "msg": "访客身份无效，请刷新页面"})
+			return
+		}
+		claims, err := security.ParseVisitorToken(secret, strings.TrimSpace(strings.TrimPrefix(tok, "Bearer ")))
+		if err != nil || claims.Subject != "visitor" || claims.VisitorID == "" || len(claims.VisitorID) > 64 {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": 40110, "msg": "访客身份无效，请刷新页面"})
+			return
+		}
+		site := claims.SiteID
+		if site == "" {
+			site = "default"
+		}
+		c.Set("visitor_id", claims.VisitorID)
+		c.Set("site_id", site)
+		c.Next()
+	}
+}
+
 // AdminOnly 仅 admin 角色。
 func AdminOnly() gin.HandlerFunc {
 	return func(c *gin.Context) {

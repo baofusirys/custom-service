@@ -32,6 +32,8 @@ jobs:
           - cs-mysql
           - cs-redis
           - cs-coturn
+          # [119] 多人大厅媒体服务；早于 [119] 的版本没有此镜像，该项会单独失败（fail-fast: false，不影响其它镜像）
+          - cs-livekit
     steps:
       - name: Validate immutable version
         env:

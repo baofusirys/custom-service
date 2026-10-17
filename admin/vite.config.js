@@ -12,7 +12,9 @@ export default defineConfig({
       output: {
         manualChunks: {
           vendor: ['vue', 'vue-router', 'pinia'],
-          elp: ['element-plus']
+          elp: ['element-plus'],
+          // [119] 多人大厅媒体 SDK 单独分包：只在进入大厅页时按需加载，且大厅页代码更新不影响其长缓存
+          livekit: ['livekit-client']
         }
       }
     }

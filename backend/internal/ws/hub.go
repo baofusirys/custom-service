@@ -86,6 +86,10 @@ type Hub struct {
 	secLog *zap.Logger
 
 	cipher *security.Cipher
+
+	// [119] 多人大厅：上行帧处理器（main 在 Run 前注入）与订阅集合
+	hall    HallHandler
+	hallReg hallRegistry
 }
 
 type HubConfig struct {
@@ -255,6 +259,7 @@ func (h *Hub) handleUnregister(ctx context.Context, c *Client) {
 			h.visitors.Delete(c.ID)
 		}
 		h.detachConv(c)
+		h.HallUnsubscribe(c)
 		_ = h.sink.OnVisitorDisconnect(ctx, c)
 		h.bizLog.Info("visitor disconnected",
 			zap.String("conn", c.ConnID), zap.String("vid", c.ID))
@@ -270,6 +275,7 @@ func (h *Hub) handleUnregister(ctx context.Context, c *Client) {
 			}
 		}
 		h.detachConv(c)
+		h.HallUnsubscribe(c)
 		_ = h.sink.OnAgentDisconnect(ctx, c)
 		h.bizLog.Info("agent disconnected",
 			zap.String("conn", c.ConnID), zap.String("aid", c.ID))
@@ -328,6 +334,12 @@ func (h *Hub) handleIncoming(ctx context.Context, in incoming) {
 	// [110] 同一 Hub 内严格递增：消息以此作为落库时间，到达顺序即展示顺序（异步并发落库也不会乱序）。
 	h.lastTS = monotonicTS(h.lastTS, NowMS())
 	e.TS = h.lastTS
+	// [119] 大厅帧：不补服务端 ID（hall_chat 的 ID 必须由客户端给出并校验），交给大厅处理器的有界工作池
+	if strings.HasPrefix(e.Type, "hall_") {
+		e.ConnID = c.ConnID
+		h.handleHallIncoming(c, e)
+		return
+	}
 	// delivery 必须精确引用被送达的消息；read 允许旧客户端不带目标 ID，
 	// 由服务端以接收时间作为兼容游标。不能在这里为两类回执伪造目标消息 ID。
 	if e.ID == "" && e.Type != "delivery" && e.Type != "read" {
@@ -909,6 +921,11 @@ func (h *Hub) fanoutFromRedis(ctx context.Context) {
 			// ACK 按 agent 账号精确同步到其全部连接；不能走 byConv，否则会把内部落库回执发给访客。
 			if e.Type == "ack" && strings.HasPrefix(e.To, "agent:") {
 				h.fanoutAgentLocal(strings.TrimPrefix(e.To, "agent:"), &e)
+				continue
+			}
+			// [119] 大厅广播只投递给大厅订阅连接（定向通知按 To 路由）
+			if strings.HasPrefix(e.Type, "hall_") {
+				h.fanoutHallLocal(&e)
 				continue
 			}
 			// voice_* 走专用路由（按 To 字段精确转发），其它（chat/read/typing 等）按 ConvID

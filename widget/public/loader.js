@@ -1,5 +1,5 @@
 /*
- * Custom Service · widget loader · v0.1.2
+ * Custom Service · widget loader · v0.2.0（[119] 增加多人大厅状态胶囊）
  *
  * 用法（任何第三方网站只需复制以下一行）：
  *   <script src="https://<your-domain>/widget/loader.js"
@@ -8,6 +8,8 @@
  *
  * 设计：右下角一个圆形浮动按钮（带未读 badge），点击后展开 iframe 聊天窗口。
  * iframe 隔离运行，宿主页 CSS / JS 全无污染。
+ * [119] 按钮左侧显示多人大厅状态（在线人数、是否在收听）；与 iframe 的 postMessage 双向校验
+ *       来源窗口、origin 与消息结构。
  */
 (function () {
   // [054] guard 加强：__CS_WIDGET_LOADED__ 哨兵 + iframe 真实存在性双重检查
@@ -100,23 +102,127 @@
   iframe.style.cssText = 'width:100%;height:100%;border:0;display:block;background:#fff';
   wrap.appendChild(iframe);
 
+  // [119] iframe 的真实 origin（只与它通信，不再用 '*' 广播宿主页 URL 等信息）
+  var frameOrigin = (function () {
+    try { return new URL(iframe.src, location.href).origin; } catch (e) { return origin; }
+  })();
+  function postToFrame(msg) {
+    try { iframe.contentWindow && iframe.contentWindow.postMessage(msg, frameOrigin); } catch (e) {}
+  }
+
   function postState(opened) {
-    try {
-      iframe.contentWindow &&
-        iframe.contentWindow.postMessage({ __cs: 1, type: 'widget_state', open: opened }, '*');
-    } catch (e) {}
+    postToFrame({ __cs: 1, type: 'widget_state', open: opened });
   }
   // 把宿主页 URL / title 推给 iframe（chat.html）—— 跨域时 iframe 内的 parent.location 拿不到，
   // 必须由父页主动 postMessage 过去。
   function postPageInfo() {
-    try {
-      iframe.contentWindow &&
-        iframe.contentWindow.postMessage({
-          __cs: 1, type: 'page_info',
-          url: location.href, title: document.title || '', referrer: document.referrer || ''
-        }, '*');
-    } catch (e) {}
+    postToFrame({
+      __cs: 1, type: 'page_info',
+      url: location.href, title: document.title || '', referrer: document.referrer || ''
+    });
   }
+
+  // ====== [119] 大厅状态消息校验 开始（widget/tests/hallLoader.test.mjs 抽取本段单测） ======
+  var HALL_STATES = { off: 1, connecting: 1, live: 1, blocked: 1, muted: 1, elsewhere: 1, kicked: 1, full: 1, error: 1 };
+  // 只接受来自本挂件 iframe 窗口、且 origin 完全一致的消息
+  function isTrustedFrameMessage(ev, frameWin, expectedOrigin) {
+    return !!ev && !!frameWin && ev.source === frameWin &&
+      typeof ev.origin === 'string' && ev.origin === expectedOrigin &&
+      !!ev.data && typeof ev.data === 'object' && ev.data.__cs === 1 && typeof ev.data.type === 'string';
+  }
+  // {__cs:1, type:'hall_status', state, online, speaking} → 规范化结果；不合法返回 null
+  function parseHallStatus(d) {
+    if (!d || typeof d !== 'object' || d.__cs !== 1 || d.type !== 'hall_status') return null;
+    if (typeof d.state !== 'string' || !Object.prototype.hasOwnProperty.call(HALL_STATES, d.state)) return null;
+    var online = typeof d.online === 'number' && isFinite(d.online) ? Math.max(0, Math.min(100000, Math.floor(d.online))) : 0;
+    return { state: d.state, online: online, speaking: d.speaking === true };
+  }
+  // 大图地址只允许挂件同源的 /files/ 文件
+  function safeLightboxSrc(src, expectedOrigin) {
+    if (typeof src !== 'string' || src.length > 2048) return '';
+    try {
+      var u = new URL(src);
+      if (u.origin !== expectedOrigin || (u.protocol !== 'https:' && u.protocol !== 'http:')) return '';
+      if (u.pathname.indexOf('/files/') < 0) return '';
+      return u.href;
+    } catch (e) { return ''; }
+  }
+  // 胶囊文案：full 用于宽屏，compact 用于窄屏
+  function hallChipText(st) {
+    if (!st) return null;
+    switch (st.state) {
+      case 'connecting': return { full: '大厅连接中', compact: '大厅' };
+      case 'live': return { full: '大厅 ' + st.online + ' 人 · ' + (st.speaking ? '正在播放' : '收听中'), compact: st.online + ' 人' };
+      case 'blocked': return { full: '点击收听大厅', compact: '点击收听' };
+      case 'muted': return { full: '大厅 ' + st.online + ' 人 · 已静音', compact: st.online + ' 人' };
+      case 'elsewhere': return { full: '已在其他页面收听', compact: '其他页面' };
+      case 'kicked': return { full: '已被移出大厅', compact: '已移出' };
+      case 'full': return { full: '大厅已满', compact: '已满' };
+      case 'error': return { full: '大厅重连中', compact: '重连中' };
+    }
+    return null;   // off：不显示
+  }
+  // ====== [119] 大厅状态消息校验 结束 ======
+
+  // ====== [119] 大厅状态胶囊（悬浮按钮左侧） ======
+  var HALL_ICON_OPEN = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
+  var HALL_ICONS = {
+    users: HALL_ICON_OPEN + '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+    volume: HALL_ICON_OPEN + '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
+    volumeOff: HALL_ICON_OPEN + '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>'
+  };
+  var hallState = null;
+  var hallChip = document.createElement('div');
+  hallChip.id = '__cs_widget_hall__';
+  hallChip.setAttribute('role', 'button');
+  hallChip.setAttribute('tabindex', '0');
+  hallChip.style.cssText = [
+    'position:fixed', 'right:92px', 'bottom:36px', 'z-index:2147483646',
+    'height:32px', 'padding:0 12px 0 10px', 'border-radius:16px', 'box-sizing:border-box',
+    'background:#fff', 'color:#374151', 'border:1px solid #e5e7eb',
+    'box-shadow:0 4px 14px rgba(15,23,42,.14), 0 1px 3px rgba(0,0,0,.06)',
+    'display:none', 'align-items:center', 'gap:6px',
+    'font:500 12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif',
+    'white-space:nowrap', 'max-width:calc(100vw - 120px)', 'overflow:hidden',
+    'cursor:pointer', 'user-select:none', '-webkit-tap-highlight-color:transparent',
+    'transition:background .15s ease, color .15s ease'
+  ].join(';');
+  var hallChipIcon = document.createElement('span');
+  hallChipIcon.style.cssText = 'display:inline-flex;flex-shrink:0';
+  var hallChipLabel = document.createElement('span');
+  hallChipLabel.style.cssText = 'overflow:hidden;text-overflow:ellipsis';
+  hallChip.appendChild(hallChipIcon);
+  hallChip.appendChild(hallChipLabel);
+  var narrowMQ = window.matchMedia ? window.matchMedia('(max-width: 420px)') : null;
+
+  function renderHallChip() {
+    var texts = hallChipText(hallState);
+    if (!texts || wrap.style.display === 'block') { hallChip.style.display = 'none'; return; }
+    var st = hallState.state;
+    var blocked = st === 'blocked';
+    hallChip.style.background = blocked ? 'linear-gradient(135deg,#4a90ff 0%,' + brand + ' 100%)' : '#fff';
+    hallChip.style.color = blocked ? '#fff' : (st === 'live' && hallState.speaking ? '#059669' : (st === 'live' ? '#374151' : '#6b7280'));
+    hallChip.style.borderColor = blocked ? 'transparent' : '#e5e7eb';
+    hallChipIcon.innerHTML = st === 'muted' ? HALL_ICONS.volumeOff : ((st === 'live' || blocked) ? HALL_ICONS.volume : HALL_ICONS.users);
+    hallChipLabel.textContent = narrowMQ && narrowMQ.matches ? texts.compact : texts.full;
+    hallChip.setAttribute('aria-label', '多人大厅：' + texts.full);
+    hallChip.title = blocked ? '浏览器限制了自动播放，点击开始收听大厅' : ('多人大厅：' + texts.full + '，点击进入');
+    hallChip.style.display = 'flex';
+  }
+  if (narrowMQ) {
+    if (narrowMQ.addEventListener) narrowMQ.addEventListener('change', renderHallChip);
+    else if (narrowMQ.addListener) narrowMQ.addListener(renderHallChip);
+  }
+  function onHallChipActivate() {
+    // 宿主页的点击会通过 allow="autoplay" 委托给 iframe：先请求恢复播放，再打开挂件进入大厅页
+    postToFrame({ __cs: 1, type: 'hall_cmd', cmd: 'start_audio' });
+    postToFrame({ __cs: 1, type: 'hall_cmd', cmd: 'show_hall' });
+    open();
+  }
+  hallChip.addEventListener('click', onHallChipActivate);
+  hallChip.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onHallChipActivate(); }
+  });
   iframe.addEventListener('load', postPageInfo);
   function open() {
     wrap.style.display = 'block';
@@ -128,17 +234,25 @@
     });
     btn.style.display = 'none';
     badge.style.display = 'none';
+    hallChip.style.display = 'none';
     postState(true);
   }
   function close() {
     wrap.style.display = 'none';
     btn.style.display = 'flex';
+    renderHallChip();
     postState(false);
   }
   btn.addEventListener('click', open);
 
   window.addEventListener('message', function (ev) {
-    if (!ev.data || ev.data.__cs !== 1) return;
+    // [119] 只处理本挂件 iframe 发来的消息（来源窗口 + origin + 结构三重校验）
+    if (!isTrustedFrameMessage(ev, iframe.contentWindow, frameOrigin)) return;
+    if (ev.data.type === 'hall_status') {
+      var st = parseHallStatus(ev.data);
+      if (st) { hallState = st; renderHallChip(); }
+      return;
+    }
     if (ev.data.type === 'close') close();
     if (ev.data.type === 'unread' && typeof ev.data.count === 'number') {
       if (ev.data.count > 0 && wrap.style.display === 'none') {
@@ -151,7 +265,8 @@
     // [038] iframe 内点聊天图片 → 在宿主页（整个浏览器视窗）全屏显示
     // 之前在 iframe 内创建 lightbox 只能在聊天窗口 380x560 区域里显示，看不清
     if (ev.data.type === 'lightbox' && typeof ev.data.src === 'string') {
-      openHostLightbox(ev.data.src);
+      var lbSrc = safeLightboxSrc(ev.data.src, frameOrigin);
+      if (lbSrc) openHostLightbox(lbSrc);
     }
   });
 
@@ -214,6 +329,9 @@
     }
     if (!document.getElementById('__cs_widget_wrap__')) {
       document.body.appendChild(wrap);
+    }
+    if (!document.getElementById('__cs_widget_hall__')) {
+      document.body.appendChild(hallChip);
     }
   }
   if (document.readyState === 'loading') {

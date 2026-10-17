@@ -21,7 +21,9 @@ import (
 
 	"github.com/custom-service/backend/internal/config"
 	"github.com/custom-service/backend/internal/db"
+	"github.com/custom-service/backend/internal/hall"
 	"github.com/custom-service/backend/internal/handler"
+	"github.com/custom-service/backend/internal/livekit"
 	"github.com/custom-service/backend/internal/logger"
 	"github.com/custom-service/backend/internal/middleware"
 	"github.com/custom-service/backend/internal/redisx"
@@ -133,9 +135,48 @@ func main() {
 	})
 	// 反向注入 hub 引用，让 service 能给客服广播 page_navigation / visitor_enter 等通知
 	svc.SetHub(hub)
+
+	// === [119] 多人大厅：LiveKit 最小客户端 + 大厅服务（必须在 hub.Run 之前注入大厅帧处理器）===
+	lk := livekit.NewClient(livekit.Config{
+		APIKey:      cfg.LiveKit.APIKey,
+		APISecret:   cfg.LiveKit.APISecret,
+		InternalURL: cfg.LiveKit.InternalURL,
+	}, bizLog)
+	if cfg.LiveKit.Enabled() {
+		bizLog.Info("hall_livekit_configured", zap.String("event", "hall_config"),
+			zap.String("internal_url", cfg.LiveKit.InternalURL), zap.String("public_url", cfg.LiveKit.PublicURL))
+	} else {
+		bizLog.Warn("hall_disabled_livekit_not_configured", zap.String("event", "hall_config"),
+			zap.String("note", "未配置 LIVEKIT_API_KEY，多人大厅关闭，原有功能不受影响"))
+	}
+	turnRealm, turnSecret := cfg.TurnRealm, cfg.TurnSecret
+	hallSvc, err := hall.New(hall.Deps{
+		Room:      store.HallDefaultRoom,
+		Store:     st,
+		Redis:     rdb,
+		Media:     lk,
+		Hub:       hall.NewHubBroadcaster(hub),
+		Limiter:   limiter,
+		DataKey:   cfg.DataAESKey,
+		PublicURL: cfg.LiveKit.PublicURL,
+		ICE: func(label string) []hall.ICEServer {
+			if turnRealm == "" || turnSecret == "" {
+				return []hall.ICEServer{}
+			}
+			cred := service.GenerateTurnCredential("hall-"+label, turnRealm, turnSecret)
+			return []hall.ICEServer{{URLs: cred.URLs, Username: cred.Username, Credential: cred.Credential}}
+		},
+		BizLog: bizLog, SecLog: secLog, AuditLog: auditLog,
+	})
+	if err != nil {
+		log.Fatalf("[FATAL] 大厅服务初始化失败: %v", err)
+	}
+	hub.SetHallHandler(hallSvc)
+
 	hubCtx, hubCancel := context.WithCancel(context.Background())
 	defer hubCancel()
 	go hub.Run(hubCtx)
+	hallSvc.Start(hubCtx)
 
 	// === 上传目录 ===
 	uploads := "/app/uploads"
@@ -164,85 +205,8 @@ func main() {
 	svc.StartMaintenance(hubCtx)
 
 	h := handler.NewHTTP(cfg, svc, hub, uploads)
-	api := r.Group("/api")
-	{
-		api.GET("/health", h.Health)
-		api.GET("/version", h.Version) // [053] 集成方对比 deployed vs upstream 最新版用
-
-		// 访客侧（无需登录，靠 visitor JWT token、Origin/CORS、SSL 和 IP/会话限流）。
-		visitor := api.Group("/visitor")
-		{
-			visitor.POST("/session", h.VisitorSession)
-			visitor.GET("/settings", h.VisitorPublicSettings)
-			// TURN/STUN 短期凭证（每次通话前 fetch；24h TTL；返回 username/credential/urls）
-			visitor.GET("/turn-credential", h.TurnCredential)
-		}
-
-		// 客服登录：IP/账号限流、失败锁定/验证码和 bcrypt 共同防爆破。
-		api.POST("/agent/login", h.AgentLogin)
-		// [064] token 续期：解决 [068] iOS App 12h 后 401 死循环问题
-		// 不挂 AgentAuth middleware 因为 token 可能已过期（ParseAgentTokenAllowExpired 自己处理）
-		api.POST("/agent/login/refresh", h.RefreshAgentToken)
-
-		// 客服已登录
-		ag := api.Group("/agent", middleware.AgentAuthWithStore(cfg.JWTSecret, st))
-		{
-			ag.POST("/logout", h.AgentLogout)
-			ag.GET("/conversations", h.ListConversations)
-			ag.GET("/conversations/:id/messages", h.ListMessages)
-			ag.POST("/conversations/:id/assign", h.AssignSelf)
-			ag.POST("/conversations/:id/read", h.MarkRead)
-			ag.POST("/conversations/:id/close", h.CloseConv)
-			// TURN/STUN 短期凭证（客服 web/iPhone 通话前 fetch；与 visitor 接口同源 service.GenerateTurnCredential）
-			ag.GET("/turn-credential", h.TurnCredential)
-			// [055] 关联访客（同 IP 30 天内出现的其他 vid，给客服参考"疑似同一人"）
-			ag.GET("/visitor/:vid/related", h.RelatedVisitors)
-			// [090] 按客户聚合的完整历史对话（跨该访客所有会话段，含已结束）
-			ag.GET("/visitor/:vid/messages", h.ListMessagesByVisitor)
-			// [113] 新功能（契约见 _internal/reports/api-0.8.0-features.md）
-			ag.POST("/visitors/delete", h.DeleteVisitors)
-			ag.GET("/quick-replies", h.ListQuickReplies)
-			ag.POST("/quick-replies", h.CreateQuickReply)
-			ag.POST("/quick-replies/:id/update", h.UpdateQuickReply)
-			ag.POST("/quick-replies/:id/delete", h.DeleteQuickReply)
-			ag.GET("/visitor/:vid/profile", h.GetVisitorProfile)
-			ag.POST("/visitor/:vid/profile", h.SaveVisitorProfile)
-			ag.POST("/visitor/:vid/pin", h.SetVisitorPinned)
-			ag.POST("/visitor/:vid/unread", h.SetVisitorUnread)
-			ag.POST("/visitor/:vid/block", h.SetVisitorBlocked)
-			ag.GET("/visitor/:vid/export", h.ExportVisitor)
-			ag.POST("/export", h.ExportVisitors)
-			ag.GET("/tags", h.ListTags)
-			ag.GET("/blocked", h.ListBlockedVisitors)
-			ag.GET("/search", h.SearchMessages)
-			ag.POST("/messages/:id/recall", h.RecallMessage)
-		}
-
-		// 管理（仅 admin）
-		adm := api.Group("/admin", middleware.AgentAuthWithStore(cfg.JWTSecret, st), middleware.AdminOnly())
-		{
-			adm.GET("/agents", h.ListAgents)
-			adm.POST("/agents", h.CreateAgent)
-			adm.POST("/agents/active", h.DisableAgent)
-			adm.GET("/settings", h.GetSettings)
-			adm.POST("/settings", h.UpdateSettings)
-			// [113] 删除全部与回收站
-			adm.POST("/visitors/delete-all", h.DeleteAllVisitors)
-			adm.GET("/recycle-bin", h.ListRecycleBin)
-			adm.POST("/recycle-bin/restore", h.RestoreRecycleBin)
-			adm.POST("/recycle-bin/purge", h.PurgeRecycleBin)
-		}
-
-		// 文件上传 / 下载
-		api.POST("/upload", h.Upload)
-	}
-
-	// WSS endpoint
-	r.GET("/ws/visitor", h.VisitorWS)
-	r.GET("/ws/agent", h.AgentWS)
-
-	// 文件直出（Nginx 也可以代理）
-	r.GET("/files/*key", h.ServeFile)
+	h.SetHall(hallSvc)
+	handler.RegisterRoutes(r, h, st)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.HTTPPort,
@@ -269,6 +233,9 @@ func main() {
 	defer shutCancel()
 	_ = srv.Shutdown(shutCtx)
 	hubCancel()
+	if !hallSvc.WaitTimeout(5 * time.Second) {
+		bizLog.Warn("hall_background_tasks_still_running_on_shutdown")
+	}
 }
 
 func backupBeforeMigration(ctx context.Context, cfg *config.Config, version, dir string) error {

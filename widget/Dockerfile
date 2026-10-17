@@ -8,4 +8,6 @@ RUN apk add --no-cache tzdata && \
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY public/ /usr/share/nginx/html/
+# [119] 第三方固定版本文件（livekit-client UMD）构建时校验 SHA-512，被篡改或损坏则构建失败
+RUN cd /usr/share/nginx/html/vendor && sha512sum -c SHA512SUMS
 EXPOSE 80

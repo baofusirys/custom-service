@@ -20,6 +20,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/custom-service/backend/internal/config"
+	"github.com/custom-service/backend/internal/hall"
 	"github.com/custom-service/backend/internal/security"
 	"github.com/custom-service/backend/internal/security/geoip"
 	"github.com/custom-service/backend/internal/service"
@@ -32,7 +33,11 @@ type HTTP struct {
 	svc     *service.Service
 	hub     *ws.Hub
 	uploads string
+	hall    *hall.Service // [119] 多人大厅（main 注入；为 nil 时大厅接口返回已关闭）
 }
+
+// SetHall 注入大厅服务。
+func (h *HTTP) SetHall(hs *hall.Service) { h.hall = hs }
 
 func publicURLOrEmpty(raw string) string {
 	v, err := security.ValidatePublicURL(raw)
@@ -868,12 +873,27 @@ func (h *HTTP) Upload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 40003, "msg": "uploader 错误"})
 		return
 	}
-	ref, convID, err := h.authorizeUpload(c, uploadBy)
+	// [119] scope=hall：大厅附件（不需要 conv_id；文件归属记为大厅房间，hall_chat 只接受这类文件）
+	scope := c.PostForm("scope")
+	if scope != "" && scope != "hall" {
+		c.JSON(http.StatusBadRequest, gin.H{"code": 40061, "msg": "scope 错误"})
+		return
+	}
+	ref, convID, err := h.authorizeUpload(c, uploadBy, scope == "hall")
 	if err != nil {
+		var ue *uploadAuthError
+		if errors.As(err, &ue) {
+			body := gin.H{"code": ue.code, "msg": ue.msg}
+			if ue.data != nil {
+				body["data"] = ue.data
+			}
+			c.JSON(ue.status, body)
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"code": 40108, "msg": err.Error()})
 		return
 	}
-	authToken := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+	authToken := uploadAuthToken(c, uploadBy)
 	if ok, err := h.svc.Limiter().AllowAction(ctx, "upload", 30, time.Minute, "ip:"+ip, "actor:"+ref, "token:"+authToken); err != nil || !ok {
 		h.svc.Limiter().LogSecurityWarn(ip, "upload_rate_limited", ref)
 		c.JSON(http.StatusTooManyRequests, gin.H{"code": 42903, "msg": "上传过于频繁，请稍后再试"})
@@ -962,10 +982,35 @@ func (h *HTTP) Upload(c *gin.Context) {
 	})
 }
 
-func (h *HTTP) authorizeUpload(c *gin.Context, uploadBy string) (ref, convID string, err error) {
-	tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+// uploadAuthError 上传鉴权的结构化错误（状态码 + 业务码），让客户端能区分「过期可续期」与「无效需重登」。
+type uploadAuthError struct {
+	status int
+	code   int
+	msg    string
+	data   map[string]any
+}
+
+func (e *uploadAuthError) Error() string { return e.msg }
+
+// uploadAuthToken 取上传令牌：Authorization: Bearer 优先；客服回退 HttpOnly cs_session Cookie（与 agentAuth 中间件一致）。
+// 访客令牌只认 Authorization 头（cs_session 是客服会话 Cookie）。
+func uploadAuthToken(c *gin.Context, uploadBy string) string {
+	tok := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
+	if tok == "" && uploadBy == "agent" {
+		if cookie, err := c.Cookie("cs_session"); err == nil {
+			tok = strings.TrimSpace(cookie)
+		}
+	}
+	return tok
+}
+
+func (h *HTTP) authorizeUpload(c *gin.Context, uploadBy string, hallScope bool) (ref, convID string, err error) {
+	tok := uploadAuthToken(c, uploadBy)
 	if tok == "" {
 		return "", "", errors.New("缺少 token")
+	}
+	if hallScope && h.hall == nil {
+		return "", "", &uploadAuthError{status: http.StatusForbidden, code: 40371, msg: "大厅已关闭"}
 	}
 	switch uploadBy {
 	case "visitor":
@@ -973,12 +1018,36 @@ func (h *HTTP) authorizeUpload(c *gin.Context, uploadBy string) (ref, convID str
 		if e != nil {
 			return "", "", errors.New("visitor token 无效")
 		}
-		conv, _ := h.svc.Store().OpenOrGetConversation(c.Request.Context(), vc.SiteID, vc.VisitorID)
+		if hallScope {
+			if herr := h.hall.AuthorizeUpload(c.Request.Context(), hall.Actor{Visitor: true, VisitorID: vc.VisitorID, SiteID: vc.SiteID}); herr != nil {
+				return "", "", hallUploadError(herr)
+			}
+			return vc.VisitorID, h.hall.Room(), nil
+		}
+		conv, convErr := h.svc.Store().OpenOrGetConversation(c.Request.Context(), vc.SiteID, vc.VisitorID)
+		if convErr != nil || conv == nil {
+			h.svc.BizLog().Error("upload_open_conversation_failed", zap.Error(convErr), zap.String("vid", vc.VisitorID))
+			return "", "", &uploadAuthError{status: http.StatusInternalServerError, code: 50017, msg: "会话不可用，请稍后重试"}
+		}
 		return vc.VisitorID, conv.ID, nil
 	case "agent":
 		ac, e := security.ParseAgentToken(h.cfg.JWTSecret, tok)
 		if e != nil {
+			if errors.Is(e, security.ErrTokenExpired) {
+				return "", "", &uploadAuthError{status: http.StatusUnauthorized, code: 40102, msg: "登录已过期"}
+			}
 			return "", "", errors.New("agent token 无效")
+		}
+		// 与 agentAuth 中间件一致：账号必须存在、启用且令牌版本未被吊销
+		agent, dbErr := h.svc.Store().GetAgentByID(c.Request.Context(), ac.AgentID)
+		if dbErr != nil || agent == nil || !agent.Active || agent.TokenVersion != ac.Version {
+			return "", "", errors.New("会话已失效，请重新登录")
+		}
+		if hallScope {
+			if herr := h.hall.AuthorizeUpload(c.Request.Context(), hall.Actor{AgentID: ac.AgentID, AgentUsername: ac.Username, Admin: agent.Role == "admin"}); herr != nil {
+				return "", "", hallUploadError(herr)
+			}
+			return fmt.Sprintf("%d", ac.AgentID), h.hall.Room(), nil
 		}
 		convID = c.PostForm("conv_id")
 		if convID == "" {
@@ -991,6 +1060,15 @@ func (h *HTTP) authorizeUpload(c *gin.Context, uploadBy string) (ref, convID str
 		return fmt.Sprintf("%d", ac.AgentID), convID, nil
 	}
 	return "", "", errors.New("未知 uploader")
+}
+
+// hallUploadError 把大厅业务错误转为上传响应。
+func hallUploadError(err error) error {
+	var he *hall.Error
+	if errors.As(err, &he) {
+		return &uploadAuthError{status: he.Status, code: he.Code, msg: he.Msg, data: he.Data}
+	}
+	return &uploadAuthError{status: http.StatusInternalServerError, code: 50050, msg: "服务器错误，请稍后重试"}
 }
 
 // normalizeFileKey 把路由 /files/*key 的通配参数规范为存储键。
@@ -1203,6 +1281,12 @@ var allowedSettingKeys = map[string]bool{
 	"push_jump_url": true,
 	// [113] 自动清理：最近活动早于 N 天的会话自动移入回收站（"0" 关闭，7-3650）
 	"auto_clean_days": true,
+	// [119] 多人大厅（取值严格校验见 hall.ValidateSettingValue；迁移 015 写入默认值）
+	hall.KeyEnabled:         true,
+	hall.KeyVideoEnabled:    true,
+	hall.KeyMaxSpeakers:     true,
+	hall.KeyMaxCameras:      true,
+	hall.KeyMaxParticipants: true,
 }
 
 // GetSettings 拉所有可见 setting（仅管理员可读全部）
@@ -1228,8 +1312,20 @@ func (h *HTTP) UpdateSettings(c *gin.Context) {
 	}
 	// 过滤：只允许白名单内的 key；值统一过 SanitizeText 清洗
 	filtered := make(map[string]string, len(body))
+	hallTouched := false
 	for k, v := range body {
 		if !allowedSettingKeys[k] {
+			continue
+		}
+		// [119] 大厅设置：任一不合法整次拒绝，不做部分保存
+		if hall.IsSettingKey(k) {
+			norm, err := hall.ValidateSettingValue(k, v)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"code": 40059, "msg": "大厅设置不合法：" + err.Error()})
+				return
+			}
+			filtered[k] = norm
+			hallTouched = true
 			continue
 		}
 		if k == "auto_clean_days" {
@@ -1253,6 +1349,10 @@ func (h *HTTP) UpdateSettings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": 40031, "msg": "无可更新字段"})
 		return
 	}
+	var hallBefore hall.Settings
+	if hallTouched && h.hall != nil {
+		hallBefore = h.hall.LoadSettingsFresh(c.Request.Context())
+	}
 	if err := h.svc.Store().SetSettings(c.Request.Context(), filtered); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 50031, "msg": "保存失败"})
 		return
@@ -1261,6 +1361,15 @@ func (h *HTTP) UpdateSettings(c *gin.Context) {
 	detail, _ := json.Marshal(filtered)
 	h.svc.Store().AuditLog(c.Request.Context(), fmt.Sprintf("%v", actor),
 		"update_settings", "", string(security.RedactJSONPayload(detail)), security.ClientIP(c))
+	// [119] 大厅设置变更：广播 hall_settings，关闭大厅/视频时后台强制执行（对账兜底）
+	if hallTouched && h.hall != nil {
+		after := h.hall.OnSettingsChanged(c.Request.Context(), hallBefore)
+		h.auditAction(c, "hall_settings_update", "hall:"+h.hall.Room(), map[string]any{
+			"enabled_before": hallBefore.Enabled, "enabled": after.Enabled,
+			"video_before": hallBefore.VideoEnabled, "video": after.VideoEnabled,
+			"max_speakers": after.MaxSpeakers, "max_cameras": after.MaxCameras, "max_participants": after.MaxParticipants,
+		})
+	}
 	c.JSON(http.StatusOK, gin.H{"code": 0})
 }
 
@@ -1270,12 +1379,19 @@ func (h *HTTP) VisitorPublicSettings(c *gin.Context) {
 	m, _ := h.svc.Store().GetSettingsMap(ctx, []string{
 		"visitor_notify_sound", "widget_title", "voice_call_hint",
 	})
+	// [119] 大厅公开开关（布尔；未配置 LiveKit 时恒为 false）
+	hallEnabled, hallVideo := false, false
+	if h.hall != nil {
+		hallEnabled, hallVideo = h.hall.PublicFlags(ctx)
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"code": 0,
 		"data": gin.H{
-			"notify_sound":    defaultIfEmpty(m["visitor_notify_sound"], "visitor1"),
-			"widget_title":    defaultIfEmpty(m["widget_title"], "在线客服"),
-			"voice_call_hint": defaultIfEmpty(m["voice_call_hint"], "直接呼叫客服"),
+			"notify_sound":       defaultIfEmpty(m["visitor_notify_sound"], "visitor1"),
+			"widget_title":       defaultIfEmpty(m["widget_title"], "在线客服"),
+			"voice_call_hint":    defaultIfEmpty(m["voice_call_hint"], "直接呼叫客服"),
+			"hall_enabled":       hallEnabled,
+			"hall_video_enabled": hallVideo,
 		},
 	})
 }

@@ -1,0 +1,42 @@
+# cs-livekit 生产配置（[119] 多人大厅，契约 _internal/reports/hall-contract.md 第 7 节）
+# 键名已按 livekit v1.13.10 的 config-sample.yaml 与 pkg/config/config.go 核对（livekit 默认严格模式，未知键会拒绝启动）。
+#
+# 本文件不含任何密钥与机器相关值，以下三项由入口脚本 cs-livekit-entrypoint 从环境变量注入：
+#   - keys            ← LIVEKIT_KEYS（由 LIVEKIT_API_KEY / LIVEKIT_API_SECRET 组装）
+#   - webhook.api_key ← LIVEKIT_WEBHOOK_API_KEY（v1.13.10 按配置键自动生成的环境变量，= LIVEKIT_API_KEY）
+#   - rtc.node_ip     ← --node-ip（= NODE_IP，服务器公网 IP，缺失或格式不对拒绝启动）
+
+# 信令 / 服务端 API 端口：只在容器内网（cs-nginx 反代 /lk/rtc；后端走 http://cs-livekit:7880）
+port: 7880
+
+rtc:
+  # ICE over TCP（UDP 被封时兜底），必须对公网开放、不能经过负载均衡或 TLS
+  tcp_port: 7881
+  # 单端口 UDP 复用（所有参与者共用 7882/udp，不需要开放端口段）
+  udp_port: 7882
+  # 不通过 STUN 自动探测公网 IP，统一使用 node_ip（避免容器里探测到错误地址）
+  use_external_ip: false
+
+room:
+  # 访客/客服持后端签发的令牌加入 hall_default 时自动建房
+  auto_create: true
+  # 没人加入时保留房间的秒数
+  empty_timeout: 300
+  # 最后一人离开后保留房间的秒数
+  departure_timeout: 20
+  # 硬上限：后端 hall_max_participants 最大 500（客服不占），这里留出客服余量
+  max_participants: 600
+
+limit:
+  # 单个参与者最多同时订阅 2 路视频（7Mbps 共享带宽）
+  subscription_limit_video: 2
+
+webhook:
+  # 只在容器内网直连后端；cs-nginx 对外 /api/livekit/ 一律 404
+  urls:
+    - http://cs-backend:8080/api/livekit/webhook
+
+logging:
+  level: info
+  pion_level: error
+  json: true

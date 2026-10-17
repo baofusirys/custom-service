@@ -1,0 +1,20 @@
+第三方组件说明（widget/public/vendor/）
+=====================================
+
+livekit-client 2.23.0
+---------------------
+- 用途：访客窗口多人大厅（[119]）的浏览器端 WebRTC SDK，连接自托管 LiveKit 服务（收听、开麦、摄像头）。
+- 文件：livekit-client-2.23.0.umd.js（npm 包内 dist/livekit-client.umd.js 原样复制，未做任何修改）
+- 许可证：Apache-2.0（全文见同目录 livekit-client-2.23.0.LICENSE.txt，取自 npm 包内 LICENSE）
+- 来源：https://registry.npmjs.org/livekit-client/-/livekit-client-2.23.0.tgz
+- npm 包完整性（dist.integrity，已核对一致）：
+  sha512-j9Kg86nJjBjNFUD+ukp2jwMCGa0k+YD5gU//RzAM+ZY3pbG631QCte7fQjwqWMmtBzhDJL9nKYuOLMv/9IbAxg==
+- UMD 文件 SHA-512：见 SHA512SUMS（widget/Dockerfile 构建时用 sha512sum -c 校验，不一致则构建失败）
+- UMD 文件 SRI：sha384-HkA7rQNo8H04l1p4zoXX1Cy+h9YoYp8LvKt4vfMFhv4KFk07UkrNwIUnyBum8Pw6（hall.js 加载时校验）
+- UMD 内打包的依赖（版本范围取自该包 package.json，许可证取自 npm 元数据）：
+  @livekit/protocol 1.52.1（Apache-2.0）、@livekit/mutex 1.1.1（Apache-2.0）、webrtc-adapter 9.0.6（BSD-3-Clause）、
+  tslib 2.8.1（0BSD）、events ^3.3.0（MIT）、jose ^6.1.0（MIT）、loglevel ^1.9.2（MIT）、machina ^7.0.0（MIT）、
+  sdp-transform ^2.15.0（MIT）、typed-emitter ^2.1.0（MIT，仅类型）
+- 升级方式：下载新版本 tgz → 核对 registry 元数据的 dist.integrity → 复制 dist/livekit-client.umd.js 为
+  livekit-client-<版本>.umd.js → 同步更新 SHA512SUMS、hall.js 的 LK_SRC / LK_SRI、本说明与 widget/README.md。
+  升级须作为单独提交，便于回滚。

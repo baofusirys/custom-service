@@ -357,6 +357,219 @@
   .send-btn:hover { opacity: .92; }
   .send-btn:active { transform: scale(.97); }
   .send-btn:disabled { background: #d1d5db; cursor: not-allowed; }
+
+  /* ==================================================================
+   * [119] 多人大厅：页签 + 大厅页（配色与组件沿用上方私聊样式）
+   * ================================================================== */
+  [hidden] { display: none !important; }
+  .tabs {
+    height: 40px; flex-shrink: 0; display: flex;
+    background: #fff; border-bottom: 1px solid #e5e7eb;
+    position: relative; z-index: 1;
+  }
+  .tab {
+    flex: 1; border: 0; background: transparent; cursor: pointer;
+    font: inherit; font-size: 13px; color: #6b7280;
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    position: relative; transition: color .15s;
+  }
+  .tab:hover { color: #2974ff; }
+  .tab[aria-selected="true"] { color: #2974ff; font-weight: 600; }
+  .tab[aria-selected="true"]::after {
+    content: ''; position: absolute; left: 30%; right: 30%; bottom: 0;
+    height: 2px; border-radius: 2px; background: #2974ff;
+  }
+  .tab-count { font-size: 11px; font-weight: 400; color: #9ca3af; }
+  .tab-dot { width: 7px; height: 7px; border-radius: 50%; background: #ef4444; flex-shrink: 0; }
+
+  .pane { flex: 1; min-height: 0; display: flex; flex-direction: column; position: relative; }
+
+  .hall-bar {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 6px 12px; background: #fff; border-bottom: 1px solid #f1f2f4;
+    font-size: 12px; color: #6b7280;
+  }
+  .hall-bar-status { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .hall-bar-status span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hall-chip-btn {
+    height: 26px; padding: 0 10px 0 8px; border-radius: 13px; border: 1px solid #e5e7eb;
+    background: #fff; color: #4b5563; cursor: pointer; font: inherit; font-size: 12px;
+    display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .hall-chip-btn:hover { color: #2974ff; border-color: #c7dbff; }
+  .hall-chip-btn.is-on { background: #fef2f2; color: #dc2626; border-color: #fecaca; }
+  .hall-btn-ico { display: inline-flex; }
+  .hall-btn-ico svg { width: 15px; height: 15px; }
+
+  /* 参与者条：横向滚动 */
+  .hall-people {
+    flex-shrink: 0; display: flex; gap: 6px; overflow-x: auto; overflow-y: hidden;
+    padding: 8px 12px 6px; background: #fff; border-bottom: 1px solid #e5e7eb;
+    scrollbar-width: thin;
+  }
+  .hall-people::-webkit-scrollbar { height: 4px; }
+  .hall-people::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
+  .hp {
+    position: relative; width: 52px; flex-shrink: 0;
+    display: flex; flex-direction: column; align-items: center; gap: 3px;
+  }
+  .hp-av {
+    width: 34px; height: 34px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%); color: #fff;
+    font-size: 13px; font-weight: 600;
+    transition: box-shadow .15s;
+  }
+  .hp.is-agent .hp-av { background: linear-gradient(135deg, #4a90ff 0%, #2974ff 100%); }
+  .hp.is-speaking .hp-av { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #10b981; }
+  .hp-mic {
+    position: absolute; top: 22px; left: 50%; margin-left: 6px;
+    height: 16px; min-width: 16px; padding: 0 2px; border-radius: 8px;
+    background: #fff; color: #9ca3af; box-shadow: 0 1px 2px rgba(15,23,42,.15);
+    display: inline-flex; align-items: center; justify-content: center; gap: 1px;
+  }
+  .hp-mic svg { width: 10px; height: 10px; }
+  .hp.is-mic-on .hp-mic { color: #10b981; }
+  .hp-name {
+    max-width: 52px; font-size: 11px; color: #4b5563; line-height: 1.3;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .hp.is-self .hp-name { color: #2974ff; }
+  .hp-more {
+    justify-content: center; height: 34px; border-radius: 17px; width: 40px;
+    background: #f3f4f6; color: #6b7280; font-size: 12px;
+  }
+
+  /* 视频网格：最多 2 路远端 + 本地预览 */
+  .hall-video {
+    flex-shrink: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px;
+    padding: 8px 12px; background: #111827;
+  }
+  .hv-tile { position: relative; aspect-ratio: 16 / 9; background: #1f2937; border-radius: 8px; overflow: hidden; }
+  .hv-tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .hv-tile.is-local video { transform: scaleX(-1); }
+  .hv-name {
+    position: absolute; left: 6px; bottom: 4px; max-width: calc(100% - 12px);
+    padding: 1px 6px; border-radius: 4px; background: rgba(0,0,0,.5); color: #fff; font-size: 11px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* 提示条（点击收听 / 已在其他页面收听 / 被移出 / 已满） */
+  .hall-notice {
+    flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+    margin: 8px 12px 0; padding: 8px 10px; border-radius: 10px;
+    background: #fff7ed; color: #c2410c; border: 1px solid #fed7aa; font-size: 12px; line-height: 1.5;
+  }
+  .hall-notice[data-kind="listen"] { background: #eef4ff; color: #1d4ed8; border-color: #c7dbff; }
+  .hall-notice-text { flex: 1; min-width: 0; }
+  .hall-notice-btn {
+    flex-shrink: 0; height: 28px; padding: 0 12px; border: 0; border-radius: 14px; cursor: pointer;
+    background: linear-gradient(135deg, #4a90ff 0%, #2974ff 100%); color: #fff; font: inherit; font-size: 12px; font-weight: 500;
+  }
+
+  /* 消息区 */
+  .hall-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px; background: #f7f8fa; position: relative; }
+  .hall-scroll::-webkit-scrollbar { width: 6px; }
+  .hall-scroll::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+  .hall-privacy {
+    display: flex; align-items: flex-start; gap: 6px; margin: 0 0 8px;
+    padding: 7px 10px; border-radius: 8px; background: #eef4ff; color: #3b5b99; font-size: 12px; line-height: 1.5;
+  }
+  .hall-privacy svg { flex-shrink: 0; margin-top: 1px; }
+  .hall-link-btn { border: 0; background: none; padding: 0; color: #2974ff; font: inherit; cursor: pointer; text-decoration: underline; }
+  .hall-more {
+    display: block; margin: 0 auto 8px; height: 26px; padding: 0 12px; border-radius: 13px;
+    border: 1px solid #e5e7eb; background: #fff; color: #6b7280; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  .hall-new {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 104px; z-index: 3;
+    height: 28px; padding: 0 14px; border-radius: 14px; border: 0; cursor: pointer;
+    background: #2974ff; color: #fff; font: inherit; font-size: 12px; box-shadow: 0 4px 12px rgba(41,116,255,.3);
+  }
+  .hm { display: flex; align-items: flex-start; gap: 8px; margin-top: 10px; }
+  .hm.hm-mine { flex-direction: row-reverse; }
+  .hm-av {
+    width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #94a3b8 0%, #64748b 100%); color: #fff; font-size: 12px; font-weight: 600;
+  }
+  .hm-av.agent { background: linear-gradient(135deg, #4a90ff 0%, #2974ff 100%); }
+  .hm-body { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; max-width: calc(100% - 46px); }
+  .hm.hm-mine .hm-body { align-items: flex-end; }
+  .hm-meta { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #9ca3af; max-width: 100%; }
+  .hm.hm-mine .hm-meta { flex-direction: row-reverse; }
+  .hm-name { color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 140px; }
+  .hm-badge { padding: 0 5px; border-radius: 4px; background: #eef4ff; color: #2974ff; font-size: 10px; line-height: 16px; }
+  .hm-bubble {
+    display: inline-block; max-width: 100%; padding: 8px 12px; border-radius: 14px; border-top-left-radius: 4px;
+    background: #fff; border: 1px solid #e5e7eb; color: #2c3034;
+    font-size: 14px; line-height: 1.55; word-break: break-word; white-space: pre-wrap;
+  }
+  .hm.hm-agent .hm-bubble { background: #f0f6ff; border-color: #d6e6ff; }
+  .hm.hm-mine .hm-bubble {
+    border: 0; border-top-left-radius: 14px; border-top-right-radius: 4px;
+    background: linear-gradient(135deg, #4a90ff 0%, #2974ff 100%); color: #fff;
+  }
+  .hm-bubble-img { padding: 4px; }
+  .hm-img {
+    display: block; max-width: 200px; max-height: 200px; min-width: 60px; min-height: 40px;
+    border-radius: 10px; cursor: zoom-in; background: #e5e7eb; object-fit: cover;
+  }
+  .hm-text { display: block; }
+  .hm-bubble-img .hm-text { padding: 4px 6px 2px; }
+  .hm-file { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; color: inherit; min-width: 160px; }
+  .hm-file-ico {
+    width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+    display: inline-flex; align-items: center; justify-content: center; background: #eef4ff; color: #2974ff;
+  }
+  .hm.hm-mine .hm-file-ico { background: rgba(255,255,255,.2); color: #fff; }
+  .hm-file-meta { display: flex; flex-direction: column; min-width: 0; }
+  .hm-file-name { font-size: 13px; font-weight: 500; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hm-file-sub { font-size: 11px; opacity: .75; }
+  .hm-state { font-size: 11px; color: #9ca3af; }
+  .hm-state.is-failed { color: #dc2626; }
+  .hm-resend { border: 0; background: none; padding: 0; color: #2974ff; font: inherit; cursor: pointer; text-decoration: underline; }
+  .hm.hm-system { justify-content: center; }
+  .hm-sys {
+    max-width: 86%; padding: 4px 12px; border-radius: 12px; background: #e5e7eb; color: #6b7280;
+    font-size: 12px; text-align: center; word-break: break-word;
+  }
+
+  .hall-toast {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 104px; z-index: 4;
+    max-width: calc(100% - 32px); padding: 8px 14px; border-radius: 10px;
+    background: rgba(17,24,39,.9); color: #fff; font-size: 12px; line-height: 1.5; text-align: center;
+    box-shadow: 0 6px 18px rgba(15,23,42,.25); pointer-events: none;
+  }
+
+  .hall-tools { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .hall-media-btn {
+    height: 32px; padding: 0 10px 0 8px; border-radius: 16px; border: 0; cursor: pointer;
+    background: #f3f4f6; color: #4b5563; font: inherit; font-size: 12px; font-weight: 500; line-height: 1;
+    display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+    transition: background .15s, color .15s, opacity .15s;
+  }
+  .hall-media-btn:hover { background: #e8eaee; color: #2974ff; }
+  .hall-media-btn.is-on { background: #ecfdf5; color: #059669; }
+  .hall-media-btn.is-busy, .hall-media-btn:disabled { opacity: .55; cursor: not-allowed; }
+  .send-btn:disabled, .icon-btn:disabled { opacity: .55; cursor: not-allowed; }
+  textarea:disabled { cursor: not-allowed; }
+
+  /* 窄屏 / 矮屏适配 */
+  @media (max-width: 360px) {
+    .hall-media-label, .hall-chip-label { display: none; }
+    .hall-media-btn { padding: 0 8px; }
+    .hall-chip-btn { padding: 0 7px; }
+    .hall-bar, .hall-scroll, .hall-people, .hall-video { padding-left: 8px; padding-right: 8px; }
+    .hm-img { max-width: 160px; max-height: 160px; }
+  }
+  @media (max-height: 520px) {
+    .hall-people { padding-top: 4px; padding-bottom: 4px; }
+    .hp-name { display: none; }
+    .hp-mic { top: 20px; }
+    .hall-video { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
 </style>
 </head>
 <body>
@@ -376,32 +589,87 @@
       </div>
     </header>
 
-    <div id="list"></div>
+    <!-- [119] 页签：大厅 / 私聊客服（hall.js 确认大厅开启后显示，默认大厅；未启用大厅时只显示私聊） -->
+    <nav class="tabs" id="tabs" role="tablist" aria-label="会话类型" hidden>
+      <button class="tab" id="tabHall" type="button" role="tab" aria-selected="false" aria-controls="hallPane">大厅<span class="tab-count" id="tabHallCount"></span><span class="tab-dot" id="tabHallDot" hidden></span></button>
+      <button class="tab" id="tabPrivate" type="button" role="tab" aria-selected="true" aria-controls="privatePane">私聊客服<span class="tab-dot" id="tabPrivateDot" hidden></span></button>
+    </nav>
 
-    <footer>
-      <div class="input-wrap">
-        <!-- [039]/[040] 多文件预览队列：默认隐藏，addPendingFile 时显示 -->
-        <div id="pendingList" class="pending-list"></div>
-        <textarea id="input" placeholder="输入消息，回车发送，Shift+回车换行"></textarea>
-      </div>
-      <div class="actions">
-        <div>
-          <button class="icon-btn" id="fileBtn" title="发送附件 / 图片">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
-            </svg>
-          </button>
-          <input type="file" id="fileInput" multiple style="display:none">
-          <button class="voice-btn-pill" id="voiceBtn" title="语音通话">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
-            </svg>
-            <span class="voice-btn-hint" id="voiceBtnHint">直接呼叫客服</span>
-          </button>
+    <!-- [119] 多人大厅页（逻辑见 hall.js） -->
+    <section class="pane hall-pane" id="hallPane" role="tabpanel" aria-labelledby="tabHall" hidden>
+      <div class="hall-bar">
+        <div class="hall-bar-status">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span id="hallStatusText">正在进入大厅…</span>
         </div>
-        <button class="send-btn" id="sendBtn">发送</button>
+        <button class="hall-chip-btn" id="hallMuteBtn" type="button" aria-pressed="false" title="静音大厅（只影响本机播放）"><span class="hall-btn-ico"></span><span class="hall-chip-label" id="hallMuteLabel">静音大厅</span></button>
       </div>
-    </footer>
+      <div class="hall-people" id="hallPeople" aria-label="大厅成员" hidden></div>
+      <div class="hall-video" id="hallVideo" aria-label="大厅视频" hidden></div>
+      <div class="hall-notice" id="hallNotice" role="status" aria-live="polite" hidden>
+        <span class="hall-notice-text" id="hallNoticeText"></span>
+        <button class="hall-notice-btn" id="hallNoticeBtn" type="button" hidden></button>
+      </div>
+      <div class="hall-scroll" id="hallScroll">
+        <div class="hall-privacy">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <span>大厅消息所有人可见，订单号、账号等隐私请到<button class="hall-link-btn" id="hallGoPrivate" type="button">私聊客服</button></span>
+        </div>
+        <button class="hall-more" id="hallMore" type="button" hidden>查看更早的消息</button>
+        <div id="hallMsgs"></div>
+      </div>
+      <button class="hall-new" id="hallNewBtn" type="button" hidden></button>
+      <div class="hall-toast" id="hallToast" role="alert" hidden></div>
+      <footer>
+        <div class="input-wrap">
+          <div id="hallPendingList" class="pending-list"></div>
+          <textarea id="hallInput" maxlength="1000" placeholder="在大厅发言，所有人可见；回车发送"></textarea>
+        </div>
+        <div class="actions">
+          <div class="hall-tools">
+            <button class="icon-btn" id="hallFileBtn" type="button" title="发送图片 / 文件">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            </button>
+            <input type="file" id="hallFileInput" multiple hidden>
+            <button class="hall-media-btn" id="hallMicBtn" type="button" aria-pressed="false" disabled><span class="hall-btn-ico"></span><span class="hall-media-label" id="hallMicLabel">开麦</span></button>
+            <button class="hall-media-btn" id="hallCamBtn" type="button" aria-pressed="false" hidden disabled><span class="hall-btn-ico"></span><span class="hall-media-label" id="hallCamLabel">摄像头</span></button>
+          </div>
+          <button class="send-btn" id="hallSendBtn" type="button">发送</button>
+        </div>
+      </footer>
+      <!-- 远端大厅音频挂载点（挂件收起时也继续播放） -->
+      <div id="hallAudioSink" hidden></div>
+    </section>
+
+    <!-- 私聊客服页（原有一对一会话，结构与逻辑不变） -->
+    <section class="pane" id="privatePane" role="tabpanel" aria-labelledby="tabPrivate">
+      <div id="list"></div>
+
+      <footer>
+        <div class="input-wrap">
+          <!-- [039]/[040] 多文件预览队列：默认隐藏，addPendingFile 时显示 -->
+          <div id="pendingList" class="pending-list"></div>
+          <textarea id="input" placeholder="输入消息，回车发送，Shift+回车换行"></textarea>
+        </div>
+        <div class="actions">
+          <div>
+            <button class="icon-btn" id="fileBtn" title="发送附件 / 图片">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+              </svg>
+            </button>
+            <input type="file" id="fileInput" multiple style="display:none">
+            <button class="voice-btn-pill" id="voiceBtn" title="语音通话">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/>
+              </svg>
+              <span class="voice-btn-hint" id="voiceBtnHint">直接呼叫客服</span>
+            </button>
+          </div>
+          <button class="send-btn" id="sendBtn">发送</button>
+        </div>
+      </footer>
+    </section>
 
     <!-- 语音通话浮窗（覆盖在 widget 顶部，呼叫中/通话中显示） -->
     <div id="voicePanel" class="voice-panel" style="display:none">
@@ -423,6 +691,9 @@
     </div>
   </div>
 
+<!-- [119] 大厅模块须先于 chat.js 执行（defer 按书写顺序执行）；livekit-client 由 hall.js 空闲时按需加载 -->
+<script src="hall-core.js" defer></script>
+<script src="hall.js" defer></script>
 <script src="/chat.js" defer></script>
 </body>
 </html>

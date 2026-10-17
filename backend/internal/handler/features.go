@@ -586,6 +586,10 @@ func (h *HTTP) SetVisitorBlocked(c *gin.Context) {
 		h.serverError(c, "set_visitor_blocked_failed", err)
 		return
 	}
+	// [119] 大厅静默：拉黑立即收回其开麦/摄像头权限并释放名额
+	if h.hall != nil {
+		h.hall.OnVisitorBlocked(vid, r.Blocked)
+	}
 	action := "unblock_visitor"
 	if r.Blocked {
 		action = "block_visitor"

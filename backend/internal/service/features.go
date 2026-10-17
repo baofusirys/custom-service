@@ -249,6 +249,7 @@ func (s *Service) StartMaintenance(ctx context.Context) {
 				s.runPurgeExpired(ctx)
 			case <-cleanTimer.C:
 				s.runAutoClean(ctx)
+				s.runHallCleanup(ctx)
 				cleanTimer.Reset(time.Until(nextBeijingClock(time.Now(), autoCleanHour, autoCleanMinute)))
 			}
 		}
@@ -325,6 +326,32 @@ func (s *Service) runPurgeExpired(ctx context.Context) {
 	if total.Conversations > 0 {
 		s.store.AuditLog(context.Background(), "system", "recycle_purge", "expired",
 			fmt.Sprintf("{\"conversations\":%d,\"messages\":%d,\"files\":%d}", total.Conversations, total.Messages, total.Files), "")
+	}
+}
+
+// runHallCleanup [119] 每日清理 30 天前的大厅消息与大厅附件（数据库记录 + 磁盘文件），分批短事务、批间让出 IO。
+func (s *Service) runHallCleanup(ctx context.Context) {
+	if !s.acquireJobLock(ctx, "hall_cleanup", 20*time.Hour) {
+		return
+	}
+	runID := uuid.NewString()
+	start := time.Now()
+	s.bizLog.Info("job_hall_cleanup_start", zap.String("run_id", runID))
+	jctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+	res, jobErr := s.purgeHallBefore(jctx, s.store, store.HallDefaultRoom, time.Now().Add(-store.HallRetention))
+	messages, files, removed := res.Messages, res.FileRecords, res.FilesRemoved
+	fields := []zap.Field{zap.String("run_id", runID), zap.Int("messages", messages), zap.Int("file_records", files),
+		zap.Int("files_removed", removed), zap.Int64("duration_ms", time.Since(start).Milliseconds())}
+	if jobErr != nil {
+		s.bizLog.Error("job_hall_cleanup_failed", append(fields, zap.Error(jobErr))...)
+	} else {
+		s.bizLog.Info("job_hall_cleanup_done", fields...)
+	}
+	// 失败前已删除的部分同样留审计（数据已不可恢复，必须可追溯）
+	if messages > 0 || files > 0 {
+		s.store.AuditLog(context.Background(), "system", "hall_cleanup", "retention_days=30",
+			fmt.Sprintf(`{"messages":%d,"file_records":%d,"files_removed":%d}`, messages, files, removed), "")
 	}
 }
 

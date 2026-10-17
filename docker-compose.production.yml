@@ -100,6 +100,11 @@ services:
       TURN_STATIC_AUTH_SECRET: ${TURN_STATIC_AUTH_SECRET}
       TURN_LISTEN_PORT: ${TURN_LISTEN_PORT:-3478}
       TURN_TLS_PORT: ${TURN_TLS_PORT:-5349}
+      # [119] 多人大厅（LiveKit）：未设置 LIVEKIT_API_KEY 时大厅整体关闭，原有功能不受影响
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      LIVEKIT_INTERNAL_URL: ${LIVEKIT_INTERNAL_URL:-http://cs-livekit:7880}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL:-}
     volumes:
       - ${HOST_DATA_DIR:-/srv/cs-data}/logs/backend:/app/logs
       - ${HOST_DATA_DIR:-/srv/cs-data}/uploads:/app/uploads
@@ -144,6 +149,46 @@ services:
     volumes:
       - cs_ssl_data:/etc/coturn/ssl-src:ro
       - ${HOST_DATA_DIR:-/srv/cs-data}/logs/coturn:/var/log/coturn
+
+  # ============================================================
+  # [119] 多人大厅媒体服务（自托管 LiveKit v1.13.10，镜像以 UID 10001 非 root 运行）
+  #   - 信令 7880 只在容器内网：cs-nginx 反代 /lk/rtc，后端走 http://cs-livekit:7880（不写 ports）
+  #   - 媒体 7881/tcp、7882/udp 必须对公网开放（云安全组同步放行）；宿主端口必须与容器端口一致，
+  #     因为 ICE 候选里通告的就是 NODE_IP + 这两个端口，不能像 [044] 那样改成别的宿主端口
+  #   - 密钥只走环境变量：入口脚本由 LIVEKIT_API_KEY / LIVEKIT_API_SECRET 组装 LIVEKIT_KEYS，不打印任何值
+  #   - NODE_IP 复用 TURN_EXTERNAL_IP（服务器公网 IP），缺失或格式不对时容器拒绝启动
+  #   - 两个密钥都未设置：大厅关闭，本容器待机（不监听端口、不重启刷屏）
+  # ============================================================
+  livekit:
+    image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-livekit:${IMAGE_TAG:-0.7.2}
+    container_name: cs-livekit
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      NODE_IP: ${TURN_EXTERNAL_IP:-}
+    ports:
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    networks: [cs-net]
+    mem_limit: 512m
+    cpus: "1.0"
+    security_opt:
+      - "no-new-privileges:true"
+    cap_drop: [ALL]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+    healthcheck:
+      # 官方镜像为 alpine，busybox wget 探测 http://127.0.0.1:7880/（健康时 200 "OK"）
+      test: ["CMD", "/usr/local/bin/cs-livekit-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   nginx:
     image: ${REGISTRY_BASE:-ghcr.io/baofusirys}/cs-nginx:${IMAGE_TAG:-0.7.2}

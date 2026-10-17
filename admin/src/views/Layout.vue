@@ -3,6 +3,7 @@ import { useRouter, RouterView, useRoute } from 'vue-router'
 import { useSession } from '../store/session'
 import { computed } from 'vue'
 import http from '../api/http'
+import { leaveHallBeforeLogout } from '../modules/hallSession'
 
 const router = useRouter()
 const route = useRoute()
@@ -10,6 +11,8 @@ const session = useSession()
 const active = computed(() => route.path)
 
 async function logout() {
+  // [119] 先离开多人大厅（断开媒体、取消订阅、释放摄像头名额），再让登录态失效
+  await leaveHallBeforeLogout()
   try { await http.post('/agent/logout') } catch (_) {}
   session.clear()
   router.push('/login')
@@ -22,6 +25,7 @@ async function logout() {
       <div style="color:#fff;text-align:center;padding:18px;font-size:16px;letter-spacing:1px">客服工作台</div>
       <el-menu :default-active="active" router background-color="#001529" text-color="#bfcbd9" active-text-color="#409EFF">
         <el-menu-item index="/console">在线会话</el-menu-item>
+        <el-menu-item index="/hall">多人大厅</el-menu-item>
         <el-menu-item index="/history">历史记录</el-menu-item>
         <el-menu-item index="/quick-replies">快捷回复</el-menu-item>
         <el-menu-item index="/blocked">黑名单</el-menu-item>

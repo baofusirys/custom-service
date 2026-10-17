@@ -30,8 +30,15 @@ page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
 page.on('response', (r) => { if (r.url().includes('/api/') && r.status() >= 500) problems.push('http ' + r.status() + ' ' + r.url()); });
 const shot = (n) => page.screenshot({ path: SHOTS + '/' + n + '.png' });
 const listText = () => page.locator('#list').innerText();
+// [119] 挂件默认显示「大厅」页签；本脚本覆盖一对一私聊，加载后切到「私聊客服」页签
+const toPrivate = async () => {
+  await page.waitForSelector('#tabPrivate', { timeout: 15000 });
+  if ((await page.getAttribute('#tabPrivate', 'aria-selected')) !== 'true') await page.click('#tabPrivate');
+  await page.waitForSelector('#input', { state: 'visible', timeout: 10000 });
+};
 
 await page.goto(BASE + '/widget/chat.html?site=default');
+await toPrivate();
 await page.waitForFunction(() => /已连接|在线/.test(document.getElementById('status').textContent || ''), null, { timeout: 15000 }).catch(() => {});
 const marker = 'WEB' + randomUUID().slice(0, 6);
 await page.fill('#input', '访客网页测试 ' + marker);
@@ -77,6 +84,7 @@ const afterRecall = await listText();
 check('访客端显示「客服撤回了一条消息」且不再显示原文', recalled && !afterRecall.includes('这条客服消息将被撤回'), afterRecall.slice(-200));
 await shot('v02-recalled');
 await page.reload();
+await toPrivate();
 await sleep(2500);
 const afterReload = await listText();
 check('刷新后撤回的消息仍不显示原文', !afterReload.includes('这条客服消息将被撤回') && afterReload.includes(marker), afterReload.slice(-200));
@@ -88,6 +96,7 @@ const cleared = await page.waitForFunction(() => document.body.innerText.include
 check('在线访客聊天区立即清空', cleared && !(await listText()).includes(marker));
 await shot('v03-cleared');
 await page.reload();
+await toPrivate();
 await sleep(2500);
 check('刷新后本地缓存也已清空', !(await listText()).includes(marker));
 await page.fill('#input', '清空后的新消息 ' + marker);

@@ -82,6 +82,19 @@
   var hostTitle = '';
   var pageReported = ''; // 已经上报过的 URL，避免重复发
 
+  // ====== [119] 多人大厅桥接 ======
+  // 大厅逻辑在 hall.js（window.CSHall），这里只把令牌、WS 发送、上传、大图查看、时间格式化等公共能力借给它，
+  // 并把 hall_* 信封转交过去。hall.js 不存在或出错时私聊功能完全不受影响。
+  var hall = null;
+  var lastPublicSettings = null;
+  function hallCall(method) {
+    if (!hall || typeof hall[method] !== 'function') return undefined;
+    try { return hall[method].apply(hall, Array.prototype.slice.call(arguments, 1)); }
+    catch (e) { try { console.warn('[cs-widget] hall.' + method, e); } catch (_) {} return undefined; }
+  }
+  // 私聊页是否正在显示（未启用大厅时始终为 true）：决定客服消息是否立即回「已读」
+  function privateVisible() { return hallCall('isPrivateVisible') !== false; }
+
   // ====== DOM ======
   var listEl = document.getElementById('list');
   var inputEl = document.getElementById('input');
@@ -168,6 +181,7 @@
     if (voice.state !== 'idle') return;
     if (!alive) { renderSys('未连接，无法呼叫'); return; }
     voice.state = 'ringing';
+    hallCall('onVoiceState', voice.state);   // [119] 私聊通话期间暂停大厅麦克风与播放
     voice.callId = 'call-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
     // 并行：拿麦克风同时刷 TURN 凭证（凭证刷新 ~50ms 不阻塞用户感知）
     await fetchTurnCredential();
@@ -175,6 +189,7 @@
       voice.localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
       voice.state = 'idle';
+      hallCall('onVoiceState', voice.state);
       renderSys('无法访问麦克风：' + (e.message || e));
       return;
     }
@@ -317,11 +332,12 @@
     if (voice.timer) { clearTimeout(voice.timer); clearInterval(voice.timer); voice.timer = null; }
     if (voice.remoteAudio) voice.remoteAudio.srcObject = null;
     voice.state = 'ended';
+    hallCall('onVoiceState', voice.state);
     voice.callId = null;
     voice.remoteAgent = null;
     voiceSetStatus(reason || '通话结束', 'voice-panel--ended');
     setTimeout(function () {
-      if (voice.state === 'ended') { voice.state = 'idle'; voiceHidePanel(); }
+      if (voice.state === 'ended') { voice.state = 'idle'; voiceHidePanel(); hallCall('onVoiceState', voice.state); }
     }, 2500);
   }
 
@@ -718,6 +734,8 @@
 
   function applySettings(data) {
     if (!data) return;
+    lastPublicSettings = data;
+    hallCall('onSettings', data);   // [119] hall_enabled / hall_video_enabled
     notifySound = data.notify_sound || 'classic';
     if (data.widget_title) {
       var titleEl = document.querySelector('header .header-title');
@@ -809,6 +827,7 @@
       loadHistoryFromCache();
       bootstrapRetry = 0;  // [058] 成功重置
       connectWS();
+      hallCall('onSessionReady');   // [119] 会话就绪后由大厅模块在空闲时自动入厅
     } catch (e) {
       // [058] 普通失败用指数退避（5s→8s→12.8s→20.5s→cap 30s）
       var bf = Math.min(30000, 5000 * Math.pow(1.6, bootstrapRetry++));
@@ -1092,11 +1111,15 @@
       }, 30000);
       // WSS 上线后立即上报当前页面（如果 page_info 已经就绪）
       reportPageView();
+      hallCall('onWSOpen');   // [119] 重连后重新订阅大厅广播
     };
     ws.onmessage = function (ev) {
       var env;
       try { env = JSON.parse(ev.data); } catch { return; }
       if (env.type === 'pong') return;
+      // [119] 大厅信封与大厅请求的错误回执交给大厅模块，不进入私聊消息流
+      if (typeof env.type === 'string' && env.type.indexOf('hall_') === 0) { hallCall('onEnvelope', env); return; }
+      if (env.type === 'error' && hallCall('ownsMessageId', env.id) === true) { hallCall('onEnvelope', env); return; }
       if (env.type === 'hello') { renderSys('您已接入客服，请描述您的问题'); return; }
       if (env.type === 'error') { renderSys('系统：' + (env.content || '')); return; }
       if (env.type === 'read') {
@@ -1148,9 +1171,11 @@
           unread++;
           parent.postMessage({ __cs: 1, type: 'unread', count: unread }, '*');
         } else if (isWidgetOpen) {
-          // widget 当前是打开的，访客看到了客服消息 → 立即发 read 通知客服
-          if (isAgentMessage) sendReadAck(m.id);
+          // widget 当前是打开的且正在看私聊页，访客看到了客服消息 → 立即发 read 通知客服
+          // [119] 正在看大厅页时不回已读，切回私聊页时再回（见 onPrivateShown）
+          if (isAgentMessage && privateVisible()) sendReadAck(m.id);
         }
+        if (!duplicate && isAgentMessage) hallCall('onPrivateIncoming');   // [119] 私聊页签未读点
       }
     };
     ws.onclose = function () {
@@ -1159,6 +1184,7 @@
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
       setStatus('已断开，重连中', false);
       hideAgentTyping();
+      hallCall('onWSClose');
       scheduleReconnect();  // [054] 走统一去重入口，不再裸 setTimeout
     };
     // [054] onerror 不主动 close —— 浏览器握手失败时会同时 fire onerror + onclose，
@@ -1280,21 +1306,40 @@
     }
   }
 
+  // 公共上传：私聊与大厅共用同一个 /api/upload（大厅额外带 scope=hall）。
+  // 失败抛出带 code/status 的 Error，由调用方决定提示方式。
+  async function uploadFileRaw(file, extraFields) {
+    var fd = new FormData();
+    fd.append('file', file);
+    fd.append('uploader', 'visitor');
+    if (extraFields) {
+      Object.keys(extraFields).forEach(function (k) {
+        if (/^[a-z_]{1,32}$/.test(k)) fd.append(k, String(extraFields[k]));
+      });
+    }
+    var r = await fetch(httpBase + '/api/upload', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token },
+      body: fd
+    });
+    var data;
+    try { data = await r.json(); } catch (e) { data = { code: -1, msg: '上传失败（HTTP ' + r.status + '）' }; }
+    if (!data || data.code !== 0) {
+      var err = new Error((data && data.msg) || '上传失败');
+      err.code = data ? data.code : -1;
+      err.status = r.status;
+      err.data = data && data.data && typeof data.data === 'object' ? data.data : null;   // 如大厅禁入的 retry_after
+      throw err;
+    }
+    return data;
+  }
+
   // 公共上传函数，文件选择和粘贴两个入口共用
   async function uploadAndSendFile(file) {
     if (!file) return;
     if (!alive) { renderSys('未连接，无法上传'); return; }
-    var fd = new FormData();
-    fd.append('file', file);
-    fd.append('uploader', 'visitor');
     try {
-      var r = await fetch(httpBase + '/api/upload', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + token },
-        body: fd
-      });
-      var data = await r.json();
-      if (data.code !== 0) throw new Error(data.msg);
+      var data = await uploadFileRaw(file);
       var messageID = newMessageID();
       ws.send(JSON.stringify({
         type: 'chat', conv: convID, id: messageID, content: '',
@@ -1360,24 +1405,63 @@
 
   // 接收 loader.js 通知的 widget 开关状态 / 宿主页面信息
   window.addEventListener('message', function (ev) {
-    if (!ev.data || ev.data.__cs !== 1) return;
+    // 只接受直接父窗口（嵌入本挂件的宿主页 loader.js）发来的消息：宿主页里的其他 iframe、
+    // 弹出窗口等第三方脚本伪造的 widget_state / page_info 一律忽略
+    if (!ev || ev.source !== window.parent || window.parent === window) return;
+    if (!ev.data || typeof ev.data !== 'object' || ev.data.__cs !== 1 || typeof ev.data.type !== 'string') return;
     if (ev.data.type === 'widget_state') {
       isWidgetOpen = !!ev.data.open;
       if (isWidgetOpen) {
         unread = 0;
         parent.postMessage({ __cs: 1, type: 'unread', count: 0 }, '*');
-        // widget 刚打开：访客看到了所有客服消息 → 发 read 通知客服
-        sendReadAck();
-        // 自动跳到最新消息（不让访客看到上次的滚动位置，省去手动下拉）
-        scrollToBottom();
+        // widget 刚打开且显示私聊页：访客看到了所有客服消息 → 发 read 通知客服
+        if (privateVisible()) {
+          sendReadAck();
+          // 自动跳到最新消息（不让访客看到上次的滚动位置，省去手动下拉）
+          scrollToBottom();
+        }
       }
+      hallCall('onWidgetState', isWidgetOpen);
     }
+    // [119] 宿主页大厅命令（开始收听 / 切到大厅），由大厅模块校验来源窗口、origin 与结构
+    if (ev.data.type === 'hall_cmd') hallCall('onHostCommand', ev);
     if (ev.data.type === 'page_info') {
-      hostURL = ev.data.url || '';
-      hostTitle = ev.data.title || '';
+      hostURL = typeof ev.data.url === 'string' ? ev.data.url.slice(0, 2048) : '';
+      hostTitle = typeof ev.data.title === 'string' ? ev.data.title.slice(0, 256) : '';
       reportPageView();
     }
   });
+
+  // [119] 挂接大厅模块（chat.html 中 hall-core.js / hall.js 先于本文件执行）
+  if (window.CSHall && typeof window.CSHall.attach === 'function') {
+    hall = window.CSHall;
+    hallCall('attach', {
+      httpBase: httpBase,
+      siteID: siteID,
+      storeKey: STORE_KEY,
+      getToken: function () { return token; },
+      isWSOpen: function () { return !!(alive && ws && ws.readyState === WebSocket.OPEN); },
+      sendWS: function (obj) {
+        if (!alive || !ws || ws.readyState !== WebSocket.OPEN) return false;
+        try { ws.send(JSON.stringify(obj)); return true; } catch (e) { return false; }
+      },
+      upload: uploadFileRaw,
+      openImage: openImageLightbox,
+      fmtMsgTime: fmtMsgTime,
+      fmtAbs: fmtAbs,
+      postToParent: function (msg, targetOrigin) {
+        try { if (window.parent && window.parent !== window) window.parent.postMessage(msg, targetOrigin || '*'); } catch (e) {}
+      },
+      getPublicSettings: function () { return lastPublicSettings; },
+      // 直接打开 chat.html（不在 iframe 中）时视为一直展开
+      isWidgetOpen: function () { return isWidgetOpen || window.parent === window; },
+      // 切回私聊页：补发已读并滚到最新
+      onPrivateShown: function () {
+        if (isWidgetOpen || window.parent === window) sendReadAck();
+        scrollToBottom();
+      }
+    });
+  }
 
   bootstrap();
 })();

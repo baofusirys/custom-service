@@ -5,6 +5,9 @@ import { readFileSync } from 'node:fs'
 import { webcrypto } from 'node:crypto'
 
 const SCRIPT = readFileSync(new URL('../../public/chat.js', import.meta.url), 'utf8')
+// [119] 大厅模块：与 chat.html 中的书写顺序一致，先 hall-core.js、hall.js，最后 chat.js
+const HALL_CORE = readFileSync(new URL('../../public/hall-core.js', import.meta.url), 'utf8')
+const HALL_UI = readFileSync(new URL('../../public/hall.js', import.meta.url), 'utf8')
 
 class FakeClassList {
   constructor(el) { this.el = el }
@@ -116,7 +119,9 @@ class FakeDocument {
   getElementById(id) { return this.byId[id] || null }
   querySelector() { return null }
   addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn) }
-  removeEventListener() {}
+  removeEventListener(type, fn) { this.listeners[type] = (this.listeners[type] || []).filter(f => f !== fn) }
+  // 模拟文档级事件（如用户点击页面任意处）
+  dispatch(type, event = {}) { for (const fn of [...(this.listeners[type] || [])]) fn({ type, ...event }) }
   execCommand() { return true }
 }
 
@@ -141,8 +146,11 @@ class FakeClock {
       let next = null
       for (const [id, t] of this.timers) if (t.at <= target && (!next || t.at < next.at)) { nextId = id; next = t }
       if (!next) break
-      this.now = next.at
-      if (next.every) next.at += next.every
+      // 时钟只前进不后退：测试里手动把 now 拨快后，早先排期的到期定时器在“当前时刻”触发（与浏览器一致），
+      // 不能把 now 拨回定时器的原定时刻，否则之后读取的 Date.now() 会倒退
+      const firedAt = Math.max(this.now, next.at)
+      this.now = firedAt
+      if (next.every) next.at = firedAt + next.every
       else this.timers.delete(nextId)
       next.fn()
     }
@@ -150,7 +158,12 @@ class FakeClock {
   }
 }
 
-export async function bootWidget({ storage = {}, session = {}, now = Date.parse('2026-10-14T12:00:00Z') } = {}) {
+// 选项（[119] 新增，均为可选，不传时与原行为完全一致）：
+//   hall: true 时加载 hall-core.js + hall.js 并构造大厅页 DOM
+//   routes(url, opts, respond) 返回响应即覆盖默认的假接口
+//   globals 合并进沙箱全局（如假 LivekitClient、BroadcastChannel）
+//   settings 为 /api/visitor/settings 的 data
+export async function bootWidget({ storage = {}, session = {}, now = Date.parse('2026-10-14T12:00:00Z'), hall = false, routes = null, globals = {}, settings = {} } = {}) {
   const clock = new FakeClock(now)
   const doc = new FakeDocument()
   const el = (tag, id) => { const e = doc.createElement(tag); if (id) { e.id = id; doc.byId[id] = e } return e }
@@ -167,6 +180,40 @@ export async function bootWidget({ storage = {}, session = {}, now = Date.parse(
   for (const [tag, id] of [['button', 'sendBtn'], ['button', 'fileBtn'], ['input', 'fileInput'], ['span', 'status'], ['span', 'dot'],
     ['div', 'closeBtn'], ['button', 'voiceBtn'], ['button', 'voiceHangBtn'], ['audio', 'voiceRemoteAudio'], ['div', 'voicePanel'], ['span', 'voiceBtnHint']]) {
     footer.appendChild(el(tag, id))
+  }
+  if (hall) {
+    // 与 chat.html 中大厅页的 id / class 保持一致（只构造 hall.js 用到的节点）
+    const tabs = el('nav', 'tabs'); tabs.hidden = true
+    const tabHall = el('button', 'tabHall'); const tabPrivate = el('button', 'tabPrivate')
+    tabs.appendChild(tabHall); tabs.appendChild(tabPrivate)
+    tabHall.appendChild(el('span', 'tabHallCount'))
+    const hd = el('span', 'tabHallDot'); hd.hidden = true; tabHall.appendChild(hd)
+    const pd = el('span', 'tabPrivateDot'); pd.hidden = true; tabPrivate.appendChild(pd)
+    app.insertBefore(tabs, list)
+    const pane = el('section', 'hallPane'); pane.hidden = true
+    app.insertBefore(pane, list)
+    const priv = el('section', 'privatePane')
+    app.appendChild(priv)
+    const withIcon = (id, labelId) => { const b = el('button', id); const ico = doc.createElement('span'); ico.className = 'hall-btn-ico'; b.appendChild(ico); if (labelId) b.appendChild(el('span', labelId)); return b }
+    pane.appendChild(el('span', 'hallStatusText'))
+    pane.appendChild(withIcon('hallMuteBtn', 'hallMuteLabel'))
+    for (const id of ['hallPeople', 'hallVideo']) { const e = el('div', id); e.hidden = true; pane.appendChild(e) }
+    const notice = el('div', 'hallNotice'); notice.hidden = true; pane.appendChild(notice)
+    notice.appendChild(el('span', 'hallNoticeText'))
+    const nb = el('button', 'hallNoticeBtn'); nb.hidden = true; notice.appendChild(nb)
+    const scroll = el('div', 'hallScroll'); pane.appendChild(scroll)
+    scroll.appendChild(el('button', 'hallGoPrivate'))
+    const more = el('button', 'hallMore'); more.hidden = true; scroll.appendChild(more)
+    scroll.appendChild(el('div', 'hallMsgs'))
+    for (const id of ['hallNewBtn', 'hallToast']) { const e = el('div', id); e.hidden = true; pane.appendChild(e) }
+    pane.appendChild(el('div', 'hallPendingList'))
+    pane.appendChild(el('textarea', 'hallInput'))
+    pane.appendChild(el('button', 'hallFileBtn'))
+    pane.appendChild(el('input', 'hallFileInput'))
+    pane.appendChild(withIcon('hallMicBtn', 'hallMicLabel'))
+    const cam = withIcon('hallCamBtn', 'hallCamLabel'); cam.hidden = true; pane.appendChild(cam)
+    pane.appendChild(el('button', 'hallSendBtn'))
+    pane.appendChild(el('div', 'hallAudioSink'))
   }
 
   const sockets = []
@@ -190,7 +237,11 @@ export async function bootWidget({ storage = {}, session = {}, now = Date.parse(
   const respond = (body, status = 200) => ({ status, ok: status < 400, headers: { get: () => null }, json: async () => JSON.parse(JSON.stringify(body)) })
   async function fetch(url, opts) {
     fetchCalls.push({ url: String(url), opts })
-    if (String(url).includes('/api/visitor/settings')) return respond({ code: 0, data: {} })
+    if (routes) {
+      const custom = await routes(String(url), opts || {}, respond)
+      if (custom) return custom
+    }
+    if (String(url).includes('/api/visitor/settings')) return respond({ code: 0, data: settings })
     if (String(url).includes('/api/visitor/session')) {
       return respond({ code: 0, visitor_id: 'v-test', conversation: 'conv-1', visitor_token: 'tok-test', history_reset_at: 0, recalled_ids: [], ...session })
     }
@@ -225,10 +276,15 @@ export async function bootWidget({ storage = {}, session = {}, now = Date.parse(
     requestAnimationFrame: (fn) => { fn(); return 0 },
     addEventListener: (type, fn) => { (windowListeners[type] ||= []).push(fn) },
     removeEventListener() {},
+    ...globals,
   }
   sandbox.window = sandbox
   sandbox.self = sandbox
   vm.createContext(sandbox)
+  if (hall) {
+    vm.runInContext(HALL_CORE, sandbox, { filename: 'hall-core.js' })
+    vm.runInContext(HALL_UI, sandbox, { filename: 'hall.js' })
+  }
   vm.runInContext(SCRIPT, sandbox, { filename: 'chat.js' })
 
   const flush = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)) }
@@ -245,6 +301,11 @@ export async function bootWidget({ storage = {}, session = {}, now = Date.parse(
     flush,
     ws: () => sockets[sockets.length - 1],
     sockets,
+    sandbox,
+    parentWindow,
+    byId: (id) => doc.getElementById(id),
+    // 模拟窗口级事件（postMessage、pagehide 等）
+    dispatchWindow: (type, ev) => { for (const fn of windowListeners[type] || []) fn(ev) },
     listText: () => list.textContent,
     byClass: (name) => doc.body.querySelectorAll('.' + name),
     byMsgId: (id) => doc.body.querySelectorAll('[data-msg-id="' + id + '"]'),

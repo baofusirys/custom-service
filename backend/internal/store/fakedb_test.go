@@ -15,9 +15,10 @@ import (
 // 用于断言「每类一条批量 SQL、无逐行查询」、参数化占位符个数与参数一致、权限 SQL 分支等，不依赖真实 MySQL。
 
 type fakeResult struct {
-	cols []string
-	rows [][]driver.Value
-	err  error
+	cols     []string
+	rows     [][]driver.Value
+	err      error
+	affected int64 // [119] ExecContext 的影响行数
 }
 
 type fakeCall struct {
@@ -89,6 +90,23 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return nil, res.err
 	}
 	return &fakeRows{cols: res.cols, rows: res.rows}, nil
+}
+
+// ExecContext [119] 写语句同样记录并交给处理函数（返回 affected 行数）。
+func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	vals := make([]driver.Value, len(args))
+	for i, a := range args {
+		vals[i] = a.Value
+	}
+	c.f.mu.Lock()
+	c.f.calls = append(c.f.calls, fakeCall{query: query, args: vals})
+	h := c.f.handler
+	c.f.mu.Unlock()
+	res := h(query, vals)
+	if res.err != nil {
+		return nil, res.err
+	}
+	return driver.RowsAffected(res.affected), nil
 }
 
 type fakeTx struct{ f *fakeDB }

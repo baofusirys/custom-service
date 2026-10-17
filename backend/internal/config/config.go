@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/net/idna"
 
 	"github.com/custom-service/backend/internal/security"
 )
@@ -42,7 +45,21 @@ type Config struct {
 	// 与 coturn 容器共享同一个 secret，用 HMAC-SHA1 生成 password
 	TurnRealm  string
 	TurnSecret string
+
+	// [119] 多人大厅：自托管 LiveKit 媒体服务（未配置 LIVEKIT_API_KEY 时大厅整体关闭）
+	LiveKit LiveKitConfig
 }
+
+// LiveKitConfig 大厅媒体服务配置。APISecret 只在内存中用于签发/校验 JWT，任何日志都不得输出。
+type LiveKitConfig struct {
+	APIKey      string // LiveKit API Key（JWT 的 iss，非机密，但禁止占位值）
+	APISecret   string // LiveKit API Secret（≥32 字符随机）
+	InternalURL string // 后端调用 Twirp 服务端 API 的内网地址，默认 http://cs-livekit:7880
+	PublicURL   string // 下发给客户端的信令地址，默认 wss://<PUBLIC_DOMAIN>/lk
+}
+
+// Enabled 是否配置了 LiveKit（未配置时大厅关闭，不影响原有功能）。
+func (l LiveKitConfig) Enabled() bool { return l.APIKey != "" }
 
 type MySQLConfig struct {
 	Host     string
@@ -80,6 +97,12 @@ func Load() (*Config, error) {
 		BootstrapPassword: os.Getenv("ADMIN_BOOTSTRAP_PASSWORD"),
 		TurnRealm:         os.Getenv("TURN_REALM"),
 		TurnSecret:        os.Getenv("TURN_STATIC_AUTH_SECRET"),
+		LiveKit: LiveKitConfig{
+			APIKey:      strings.TrimSpace(os.Getenv("LIVEKIT_API_KEY")),
+			APISecret:   os.Getenv("LIVEKIT_API_SECRET"),
+			InternalURL: strings.TrimSpace(os.Getenv("LIVEKIT_INTERNAL_URL")),
+			PublicURL:   strings.TrimSpace(os.Getenv("LIVEKIT_PUBLIC_URL")),
+		},
 		MySQL: MySQLConfig{
 			Host:     defaultStr(os.Getenv("MYSQL_HOST"), "mysql"),
 			Port:     defaultStr(os.Getenv("MYSQL_PORT"), "3306"),
@@ -133,8 +156,72 @@ func Load() (*Config, error) {
 	if len(cfg.CORSAllowedOrigins) == 0 {
 		return nil, errors.New("CORS_ALLOWED_ORIGINS 必须至少配置一个明确来源")
 	}
+	if err := normalizeLiveKit(&cfg.LiveKit, cfg.PublicDomain); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
+}
+
+// liveKitKeyPattern LiveKit API Key 白名单：LIVEKIT_KEYS 以 "key: secret" 组装，禁止冒号、空白等破坏格式的字符。
+var liveKitKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{3,64}$`)
+
+// liveKitKeyPlaceholders LiveKit 文档/开发模式常见的示例 Key，生产一律拒绝。
+var liveKitKeyPlaceholders = map[string]bool{
+	"devkey": true, "apikey": true, "api_key": true, "key": true, "key1": true, "key2": true,
+	"test": true, "demo": true, "changeme": true, "your-api-key": true, "livekit": true,
+}
+
+// normalizeLiveKit [119] 大厅媒体服务配置自检：
+//   - LIVEKIT_API_KEY 为空：大厅关闭（main 打 WARN），其余字段不校验；
+//   - 非空：Key 必须合法且不是示例值，Secret 必须 ≥32 字符且不命中占位黑名单，地址必须合法，否则拒绝启动。
+//
+// 错误信息只写变量名，绝不包含变量值。
+func normalizeLiveKit(lk *LiveKitConfig, publicDomain string) error {
+	if lk.APIKey == "" {
+		lk.APISecret = ""
+		return nil
+	}
+	if !liveKitKeyPattern.MatchString(lk.APIKey) || liveKitKeyPlaceholders[strings.ToLower(lk.APIKey)] {
+		return errors.New("LIVEKIT_API_KEY 只允许 3-64 位字母、数字、下划线、中划线，且不能使用示例值")
+	}
+	if len(lk.APISecret) < 32 || isPlaceholder(lk.APISecret) || strings.ContainsAny(lk.APISecret, "\r\n") {
+		return errors.New("LIVEKIT_API_SECRET 必须是至少 32 个字符的随机强密钥（请用 openssl rand 生成）")
+	}
+	internal := lk.InternalURL
+	if internal == "" {
+		internal = "http://cs-livekit:7880"
+	}
+	iu, err := url.Parse(internal)
+	if err != nil || (iu.Scheme != "http" && iu.Scheme != "https") || iu.Host == "" || (iu.Path != "" && iu.Path != "/") ||
+		iu.RawQuery != "" || iu.User != nil || iu.Fragment != "" {
+		return errors.New("LIVEKIT_INTERNAL_URL 必须是不带路径的 http(s) 地址，例如 http://cs-livekit:7880")
+	}
+	lk.InternalURL = iu.Scheme + "://" + iu.Host
+	public := lk.PublicURL
+	if public == "" {
+		domain := strings.TrimSpace(publicDomain)
+		if domain == "" {
+			return errors.New("启用大厅时必须设置 LIVEKIT_PUBLIC_URL 或 PUBLIC_DOMAIN")
+		}
+		public = "wss://" + domain + "/lk"
+	}
+	pu, err := url.Parse(public)
+	if err != nil || (pu.Scheme != "wss" && pu.Scheme != "ws") || pu.Host == "" || pu.RawQuery != "" || pu.User != nil || pu.Fragment != "" {
+		return errors.New("LIVEKIT_PUBLIC_URL 必须是 ws(s) 地址，例如 wss://<域名>/lk")
+	}
+	// 中文域名（IDN）统一转成 punycode，客户端与浏览器 CSP 看到的都是 ASCII 主机名。
+	host, port := pu.Hostname(), pu.Port()
+	asciiHost, err := idna.Lookup.ToASCII(host)
+	if err != nil || asciiHost == "" {
+		return errors.New("LIVEKIT_PUBLIC_URL 的主机名不合法")
+	}
+	if port != "" {
+		asciiHost += ":" + port
+	}
+	pu.Host = asciiHost
+	lk.PublicURL = strings.TrimRight(pu.String(), "/")
+	return nil
 }
 
 func splitCSV(v string) []string {

@@ -65,11 +65,15 @@ import {
   parseParticipant,
 } from '../modules/typing'
 import { insertQuickReply } from '../modules/quickReply'
+import { useRoute, useRouter } from 'vue-router'
+import { consumeJumpTicket } from '../modules/privateChatJump'
 
 dayjs.extend(relativeTime)
 dayjs.locale('zh-cn')
 
 const session = useSession()
+const route = useRoute()
+const router = useRouter()
 const convs = ref([])
 // [065][067] 客服列表过滤模式：'all' 全部 / 'contacted' 已主动联系
 // 「已主动联系」判定：严格只信后端字段 has_visitor_msg
@@ -823,6 +827,7 @@ function scheduleConvsRefresh() {
 let convsTimer
 onMounted(async () => {
   await Promise.all([refreshConvs(), refreshStats(), loadSoundPref(), refreshSideTotals()])
+  openFromHallJump()   // [119] 大厅「私聊」跳转：一次性票据定位访客会话
   statusSync = new MessageStatusSync({
     agentID: session.agent?.id,
     onEvent: event => markStatus(event, event.status, false),
@@ -1383,6 +1388,19 @@ function onBubbleContextMenu(e, m) {
   if (!canRecall(m)) return
   e.preventDefault()
   recallMine(m)
+}
+
+// ---------- [119] 从多人大厅「私聊」跳转：URL 只带一次性票据，vid 从同源 localStorage 读取后立即删除 ----------
+function openFromHallJump() {
+  const nonce = typeof route.query.open === 'string' ? route.query.open : ''
+  if (!nonce) return
+  router.replace({ path: route.path, query: {} }).catch(() => {})
+  const vid = consumeJumpTicket(nonce)
+  if (!vid) {
+    ElMessage.warning('私聊跳转已失效，请回到大厅重新点击「私聊」')
+    return
+  }
+  openFromSearch({ visitor_id: vid })
 }
 
 // ---------- 全局搜索：点击结果打开并定位 ----------
