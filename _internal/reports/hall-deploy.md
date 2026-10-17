@@ -173,3 +173,9 @@ docker compose logs --tail=200 cs-backend cs-nginx cs-livekit 2>&1 | grep -E 'FA
 - **coturn 端口（2026-10-18 01:45 已处理，爷爷同意）**：同一 `DOCKER-USER` DROP 原先也拦着 coturn，外网 TCP 3478 不通、一对一语音 TURN 对公网不可用。已在 DROP 前新增注释为 `cs-coturn-media` 的 RETURN 规则：UDP/TCP 3478、TCP 5349、UDP 49152-49200（与轻量防火墙既有规则一致，写入 rules.v4，改前备份 `/srv/cs-backup/manual/host-iptables-*-before-coturn-20261018-014523*`）。外网实测 TCP 3478/5349 可连，浏览器经 `turn:…:3478`（UDP、TCP）均分配到 49152-49200 的中继候选。
 - **遗留**：coturn 的 TLS 证书（`turn-k7m2x9p3.xn--5kroo.com`，Let's Encrypt）已于 2026-08-23 过期且无自动续签（原续签依赖客服独立部署时的 80 端口，现 80/443 只对 EdgeOne 开放），`turns:…:5349` 握手失败；UDP/TCP 3478 中继不受影响。修复需改为 DNS 验证方式自动续签，待专项处理。
 - **爷爷本地 fakami 项目**：2026-10-18 已把 `server/docker-compose.yml`、`server/.env` 与服务器逐字节同步，`/srv/cs-data/.env` 补齐 `CS_LIVEKIT_API_KEY`、`CS_LIVEKIT_API_SECRET`，fakami 仓库提交 [186]（54cf7d2）、[187]（bcbbe9b，改回仓库镜像后再次同步）；其 `check-deployment.ps1 -Phase pre -ExpectedRunningServices 18` 0 失败。
+
+## 11. 敏感词告警邮件（[122]，北京时间 2026-10-18）
+
+- cs-backend 新增环境变量（`/fakami/docker-compose.yml`）：`HALL_ALERT_SMTP_HOST/PORT/USERNAME/PASSWORD`、`HALL_ALERT_MAIL_FROM` 引用主站已有的 `SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD/SMTP_FROM`（不复制密码），`HALL_ALERT_MAIL_TO` 引用 `CS_HALL_ALERT_MAIL_TO`（`/fakami/.env` 与 `/srv/cs-data/.env` 各一份）；加密方式不设，按端口推断（465→SSL，587→STARTTLS）。
+- 这些只是默认值：管理员在后台「系统设置 → 多人大厅 → 敏感词屏蔽 → 邮件通知」保存后，以后台值为准（SMTP 密码用 DATA_AES_KEY 派生子密钥加密存 settings 表，接口永不返回）。
+- 发件箱：每 15 秒检查，全局每 55 秒最多一封合并邮件；失败按 1/5/15/60 分钟重试，5 次后记 failed，状态见后台「拦截记录」。

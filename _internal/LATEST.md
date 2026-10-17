@@ -1,4 +1,4 @@
-### 当前版本：v0.9.1（已部署生产，含多人大厅）· App 3.2.0 (9) Flutter 版 · 2026-10-18（北京时间）
+### 当前版本：v0.9.2（已部署生产，含多人大厅与敏感词屏蔽）· App 3.2.0 (9) Flutter 版 · 2026-10-18（北京时间）
 
 > 本文件是维护交接的「第一站」。看完这一份再去看 `_internal/CHANGELOG.md`，别凭印象答。
 
@@ -14,10 +14,11 @@
   - 签名：免费 Personal Team `4JZ8K387NU`（唯一来源 `ios/Runner.xcodeproj` 的 `DEVELOPMENT_TEAM`），描述文件 7 天有效；当前手机上是 3.2.0 (9)（装机序号 4092，2026-10-18 01:31 安装，已回读确认），有效期至 `2026-10-21T02:25:04+08:00`。
   - 自动续签：App 仓库 `scripts/auto_reinstall.sh` + launchd `com.chengmeiran.customservice.autoinstall`（每天 9/14/21 点，已改指向 Flutter 脚本），日志 Mac `~/Library/Logs/custom_service_app/auto_reinstall.log`（旧版历史在同目录 `auto_reinstall-swift-history.log`）；钥匙串口令见 Mac `~/.config/custom_service_swift/keychain_password`（600，不入库）。
   - 待办：轮换 Mac 登录密码（旧口令曾明文入 Mac 本地 git 历史）后同步更新口令文件。
-- **发布到生产/下游**：v0.9.1 已推送 GitHub（标签 v0.9.1）并于 2026-10-18 01:13 部署生产（只更新 8 个 cs 容器含新增 cs-livekit，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.9.1-20261018-005706.sql.gz`）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代，大厅信令 `/lk/rtc`）。生产实例为腾讯云轻量应用服务器 `lhins-rba8ijgo`（ap-beijing-6）。
+- **发布到生产/下游**：v0.9.2 已推送 GitHub（标签 v0.9.2）并于 2026-10-18 02:43 部署生产（只更新 8 个 cs 容器，部署前手动备份 `/srv/cs-backup/manual/cs-before-0.9.2-20261018-024308.sql.gz`）；客服入口 `https://k7m2x9p3.卖号.com`（cs-nginx 经 fakami-caddy 反代，大厅信令 `/lk/rtc`）。生产实例为腾讯云轻量应用服务器 `lhins-rba8ijgo`（ap-beijing-6）。
   - **cs-livekit**：阿里云 ACR 仓库 `baofusir/cs-livekit` 已改为公开（2026-10-18），与其它 cs-* 一样随 `IMAGE_TAG` 拉取；CI 首次推送的新仓库默认私有，需改公开。详见 `_internal/reports/hall-deploy.md` 第 10 节。
   - **媒体端口**：UDP 7882 / TCP 7881 已在轻量防火墙放行；宿主机 iptables `DOCKER-USER`（`/etc/iptables/rules.v4`）末尾 DROP 前有注释为 `cs-livekit-media`、`cs-coturn-media` 的放行规则（2026-10-18 起 coturn 3478/5349/49152-49200 也对公网可达）。turn 子域 TLS 证书已过期（TURNS 5349 不可用，待改 DNS 验证自动续签）。
-  - **本地 fakami 项目**：已于 2026-10-18 与服务器逐字节同步（fakami 提交 [186] 54cf7d2、[187] bcbbe9b，部署前检查需 `-ExpectedRunningServices 18`）。以后客服再升级，仍需同步 fakami 的 `server/.env`（`IMAGE_TAG`）与 `/srv/cs-data/.env`。
+  - **敏感词告警邮件**：默认值由 fakami 编排注入 cs-backend（`HALL_ALERT_*` 引用主站发货邮箱 `SMTP_*`，收件 `/fakami/.env` 的 `CS_HALL_ALERT_MAIL_TO`）；后台保存后以后台为准（SMTP 密码加密存 settings 表）。
+  - **本地 fakami 项目**：已于 2026-10-18 与服务器逐字节同步（fakami 提交 [186]~[188]，最新 2f21562；部署前检查需 `-ExpectedRunningServices 18`）。以后客服再升级，仍需同步 fakami 的 `server/.env`（`IMAGE_TAG`）与 `/srv/cs-data/.env`。
 - **待发布**：无。
 
 ## 当前部署坐标
@@ -77,6 +78,8 @@
 | 大厅开关与上限（视频、开麦、摄像头、人数） | 后台「系统设置 → 多人大厅」；校验在 `backend/internal/hall/settings.go` | `hall_*` 五个设置键 |
 | LiveKit 服务配置与入口校验 | `livekit/livekit.yaml` / `livekit/entrypoint.sh` | 全文 |
 | 公共限流（固定窗口） | `backend/internal/security/ratelimit.go` | `allow` |
+| 大厅敏感词识别规则与内置词库 | `backend/internal/textfilter/` | `textfilter.go` / `wordlists.go` |
+| 敏感词与告警邮件设置、发件箱 | `backend/internal/hall/filter_config.go` / `filter_runtime.go` | `hall_filter_*` / `hall_alert_*` 设置键 |
 
 ## 部署坐标
 - 部署方式：把整个仓库目录 rsync/sftp 上传到服务器后，进入目录执行 **`docker compose up -d --build`**，一条命令完成。
@@ -101,9 +104,9 @@
 ```
 
 ## 最近重大改动摘要（倒序，最新在上）
+- **[122] 2026-10-18（北京时间）大厅敏感词屏蔽与告警邮件（v0.9.2）**：访客广告/链接/色情/博彩/联系方式显示为 **，原文加密留存并经 kelili 邮箱发到管理员邮箱，后台可改。
 - **[119] 2026-10-18（北京时间）多人大厅上线（v0.9.1、App 3.2.0(9)）**：自托管 LiveKit；访客进站自动入厅、默认关麦能听；客服管理；视频开关；公共限流固定窗口修复；生产外网实测语音互通。
 - **[118] 2026-10-15（北京时间）App 3.1.0(8) 按新设计稿改版全部界面**：只改界面、功能不变，设计稿里本 App 没有的功能不加；新图标；真机已安装。
-- **[117] 2026-10-15（北京时间）修复客服消息串台**：服务端按客户端声明的会话投递并逐条校验、绝不改投；他人在线接待只读、离线可接管；App 3.0.1、网页后台同步；后端 0.8.2。
 
 ## 维护交接阅读顺序
 1. 本文件（`_internal/LATEST.md`）
